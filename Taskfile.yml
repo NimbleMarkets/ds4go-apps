@@ -1,0 +1,73 @@
+version: "3"
+
+vars:
+  CTX: '{{.CTX | default "32768"}}'
+  BACKEND: '{{.BACKEND | default "metal"}}'
+  DEBUG: '{{.DEBUG | default ""}}'
+
+tasks:
+  default:
+    desc: Build all the toys
+    cmds:
+      - task: build
+
+  tidy:
+    desc: Run go mod tidy
+    run: once
+    cmds:
+      - go mod tidy
+
+  build:
+    desc: Build all TUI binaries to ./bin/
+    deps: [tidy]
+    cmds:
+      - task: build:glyphpad
+
+  build:glyphpad:
+    desc: Build glyphpad binary
+    deps: [tidy]
+    cmds:
+      - go build -o ./bin/ds4go-glyphpad ./cmd/glyphpad
+
+  run:glyphpad:
+    desc: Run the glyphpad TUI
+    deps: [build]
+    cmds:
+      - |
+        args="--backend {{.BACKEND}} --ctx {{.CTX}}"
+        if [ -n "{{.DEBUG}}" ]; then args="$args --debug"; fi
+        ./bin/ds4go-glyphpad $args
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet ./...
+
+  fmt:
+    desc: Format all Go source files
+    cmds:
+      - gofmt -w .
+
+  fmt-check:
+    desc: Check formatting without modifying files (non-zero exit if unformatted)
+    cmds:
+      - cmd: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "gofmt: these files need formatting:"
+            echo "$files"
+            exit 1
+          fi
+
+  pre-push:
+    desc: Verify formatting, build, and vet before pushing
+    cmds:
+      - go mod tidy
+      - task: fmt-check
+      - go build ./...
+      - go vet ./...
+
+  clean:
+    desc: Remove built binary
+    cmds:
+      - rm -f ./bin/ds4go-glyphpad

@@ -1,0 +1,28 @@
+# .gitignore
+
+# Build output
+/bin/
+
+# Stray binaries built into the repo root
+/ds4go-playground
+
+# ds4 shared libraries dropped into lib/ (lib/README.md is kept)
+/lib/libds4.*
+*.so
+*.dylib
+*.dll
+
+# Model weights
+*.gguf
+
+# Go test/coverage artifacts
+*.log
+*.test
+*.out
+coverage.txt
+
+# Editor and OS noise
+.task
+.DS_Store
+.*.swp
+*~
