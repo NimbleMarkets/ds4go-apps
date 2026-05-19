@@ -4,7 +4,11 @@
 /bin/
 
 # Stray binaries built into the repo root
+/ds4go-toy-glyphpad
+/ds4go-toy-svgpad
 /ds4go-playground
+/glyphpad
+/svgpad
 
 # ds4 shared libraries dropped into lib/ (lib/README.md is kept)
 /lib/libds4.*
@@ -14,6 +18,9 @@
 
 # Model weights
 *.gguf
+
+# SVG in root
+/*.svg
 
 # Go test/coverage artifacts
 *.log

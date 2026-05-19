@@ -292,6 +292,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tokenCount = 0
 		m.stepN = -1
 		m.running = false
+		m.genCtx, m.genCancel = context.WithCancel(context.Background())
 		ch := make(chan tea.Msg, 64)
 		m.tokenCh = ch
 		go m.generate(ch)
@@ -1081,7 +1082,11 @@ func (m model) generate(ch chan tea.Msg) {
 	}
 	opts.OnToken = func(token int) {
 		if text, err := m.engine.TokenText(token); err == nil {
-			ch <- tokenMsg(text)
+			select {
+			case ch <- tokenMsg(text):
+			default:
+				// Channel full — drop token so Continue can check context.
+			}
 		}
 	}
 	opts.Context = m.genCtx

@@ -5,6 +5,10 @@ vars:
   BACKEND: '{{.BACKEND | default "metal"}}'
   DEBUG: '{{.DEBUG | default ""}}'
 
+env:
+  MODEL: '{{.MODEL | default ""}}'
+  LIB: '{{.LIB | default ""}}'
+
 tasks:
   default:
     desc: Build all the toys
@@ -22,21 +26,46 @@ tasks:
     deps: [tidy]
     cmds:
       - task: build:glyphpad
+      - task: build:svgpad
 
   build:glyphpad:
     desc: Build glyphpad binary
     deps: [tidy]
     cmds:
-      - go build -o ./bin/ds4go-glyphpad ./cmd/glyphpad
+      - go build -o ./bin/ds4go-toy-glyphpad ./cmd/glyphpad
 
   run:glyphpad:
     desc: Run the glyphpad TUI
-    deps: [build]
+    deps: [build:glyphpad]
     cmds:
       - |
         args="--backend {{.BACKEND}} --ctx {{.CTX}}"
+        if [ -n "{{.MODEL}}" ]; then args="$args --model {{.MODEL}}"; fi
+        if [ -n "{{.LIB}}" ]; then args="$args --lib {{.LIB}}"; fi
         if [ -n "{{.DEBUG}}" ]; then args="$args --debug"; fi
-        ./bin/ds4go-glyphpad $args
+        ./bin/ds4go-toy-glyphpad $args
+
+  build:svgpad:
+    desc: Build svgpad binary
+    deps: [tidy]
+    cmds:
+      - go build -o ./bin/ds4go-toy-svgpad ./cmd/svgpad
+
+  run:svgpad:
+    desc: Run the svgpad TUI
+    deps: [build:svgpad]
+    cmds:
+      - |
+        args="--backend {{.BACKEND}} --ctx {{.CTX}}"
+        if [ -n "{{.MODEL}}" ]; then args="$args --model {{.MODEL}}"; fi
+        if [ -n "{{.LIB}}" ]; then args="$args --lib {{.LIB}}"; fi
+        if [ -n "{{.DEBUG}}" ]; then args="$args --debug"; fi
+        ./bin/ds4go-toy-svgpad $args
+
+  log:
+    desc: Tail play.log in real time
+    cmds:
+      - tail -f play.log
 
   vet:
     desc: Run go vet
@@ -68,6 +97,6 @@ tasks:
       - go vet ./...
 
   clean:
-    desc: Remove built binary
+    desc: Remove built binaries
     cmds:
-      - rm -f ./bin/ds4go-glyphpad
+      - rm -f ./bin/ds4go-toy-glyphpad ./bin/ds4go-toy-svgpad
