@@ -15,6 +15,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go-playground/internal/ds4log"
+	"github.com/NimbleMarkets/ds4go-playground/internal/editmode"
+	"github.com/NimbleMarkets/ds4go-playground/internal/engineinit"
 	"github.com/NimbleMarkets/ntcharts/v2/canvas"
 )
 
@@ -43,21 +46,32 @@ type doneMsg struct {
 	ctxPos int // session token position, snapshotted in the generate goroutine
 }
 
+// engineReadyMsg is delivered from the goroutine that opens the ds4 engine
+// and session. The model holds nil engine/session until this lands.
+type engineReadyMsg engineinit.Result
+
 // ── model ────────────────────────────────────────────────────────────────────
 
 type model struct {
 	width, height    int
 	canvasW, canvasH int // locked canvas content size — the LLM's coordinate space
 
-	engine    *ds4.Engine
-	session   *ds4.Session
-	modelPath string
-	mtpPath   string
-	hasMTP    bool
-	mtpDraft  int
-	backend   string
-	workDir   string
-	showInfo  bool // ctrl+m info overlay is up
+	engine       *ds4.Engine  // nil until engineReadyMsg
+	session      *ds4.Session
+	lib          *ds4.Library      // resolved in main, used by Init's goroutine
+	engOpts      ds4.EngineOptions // captured to fire async open
+	engineStatus engineinit.Status // drives the header badge
+	engineErr    error             // set when StatusError
+	modelPath    string
+	mtpPath      string
+	hasMTP       bool
+	mtpDraft     int
+	backend      string
+	workDir      string
+	showInfo  bool           // info overlay is up (m in command mode)
+	showLog   bool           // libds4 log overlay is up (ctrl+n)
+	logBuf    *ds4log.Buffer // captured libds4 diagnostics
+	logScroll int            // lines scrolled back from the tail (0 = follow)
 
 	history    []chatMsg
 	rawBuf     []byte // raw LLM response for the current turn
@@ -94,38 +108,46 @@ type model struct {
 	debug  bool
 }
 
-func newModel(engine *ds4.Engine, session *ds4.Session, modelPath, mtpPath string, hasMTP bool, mtpDraft int, backend string, logger *log.Logger, debug bool) model {
+func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPath, mtpPath, backend string, logger *log.Logger, logBuf *ds4log.Buffer, debug bool) model {
 	ti := textinput.New()
 	ti.Placeholder = "Ask anything..."
 	ti.Focus()
 
 	wd, _ := os.Getwd()
 	return model{
-		engine:       engine,
-		session:      session,
+		lib:          lib,
+		engOpts:      engOpts,
+		engineStatus: engineinit.StatusInit,
 		modelPath:    modelPath,
 		mtpPath:      mtpPath,
-		hasMTP:       hasMTP,
-		mtpDraft:     mtpDraft,
 		backend:      backend,
 		workDir:      wd,
 		parser:       NewParser(),
 		canvas:       canvas.New(40, 20),
 		input:        ti,
-		statusText:   "Ready",
+		statusText:   "GPU initializing…",
 		showThinking: true,
 		thinkBoxH:    defaultThinkBox,
 		thinkMode:    ds4.ThinkNone,
 		stepN:        -1,
-		ctxSize:      session.Ctx(),
+		ctxSize:      ctxSize,
 		logger:       logger,
+		logBuf:       logBuf,
 		debug:        debug,
 	}
 }
 
 // ── BubbleTea interface ───────────────────────────────────────────────────────
 
-func (m model) Init() tea.Cmd { return nil }
+func (m model) Init() tea.Cmd {
+	// Open the engine and session in the goroutine bubbletea spawns for
+	// this Cmd. Until engineReadyMsg lands the TUI is fully interactive
+	// but submissions are gated; the badge shows the init/ready state.
+	lib, opts, ctxSize := m.lib, m.engOpts, m.ctxSize
+	return func() tea.Msg {
+		return engineReadyMsg(engineinit.Open(lib, opts, ctxSize))
+	}
+}
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
@@ -141,31 +163,118 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyPressMsg:
-		if m.showInfo { // info overlay is up — any key dismisses it
+		// Log overlay has its own scrollable input handling — only esc
+		// (or quit) leaves it; the rest of the key set scrolls. Info
+		// stays "any-key-dismisses" since it's not scrollable.
+		if m.showLog {
+			switch msg.String() {
+			case "ctrl+c", "ctrl+q":
+				return m, tea.Quit
+			case "esc":
+				m.showLog = false
+				m.logScroll = 0
+			case "up":
+				m.logScroll++
+			case "down":
+				if m.logScroll > 0 {
+					m.logScroll--
+				}
+			case "pgup":
+				m.logScroll += m.logPageSize()
+			case "pgdown":
+				m.logScroll -= m.logPageSize()
+				if m.logScroll < 0 {
+					m.logScroll = 0
+				}
+			}
+			return m, nil
+		}
+		if m.showInfo {
 			if s := msg.String(); s == "ctrl+c" || s == "ctrl+q" {
 				return m, tea.Quit
 			}
 			m.showInfo = false
 			return m, nil
 		}
+
+		// Keys that work in BOTH modes (edit and command).
 		switch msg.String() {
 		case "ctrl+c", "ctrl+q":
 			return m, tea.Quit
 
+		case "ctrl+n": // libds4 log overlay
+			m.showLog = true
+			return m, nil
+
 		case "esc":
+			// Generating → abort. Else if targeted → escape to command
+			// mode. In command mode esc is a no-op.
 			if m.generating && m.genCancel != nil {
 				m.genCancel()
 				m.statusText = "Aborting..."
+				return m, nil
+			}
+			if m.input.Focused() {
+				m.input.Blur()
+			}
+			return m, nil
+
+		case "enter":
+			if m.input.Focused() && !m.generating {
+				if m.engineStatus != engineinit.StatusReady {
+					m.statusText = "GPU initializing… please wait"
+					return m, nil
+				}
+				text := strings.TrimSpace(m.input.Value())
+				if text != "" {
+					m.input.Blur() // lock the sent prompt in place
+					cmds = append(cmds, func() tea.Msg { return submitMsg{text} })
+				}
+			}
+			return m, tea.Batch(cmds...)
+
+		case "shift+up":
+			if m.showThinking {
+				m.thinkBoxH++
+				m = m.resize()
+			}
+			return m, nil
+
+		case "shift+down":
+			if m.showThinking {
+				m.thinkBoxH--
+				m = m.resize()
+			}
+			return m, nil
+		}
+
+		// In edit mode, every other key types into the box.
+		if m.input.Focused() {
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			cmds = append(cmds, cmd)
+			return m, tea.Batch(cmds...)
+		}
+
+		// Command mode: bare-letter commands.
+		switch msg.String() {
+		case "e": // edit (target the box)
+			if !m.generating {
+				cmds = append(cmds, m.input.Focus())
 			}
 
-		case "ctrl+m": // info overlay: model / metrics / directory
+		case "n": // new prompt — clear and target
+			m.input.SetValue("")
+			cmds = append(cmds, m.input.Focus())
+
+		case "m": // info overlay
 			m.showInfo = true
 
-		case "ctrl+t":
+		case "t":
 			m.showThinking = !m.showThinking
 			m = m.resize()
 
-		case "ctrl+r":
+		case "r":
 			// Cycle reasoning: OFF → HIGH → MAX → OFF.
 			switch m.thinkMode {
 			case ds4.ThinkNone:
@@ -177,19 +286,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.logger.Printf("[REASONING] %s", m.thinkModeLabel())
 
-		case "shift+up":
-			if m.showThinking {
-				m.thinkBoxH++
-				m = m.resize()
-			}
-
-		case "shift+down":
-			if m.showThinking {
-				m.thinkBoxH--
-				m = m.resize()
-			}
-
-		case "ctrl+f": // step forward one command
+		case "f": // step forward one command
 			m.running = false
 			total := len(m.parser.CanvasLines())
 			if m.stepN >= 0 && m.stepN < total {
@@ -200,7 +297,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m, _ = m.redrawCanvas()
 			}
 
-		case "ctrl+b": // step back one command
+		case "b": // step back one command
 			m.running = false
 			if total := len(m.parser.CanvasLines()); total > 0 {
 				if m.stepN < 0 {
@@ -212,7 +309,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m, _ = m.redrawCanvas()
 			}
 
-		case "ctrl+g": // run: animate the command list
+		case "g": // run: animate the command list
 			if total := len(m.parser.CanvasLines()); total > 0 {
 				if m.running {
 					m.running = false
@@ -226,10 +323,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-		case "ctrl+l": // re-fit the canvas to the current window size
+		case "l": // re-fit the canvas to the current window size
 			m = m.lockCanvas()
 
-		case "ctrl+k": // clear the canvas, output, and conversation
+		case "k": // clear the canvas, output, and conversation
 			if !m.generating {
 				m.parser.Reset()
 				m.canvas.Clear()
@@ -248,32 +345,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.genEnd = time.Time{}
 				m.logger.Printf("[CLEAR]")
 			}
-
-		case "ctrl+n": // new prompt — clear and re-enable the input
-			m.input.SetValue("")
-			cmds = append(cmds, m.input.Focus())
-
-		case "ctrl+e": // edit the locked prompt
-			if !m.input.Focused() && !m.generating {
-				cmds = append(cmds, m.input.Focus())
-			}
-
-		case "enter":
-			if m.input.Focused() && !m.generating {
-				text := strings.TrimSpace(m.input.Value())
-				if text != "" {
-					m.input.Blur() // lock the sent prompt in place
-					cmds = append(cmds, func() tea.Msg { return submitMsg{text} })
-				}
-			}
-
-		default:
-			if m.input.Focused() { // ignore typing while a sent prompt is locked
-				var cmd tea.Cmd
-				m.input, cmd = m.input.Update(msg)
-				cmds = append(cmds, cmd)
-			}
 		}
+
+	case engineReadyMsg:
+		if msg.Err != nil {
+			m.engineStatus = engineinit.StatusError
+			m.engineErr = msg.Err
+			m.statusText = "Error"
+			m.errText = msg.Err.Error()
+			m.logger.Printf("[ENGINE] open failed: %v", msg.Err)
+			return m, nil
+		}
+		m.engine = msg.Engine
+		m.session = msg.Session
+		m.hasMTP = msg.HasMTP
+		m.mtpDraft = msg.MTPDraft
+		m.ctxSize = msg.Session.Ctx()
+		m.engineStatus = engineinit.StatusReady
+		m.statusText = "Ready"
+		m.logger.Printf("[ENGINE] ready  mtp=%v mtpDraft=%d ctx=%d",
+			m.hasMTP, m.mtpDraft, m.ctxSize)
+		return m, nil
 
 	case submitMsg:
 		m.logger.Printf("[USER] %s", msg.text)
@@ -516,6 +608,9 @@ func (m model) render() string {
 	if m.showInfo {
 		return m.infoOverlay()
 	}
+	if m.showLog {
+		return m.logOverlay()
+	}
 
 	viewW := m.canvas.ViewWidth
 	rightW := m.width - (viewW + 2)
@@ -532,7 +627,7 @@ func (m model) render() string {
 	}
 	canvasInfo := fmt.Sprintf("canvas %d×%d", m.canvasW, m.canvasH)
 	if fw, fh := m.fitCanvasSize(); fw != m.canvasW || fh != m.canvasH {
-		canvasInfo += " (ctrl+l)" // window changed — ctrl+l would re-fit
+		canvasInfo += " (l)" // window changed — l (command mode) would re-fit
 	}
 	headerLeft := fmt.Sprintf(" ds4 TUI │ %s │ %s │ %s", modelName, canvasInfo, status)
 	headerRight := m.metricsText()
@@ -543,14 +638,23 @@ func (m model) render() string {
 			headerRight += " · MTP (off)"
 		}
 	}
+	badge := engineinit.Badge(m.engineStatus)
+	badgeW := lipgloss.Width(badge)
+	// Reserve room on the right edge for the badge (plus one space gap).
 	headerContent := headerLeft
 	if headerRight != "" {
 		headerRight += " "
-		if lipgloss.Width(headerLeft)+lipgloss.Width(headerRight)+1 <= m.width {
-			pad := m.width - lipgloss.Width(headerLeft) - lipgloss.Width(headerRight)
-			headerContent = headerLeft + strings.Repeat(" ", pad) + headerRight
-		}
 	}
+	avail := m.width - lipgloss.Width(headerLeft) - lipgloss.Width(headerRight) - badgeW
+	if avail < 0 {
+		// Window too narrow for full metrics — drop them, keep the badge.
+		headerRight = ""
+		avail = m.width - lipgloss.Width(headerLeft) - badgeW
+	}
+	if avail < 0 {
+		avail = 0
+	}
+	headerContent = headerLeft + strings.Repeat(" ", avail) + headerRight + badge
 	header := lipgloss.NewStyle().
 		Width(m.width).
 		Bold(true).
@@ -615,7 +719,7 @@ func (m model) render() string {
 			case m.generating:
 				think = "..."
 			case m.thinkMode == ds4.ThinkNone:
-				think = "(reasoning off — ctrl+r to enable)"
+				think = "(reasoning off — r to enable in command mode)"
 			}
 		}
 		thinkingPanel := titledBox(lipgloss.NewStyle().
@@ -630,7 +734,7 @@ func (m model) render() string {
 	// Input panel
 	promptTitle := "Prompt"
 	if !m.input.Focused() {
-		promptTitle = "Sent — ctrl+e edit · ctrl+n new"
+		promptTitle = "Sent — e edit · n new"
 	}
 	inputPanel := titledBox(lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -640,12 +744,9 @@ func (m model) render() string {
 		Render(m.input.View()), promptTitle)
 	sections = append(sections, inputPanel)
 
-	// Footer help bar (shows step position while stepping)
-	help := fmt.Sprintf(" ctrl+e edit · ctrl+n new · ctrl+m info · ctrl+k clear · ctrl+l fit · ctrl+t box · ctrl+r reason:%s · ctrl+f/b step · ctrl+g run · ctrl+c quit", m.thinkModeLabel())
-	if m.stepN >= 0 {
-		help = fmt.Sprintf(" STEP %d/%d · ctrl+f/b step · ctrl+g run · ctrl+n new · ctrl+k clear · ctrl+c quit",
-			m.stepN, len(m.parser.CanvasLines()))
-	}
+	// Footer help bar — swaps with mode (edit vs command). The step-mode
+	// animation uses a constrained command list built inside m.keymap().
+	help := " " + m.keymap().FooterText(m.input.Focused())
 	footer := lipgloss.NewStyle().
 		Width(m.width).
 		MaxHeight(1).
@@ -898,7 +999,108 @@ var (
 	infoDimStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 )
 
-// infoOverlay renders the ctrl+m popup — model, metrics, and directory info —
+// keymap builds the swapping footer bindings for the current state. The
+// Edit list is DefaultEditBindings() with {ctrl+n log} spliced in before
+// the trailing quit, so the log overlay key is discoverable while typing.
+// The Command list is the full command set; during step-mode animation a
+// constrained list is shown so the help reflects what actually responds.
+func (m model) keymap() editmode.Keymap {
+	def := editmode.DefaultEditBindings()
+	edit := make([]editmode.Binding, 0, len(def)+1)
+	edit = append(edit, def[:len(def)-1]...)
+	edit = append(edit, editmode.Binding{Keys: "ctrl+n", Desc: "log"})
+	edit = append(edit, def[len(def)-1])
+
+	var cmd []editmode.Binding
+	if m.stepN >= 0 {
+		cmd = []editmode.Binding{
+			{Keys: fmt.Sprintf("STEP %d/%d", m.stepN, len(m.parser.CanvasLines()))},
+			{Keys: "f/b", Desc: "step"},
+			{Keys: "g", Desc: "run"},
+			{Keys: "n", Desc: "new"},
+			{Keys: "k", Desc: "clear"},
+			{Keys: "ctrl+n", Desc: "log"},
+			{Keys: "ctrl+c", Desc: "quit"},
+		}
+	} else {
+		cmd = []editmode.Binding{
+			{Keys: "e", Desc: "edit"},
+			{Keys: "n", Desc: "new"},
+			{Keys: "m", Desc: "info"},
+			{Keys: "k", Desc: "clear"},
+			{Keys: "l", Desc: "fit"},
+			{Keys: "t", Desc: "box"},
+			{Keys: "r", Desc: "reason:" + strings.TrimSpace(m.thinkModeLabel())},
+			{Keys: "f/b", Desc: "step"},
+			{Keys: "g", Desc: "run"},
+			{Keys: "ctrl+n", Desc: "log"},
+			{Keys: "ctrl+c", Desc: "quit"},
+		}
+	}
+	return editmode.Keymap{Edit: edit, Command: cmd}
+}
+
+// logPageSize is the per-page scroll distance used by pgup/pgdown in the
+// log overlay — matched to the visible content height so a single page
+// advance moves the view a full screen.
+func (m model) logPageSize() int {
+	h := m.height - 6
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
+// logOverlay renders the ctrl+n popup — recent libds4 diagnostics captured
+// by the in-memory ring buffer — centered over a blank full-screen area.
+// up/down/pgup/pgdown scroll via m.logScroll (0 = follow the tail); esc
+// closes the overlay.
+func (m model) logOverlay() string {
+	lines := m.logBuf.Lines()
+	if len(lines) == 0 {
+		lines = []string{infoDimStyle.Render("(no libds4 diagnostics yet)")}
+	}
+	innerW := m.width - 6
+	if innerW < 10 {
+		innerW = 10
+	}
+	innerH := m.height - 6
+	if innerH < 1 {
+		innerH = 1
+	}
+	wrapped := wrapText(strings.Join(lines, "\n"), innerW)
+
+	// Clamp scroll to [0, max] and slice the visible window.
+	total := len(wrapped)
+	maxScroll := total - innerH
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scroll := m.logScroll
+	if scroll > maxScroll {
+		scroll = maxScroll
+	}
+	end := total - scroll
+	start := end - innerH
+	if start < 0 {
+		start = 0
+	}
+	body := strings.Join(wrapped[start:end], "\n")
+
+	hint := fmt.Sprintf("  up/down · pgup/pgdown scroll · esc close   [%d/%d]",
+		scroll, maxScroll)
+	body += "\n\n" + infoDimStyle.Render(hint)
+
+	box := titledBox(lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(0, 1).
+		MaxWidth(m.width).
+		MaxHeight(m.height).
+		Render(body), "ds4 · log")
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
+// infoOverlay renders the m-key popup — model, metrics, and directory info —
 // centered over a blank full-screen area.
 func (m model) infoOverlay() string {
 	ctxPct := 0
@@ -941,7 +1143,7 @@ func (m model) infoOverlay() string {
 
 	head("Directory")
 	row("working", m.workDir)
-	row("log", filepath.Join(m.workDir, "play.log"))
+	row("log", filepath.Join(m.workDir, "glyphpad.log"))
 	if m.hasMTP {
 		b.WriteString("\n")
 		head("MTP Diagnostics")

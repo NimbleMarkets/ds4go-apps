@@ -63,9 +63,9 @@ tasks:
         ./bin/ds4go-toy-svgpad $args
 
   log:
-    desc: Tail play.log in real time
+    desc: Tail glyphpad.log and svgpad.log in real time
     cmds:
-      - tail -f play.log
+      - touch glyphpad.log svgpad.log && tail -F glyphpad.log svgpad.log
 
   vet:
     desc: Run go vet

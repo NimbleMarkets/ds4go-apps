@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go-playground/internal/ds4log"
 	"github.com/spf13/pflag"
 )
 
@@ -23,7 +24,7 @@ func main() {
 	pflag.StringVar(&libPath, "lib", "", "path to libds4 shared library (optional, uses default search)")
 	pflag.IntVar(&ctxSize, "ctx", 32768, "context window size in tokens")
 	pflag.StringVar(&backend, "backend", "metal", "inference backend: metal, cuda, cpu")
-	pflag.BoolVarP(&debug, "debug", "d", false, "log raw LLM token stream (escaped) to play.log")
+	pflag.BoolVarP(&debug, "debug", "d", false, "log raw LLM token stream and tee libds4 diagnostics to svgpad.log")
 	pflag.Parse()
 
 	if modelPath == "" {
@@ -44,40 +45,6 @@ func main() {
 	default:
 		be = ds4.BackendMetal
 	}
-	engOpts := ds4.EngineOptions{ModelPath: modelPath, Backend: be}
-	ds4.ApplyMTPDefaults(&engOpts)
-	mtpPath := engOpts.MTPPath
-
-	var engine *ds4.Engine
-	var err error
-	if libPath != "" {
-		lib, err := ds4.Load(libPath)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "load lib:", err)
-			os.Exit(1)
-		}
-		ds4.SetDefaultLibrary(lib)
-		engine, err = lib.NewEngine(engOpts)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "engine:", ds4.EnrichEngineOpenError(err))
-			os.Exit(1)
-		}
-	} else {
-		engine, err = ds4.NewEngine(engOpts)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "engine:", err)
-			os.Exit(1)
-		}
-	}
-	defer engine.Close()
-
-	session, err := engine.NewSession(ctxSize)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "session:", err)
-		os.Exit(1)
-	}
-	defer session.Close()
-
 	logf, err := os.OpenFile("svgpad.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "open svgpad.log:", err)
@@ -85,17 +52,51 @@ func main() {
 	}
 	defer logf.Close()
 	logger := log.New(logf, "", log.Ldate|log.Ltime|log.Lmicroseconds)
-	hasMTP := engine.HasMTP()
-	mtpDraft := engine.MTPDraftTokens()
-	logger.Printf("=== svgpad start  model=%s backend=%s ctx=%d debug=%v mtp=%v mtpDraft=%d ===",
-		filepath.Base(modelPath), backend, ctxSize, debug, hasMTP, mtpDraft)
 
-	m := newModel(engine, session, modelPath, mtpPath, hasMTP, mtpDraft, backend, logger, debug)
+	// Install the libds4 log sink BEFORE any engine work happens — that
+	// keeps the GPU startup banner out of the terminal (it lands in the
+	// in-memory ring instead, viewable via ctrl+n). With --debug the
+	// banner is also teed into svgpad.log.
+	logBuf := ds4log.NewBuffer(500)
+	if debug {
+		logBuf.SetTee(logf)
+	}
+	if err := ds4.SetLogOutput(logBuf); err != nil {
+		logger.Printf("warn: ds4.SetLogOutput: %v", err)
+	}
+
+	// Load the libds4 shared library now (fast, just dlopen). We do this
+	// explicitly — rather than letting ds4.NewEngine load the default —
+	// so an explicit --lib is honored and the log callback installed
+	// above is attached to the exact library that the engine will use.
+	lib, err := ds4.Load(libPath)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "load lib:", err)
+		os.Exit(1)
+	}
+	ds4.SetDefaultLibrary(lib)
+
+	engOpts := ds4.EngineOptions{ModelPath: modelPath, Backend: be}
+	ds4.ApplyMTPDefaults(&engOpts)
+	mtpPath := engOpts.MTPPath
+
+	logger.Printf("=== svgpad start  model=%s backend=%s ctx=%d debug=%v ===",
+		filepath.Base(modelPath), backend, ctxSize, debug)
+
+	m := newModel(lib, engOpts, ctxSize, modelPath, mtpPath, backend, logger, logBuf, debug)
 	p := tea.NewProgram(m)
-	runErr := func() error {
-		_, err := p.Run()
-		return err
-	}()
+	final, runErr := p.Run()
+
+	// The model owns the engine/session once Init's goroutine fires; on
+	// exit we recover them from the final model state and close in order.
+	if fm, ok := final.(model); ok {
+		if fm.session != nil {
+			fm.session.Close()
+		}
+		if fm.engine != nil {
+			fm.engine.Close()
+		}
+	}
 
 	logger.Printf("=== svgpad end ===")
 	if runErr != nil {

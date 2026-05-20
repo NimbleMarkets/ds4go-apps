@@ -18,6 +18,9 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go-playground/internal/ds4log"
+	"github.com/NimbleMarkets/ds4go-playground/internal/editmode"
+	"github.com/NimbleMarkets/ds4go-playground/internal/engineinit"
 	svg "github.com/NimbleMarkets/ntcharts-svg/svg"
 )
 
@@ -51,6 +54,10 @@ type spinnerTickMsg struct{}
 type yoloSubmitMsg struct{ text string }
 type toolRoundMsg struct{}
 type loadEntryMsg struct{}
+
+// engineReadyMsg is delivered from the goroutine that opens the ds4 engine
+// and session. The model holds nil engine/session until this lands.
+type engineReadyMsg engineinit.Result
 
 // widgetCache is an LRU cache of rasterized SVG bitmaps, keyed by
 // filename. Caching the bitmap — rather than a svg.Model copy — lets a
@@ -135,15 +142,22 @@ const (
 type model struct {
 	width, height int
 
-	engine    *ds4.Engine
-	session   *ds4.Session
-	modelPath string
-	mtpPath   string
-	hasMTP    bool
-	mtpDraft  int
-	backend   string
-	workDir   string
+	engine       *ds4.Engine  // nil until engineReadyMsg
+	session      *ds4.Session
+	lib          *ds4.Library      // resolved in main, used by Init's goroutine
+	engOpts      ds4.EngineOptions // captured to fire async open
+	engineStatus engineinit.Status // drives the header badge
+	engineErr    error             // set when StatusError
+	modelPath    string
+	mtpPath      string
+	hasMTP       bool
+	mtpDraft     int
+	backend      string
+	workDir      string
 	showInfo  bool
+	showLog   bool           // libds4 log overlay is up (ctrl+n)
+	logBuf    *ds4log.Buffer // captured libds4 diagnostics
+	logScroll int            // lines scrolled back from the tail (0 = follow)
 
 	history    []ds4.ChatMessage
 	rawBuf     []byte // raw LLM response for the current turn
@@ -246,7 +260,7 @@ func scanExistingSVGs(dir string, logger *log.Logger) []svgEntry {
 	return result
 }
 
-func newModel(engine *ds4.Engine, session *ds4.Session, modelPath, mtpPath string, hasMTP bool, mtpDraft int, backend string, logger *log.Logger, debug bool) model {
+func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPath, mtpPath, backend string, logger *log.Logger, logBuf *ds4log.Buffer, debug bool) model {
 	ti := textinput.New()
 	ti.Placeholder = defaultPrompt
 	ti.SetValue(defaultPrompt)
@@ -270,19 +284,19 @@ func newModel(engine *ds4.Engine, session *ds4.Session, modelPath, mtpPath strin
 	})
 
 	return model{
-		engine:        engine,
-		session:       session,
+		lib:           lib,
+		engOpts:       engOpts,
+		engineStatus:  engineinit.StatusInit,
 		modelPath:     modelPath,
 		mtpPath:       mtpPath,
-		hasMTP:        hasMTP,
-		mtpDraft:      mtpDraft,
 		backend:       backend,
 		workDir:       wd,
 		input:         ti,
-		statusText:    "Ready",
-		ctxSize:       session.Ctx(),
+		statusText:    "GPU initializing…",
+		ctxSize:       ctxSize,
 		logger:        logger,
 		debug:         debug,
+		logBuf:        logBuf,
 		svgWidget:     svg.NewWithConfig(svg.Config{Cols: 80, Rows: 24, RenderEdge: svgRenderEdge}),
 		showThinking:  true,
 		thinkBoxH:     defaultThink,
@@ -302,7 +316,16 @@ func newModel(engine *ds4.Engine, session *ds4.Session, modelPath, mtpPath strin
 // ── BubbleTea interface ───────────────────────────────────────────────────────
 
 func (m model) Init() tea.Cmd {
-	return m.svgWidget.Init()
+	lib, opts, ctxSize := m.lib, m.engOpts, m.ctxSize
+	return tea.Batch(
+		m.svgWidget.Init(),
+		// Open the engine in the goroutine bubbletea spawns for this Cmd.
+		// Until engineReadyMsg lands the TUI is interactive but Enter is
+		// gated; the header badge shows the init/ready state.
+		func() tea.Msg {
+			return engineReadyMsg(engineinit.Open(lib, opts, ctxSize))
+		},
+	)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -332,6 +355,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyPressMsg:
+		// Log overlay has its own scrollable input handling — only esc
+		// (or quit) leaves it; the rest of the key set scrolls. Info and
+		// help stay "any-key-dismisses" since they're not scrollable.
+		if m.showLog {
+			switch msg.String() {
+			case "ctrl+c", "ctrl+q":
+				return m, tea.Quit
+			case "esc":
+				m.showLog = false
+				m.logScroll = 0
+			case "up":
+				m.logScroll++
+			case "down":
+				if m.logScroll > 0 {
+					m.logScroll--
+				}
+			case "pgup":
+				m.logScroll += m.logPageSize()
+			case "pgdown":
+				m.logScroll -= m.logPageSize()
+				if m.logScroll < 0 {
+					m.logScroll = 0
+				}
+			}
+			return m, nil
+		}
 		if m.showInfo || m.showHelp {
 			if s := msg.String(); s == "ctrl+c" || s == "ctrl+q" {
 				return m, tea.Quit
@@ -340,73 +389,72 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showHelp = false
 			return m, nil
 		}
+
+		// Keys that work in BOTH modes.
 		switch msg.String() {
 		case "ctrl+c", "ctrl+q":
 			return m, tea.Quit
+
+		case "ctrl+n": // libds4 log overlay
+			m.showLog = true
+			return m, nil
 
 		case "esc":
 			if m.generating && m.genCancel != nil {
 				m.genCancel()
 				m.statusText = "Aborting..."
-			} else if m.input.Focused() {
+				return m, nil
+			}
+			if m.input.Focused() {
 				m.input.Blur()
 				m.panelFocus = focusThinking
 			}
+			return m, nil
 
-		case "ctrl+m":
-			m.showInfo = true
-
-		case "?", "h":
-			if !m.input.Focused() {
-				m.showHelp = true
-			} else {
-				var cmd tea.Cmd
-				m.input, cmd = m.input.Update(msg)
-				cmds = append(cmds, cmd)
+		case "enter":
+			if m.input.Focused() && !m.generating {
+				if m.engineStatus != engineinit.StatusReady {
+					m.statusText = "GPU initializing… please wait"
+					return m, nil
+				}
+				text := strings.TrimSpace(m.input.Value())
+				if text == "" {
+					text = defaultPrompt
+				}
+				m.input.Blur()
+				m.panelFocus = focusThinking
+				m.yoloCount = 0 // manual reset
+				cmds = append(cmds, func() tea.Msg { return submitMsg{text} })
 			}
-
-		case "ctrl+t":
-			m.showThinking = !m.showThinking
-			if !m.showThinking && m.panelFocus != focusInput {
-				m.panelFocus = focusInput
-				cmds = append(cmds, m.input.Focus())
-			}
-			cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
-
-		case "ctrl+r":
-			switch m.thinkMode {
-			case ds4.ThinkNone:
-				m.thinkMode = ds4.ThinkHigh
-			case ds4.ThinkHigh:
-				m.thinkMode = ds4.ThinkMax
-			default:
-				m.thinkMode = ds4.ThinkNone
-			}
-			m.logger.Printf("[REASONING] %s", m.thinkModeLabel())
+			return m, tea.Batch(cmds...)
 
 		case "ctrl+plus", "ctrl+=":
 			if m.showThinking {
 				m.thinkBoxH++
 				cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
 			}
+			return m, tea.Batch(cmds...)
 
 		case "ctrl+minus", "ctrl+-":
 			if m.showThinking && m.thinkBoxH > minThink {
 				m.thinkBoxH--
 				cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
 			}
+			return m, tea.Batch(cmds...)
 
 		case "shift+up":
 			if m.showThinking && m.thinkBoxH > minThink {
 				m.thinkBoxH--
 				cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
 			}
+			return m, tea.Batch(cmds...)
 
 		case "shift+down":
 			if m.showThinking {
 				m.thinkBoxH++
 				cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
 			}
+			return m, tea.Batch(cmds...)
 
 		case "shift+left":
 			if m.showThinking {
@@ -417,6 +465,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.thinkBoxW--
 				}
 			}
+			return m, nil
 
 		case "shift+right":
 			if m.showThinking {
@@ -425,31 +474,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.thinkBoxW++
 			}
-
-		case "ctrl+g":
-			cmds = append(cmds, m.svgWidget.ToggleRenderMode())
-
-		case "ctrl+n":
-			m.input.SetValue("")
-			m.thinkText = ""
-			m.panelFocus = focusInput
-			cmds = append(cmds, m.input.Focus())
-
-		case "ctrl+e":
-			if !m.input.Focused() && !m.generating {
-				m.panelFocus = focusInput
-				cmds = append(cmds, m.input.Focus())
-			}
-
-		case "ctrl+y":
-			m.yoloMode = !m.yoloMode
-			m.yoloCount = 0
-			if m.yoloMode {
-				m.statusText = "YOLO mode ON"
-			} else {
-				m.statusText = "YOLO mode OFF"
-			}
-			m.logger.Printf("[YOLO] mode=%v", m.yoloMode)
+			return m, nil
 
 		case "tab":
 			if m.showThinking {
@@ -472,71 +497,138 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, m.input.Focus())
 				}
 			}
-
-		case "up":
-			if m.panelFocus == focusThinking && m.thinkScroll > 0 {
-				m.thinkScroll--
-				m.thinkAutoScroll = false
-			} else if m.panelFocus == focusTools && m.toolScroll > 0 {
-				m.toolScroll--
-			} else if m.input.Focused() {
-				var cmd tea.Cmd
-				m.input, cmd = m.input.Update(msg)
-				cmds = append(cmds, cmd)
-			}
-
-		case "down":
-			if m.panelFocus == focusThinking {
-				m.thinkScroll++
-			} else if m.panelFocus == focusTools {
-				m.toolScroll++
-			} else if m.input.Focused() {
-				var cmd tea.Cmd
-				m.input, cmd = m.input.Update(msg)
-				cmds = append(cmds, cmd)
-			}
+			return m, tea.Batch(cmds...)
 
 		case "pgup":
 			if !m.input.Focused() && len(m.entries) > 0 {
 				if m.entryIndex > 0 {
 					m.entryIndex--
-					cmd := m.loadEntryCmd()
-					if cmd != nil {
+					if cmd := m.loadEntryCmd(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 				}
 			}
+			return m, tea.Batch(cmds...)
 
 		case "pgdown":
 			if !m.input.Focused() && len(m.entries) > 0 {
 				if m.entryIndex < len(m.entries)-1 {
 					m.entryIndex++
-					cmd := m.loadEntryCmd()
-					if cmd != nil {
+					if cmd := m.loadEntryCmd(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 				}
 			}
+			return m, tea.Batch(cmds...)
 
-		case "enter":
-			if m.input.Focused() && !m.generating {
-				text := strings.TrimSpace(m.input.Value())
-				if text == "" {
-					text = defaultPrompt
+		case "up":
+			// Panel-aware scroll. When the input owns focus, fall through
+			// to textinput handling below so its cursor history still works.
+			switch m.panelFocus {
+			case focusThinking:
+				if m.thinkScroll > 0 {
+					m.thinkScroll--
+					m.thinkAutoScroll = false
 				}
-				m.input.Blur()
-				m.panelFocus = focusThinking
-				m.yoloCount = 0 // manual reset
-				cmds = append(cmds, func() tea.Msg { return submitMsg{text} })
+				return m, nil
+			case focusTools:
+				if m.toolScroll > 0 {
+					m.toolScroll--
+				}
+				return m, nil
 			}
 
-		default:
-			if m.input.Focused() {
-				var cmd tea.Cmd
-				m.input, cmd = m.input.Update(msg)
-				cmds = append(cmds, cmd)
+		case "down":
+			switch m.panelFocus {
+			case focusThinking:
+				m.thinkScroll++
+				return m, nil
+			case focusTools:
+				m.toolScroll++
+				return m, nil
 			}
 		}
+
+		// In edit mode, everything else types into the box.
+		if m.input.Focused() {
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			cmds = append(cmds, cmd)
+			return m, tea.Batch(cmds...)
+		}
+
+		// Command mode: bare-letter commands.
+		switch msg.String() {
+		case "e":
+			if !m.generating {
+				m.panelFocus = focusInput
+				cmds = append(cmds, m.input.Focus())
+			}
+
+		case "n":
+			m.input.SetValue("")
+			m.thinkText = ""
+			m.panelFocus = focusInput
+			cmds = append(cmds, m.input.Focus())
+
+		case "m":
+			m.showInfo = true
+
+		case "?", "h":
+			m.showHelp = true
+
+		case "t":
+			m.showThinking = !m.showThinking
+			if !m.showThinking && m.panelFocus != focusInput {
+				m.panelFocus = focusInput
+				cmds = append(cmds, m.input.Focus())
+			}
+			cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
+
+		case "r":
+			switch m.thinkMode {
+			case ds4.ThinkNone:
+				m.thinkMode = ds4.ThinkHigh
+			case ds4.ThinkHigh:
+				m.thinkMode = ds4.ThinkMax
+			default:
+				m.thinkMode = ds4.ThinkNone
+			}
+			m.logger.Printf("[REASONING] %s", m.thinkModeLabel())
+
+		case "g":
+			cmds = append(cmds, m.svgWidget.ToggleRenderMode())
+
+		case "y":
+			m.yoloMode = !m.yoloMode
+			m.yoloCount = 0
+			if m.yoloMode {
+				m.statusText = "YOLO mode ON"
+			} else {
+				m.statusText = "YOLO mode OFF"
+			}
+			m.logger.Printf("[YOLO] mode=%v", m.yoloMode)
+		}
+
+	case engineReadyMsg:
+		if msg.Err != nil {
+			m.engineStatus = engineinit.StatusError
+			m.engineErr = msg.Err
+			m.statusText = "Error"
+			m.errText = msg.Err.Error()
+			m.logger.Printf("[ENGINE] open failed: %v", msg.Err)
+			return m, nil
+		}
+		m.engine = msg.Engine
+		m.session = msg.Session
+		m.hasMTP = msg.HasMTP
+		m.mtpDraft = msg.MTPDraft
+		m.ctxSize = msg.Session.Ctx()
+		m.engineStatus = engineinit.StatusReady
+		m.statusText = "Ready"
+		m.logger.Printf("[ENGINE] ready  mtp=%v mtpDraft=%d ctx=%d",
+			m.hasMTP, m.mtpDraft, m.ctxSize)
+		return m, nil
 
 	case submitMsg:
 		m.logger.Printf("[USER] %s", msg.text)
@@ -1178,7 +1270,9 @@ func (m model) render() string {
 		}
 	}
 	prefix := fmt.Sprintf(" svgpad │ %s │ ", modelName)
-	avail := m.width - lipgloss.Width(prefix)
+	badge := engineinit.Badge(m.engineStatus)
+	badgeW := lipgloss.Width(badge)
+	avail := m.width - lipgloss.Width(prefix) - badgeW
 	metrics := m.headerMetrics()
 	if metrics != "" {
 		avail -= lipgloss.Width(metrics) + 1
@@ -1194,25 +1288,28 @@ func (m model) render() string {
 	}
 	headerLine := prefix + status
 	if metrics != "" {
-		gap := m.width - lipgloss.Width(headerLine) - lipgloss.Width(metrics)
+		gap := m.width - lipgloss.Width(headerLine) - lipgloss.Width(metrics) - badgeW
 		if gap < 1 {
 			gap = 1
 		}
 		headerLine = headerLine + strings.Repeat(" ", gap) + metrics
 	}
-	pad := m.width - lipgloss.Width(headerLine)
+	// Pad to within badgeW of full width, then append the badge.
+	pad := m.width - lipgloss.Width(headerLine) - badgeW
+	if pad < 0 {
+		pad = 0
+	}
+	headerLine = headerLine + strings.Repeat(" ", pad) + badge
+	pad = m.width - lipgloss.Width(headerLine)
 	if pad < 0 {
 		pad = 0
 	}
 	header := headerLine + strings.Repeat(" ", pad)
 
 	// Footer
-	var footerContent string
-	if m.input.Focused() {
-		footerContent = "Type your prompt — Enter to send · Esc to cancel"
-	} else {
-		footerContent = fmt.Sprintf("Sent — ctrl+e edit · ctrl+n new · ctrl+g glyph · ctrl+t think · ctrl+r reason:%s · ctrl+y yolo · ctrl+m info · pgup/pgdown nav · ? help · ctrl+q quit", m.thinkModeLabel())
-	}
+	// Footer help bar — swaps with mode (edit vs command) via the shared
+	// editmode keymap; the full key reference lives in the ? overlay.
+	footerContent := " " + m.keymap().FooterText(m.input.Focused())
 	footer := lipgloss.NewStyle().
 		Background(lipgloss.Color("236")).
 		Foreground(lipgloss.Color("252")).
@@ -1277,7 +1374,7 @@ func (m model) render() string {
 			}
 		} else {
 			if m.thinkMode == ds4.ThinkNone {
-				thinkContent = "(reasoning off — ctrl+r to enable)"
+				thinkContent = "(reasoning off — r to enable in command mode)"
 			} else {
 				thinkContent = "…"
 			}
@@ -1362,6 +1459,9 @@ func (m model) render() string {
 	}
 	if m.showInfo {
 		return m.infoOverlay()
+	}
+	if m.showLog {
+		return m.logOverlay()
 	}
 	out := strings.Join(sections, "\n")
 	return out
@@ -1525,13 +1625,113 @@ func (m model) infoOverlay() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
+// keymap builds the swapping footer bindings for the current state. The
+// Edit list is DefaultEditBindings() with {ctrl+n log} spliced before quit
+// so the log overlay key is discoverable while typing. The Command list is
+// a compact subset of the global commands — the full key reference lives
+// in the ? help overlay.
+func (m model) keymap() editmode.Keymap {
+	def := editmode.DefaultEditBindings()
+	edit := make([]editmode.Binding, 0, len(def)+1)
+	edit = append(edit, def[:len(def)-1]...)
+	edit = append(edit, editmode.Binding{Keys: "ctrl+n", Desc: "log"})
+	edit = append(edit, def[len(def)-1])
+
+	cmd := []editmode.Binding{
+		{Keys: "e", Desc: "edit"},
+		{Keys: "n", Desc: "new"},
+		{Keys: "g", Desc: "glyph"},
+		{Keys: "t", Desc: "think"},
+		{Keys: "r", Desc: "reason:" + strings.TrimSpace(m.thinkModeLabel())},
+		{Keys: "y", Desc: "yolo"},
+		{Keys: "m", Desc: "info"},
+		{Keys: "?", Desc: "help"},
+		{Keys: "ctrl+n", Desc: "log"},
+		{Keys: "ctrl+c", Desc: "quit"},
+	}
+	return editmode.Keymap{Edit: edit, Command: cmd}
+}
+
+// logPageSize is the per-page scroll distance used by pgup/pgdown in the
+// log overlay — matched to the visible content height.
+func (m model) logPageSize() int {
+	h := m.height - 6
+	if h < 1 {
+		return 1
+	}
+	return h
+}
+
+// logOverlay renders the ctrl+n popup — recent libds4 diagnostics captured
+// by the in-memory ring buffer — centered over a blank full-screen area.
+// up/down/pgup/pgdown scroll via m.logScroll (0 = follow the tail); esc
+// closes the overlay.
+func (m model) logOverlay() string {
+	lines := m.logBuf.Lines()
+	if len(lines) == 0 {
+		lines = []string{infoDimStyle.Render("(no libds4 diagnostics yet)")}
+	}
+	innerW := m.width - 6
+	if innerW < 10 {
+		innerW = 10
+	}
+	innerH := m.height - 6
+	if innerH < 1 {
+		innerH = 1
+	}
+	wrapped := lipgloss.NewStyle().Width(innerW).Render(strings.Join(lines, "\n"))
+	allLines := strings.Split(wrapped, "\n")
+
+	// Clamp scroll to [0, max] and slice the visible window.
+	total := len(allLines)
+	maxScroll := total - innerH
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	scroll := m.logScroll
+	if scroll > maxScroll {
+		scroll = maxScroll
+	}
+	end := total - scroll
+	start := end - innerH
+	if start < 0 {
+		start = 0
+	}
+	body := strings.Join(allLines[start:end], "\n")
+
+	hint := fmt.Sprintf("  up/down · pgup/pgdown scroll · esc close   [%d/%d]",
+		scroll, maxScroll)
+	body += "\n\n" + infoDimStyle.Render(hint)
+
+	box := titledBox(lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(0, 1).
+		MaxWidth(m.width).
+		MaxHeight(m.height).
+		Render(body), "ds4 · log")
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
 func (m model) helpOverlay() string {
 	var b strings.Builder
 	b.WriteString("Keyboard shortcuts\n\n")
-	b.WriteString("  ctrl+e     edit prompt\n")
-	b.WriteString("  ctrl+n     new prompt\n")
-	b.WriteString("  ctrl+g     toggle glyph/image render mode\n")
-	b.WriteString("  ctrl+t     toggle thinking/output box\n")
+	b.WriteString("Command mode (edit box not targeted)\n")
+	b.WriteString("  e          edit prompt (target the box)\n")
+	b.WriteString("  n          new prompt\n")
+	b.WriteString("  g          toggle glyph/image render mode\n")
+	b.WriteString("  t          toggle thinking/output box\n")
+	b.WriteString("  r          cycle reasoning mode (OFF → HIGH → MAX)\n")
+	b.WriteString("  y          toggle YOLO auto-prompt mode\n")
+	b.WriteString("  m          show model & metrics info\n")
+	b.WriteString("  ? / h      show this help\n\n")
+	b.WriteString("Edit mode (edit box targeted)\n")
+	b.WriteString("  enter      send prompt\n")
+	b.WriteString("  esc        escape to command mode\n")
+	b.WriteString("  ctrl+a/e   line start / line end\n")
+	b.WriteString("  ctrl+w     delete word back\n\n")
+	b.WriteString("Global (work in either mode)\n")
+	b.WriteString("  ctrl+n     libds4 log overlay\n")
 	b.WriteString("  ctrl+plus  enlarge thinking box\n")
 	b.WriteString("  ctrl+minus shrink thinking box\n")
 	b.WriteString("  shift+up   shrink thinking box\n")
@@ -1540,12 +1740,8 @@ func (m model) helpOverlay() string {
 	b.WriteString("  shift+right enlarge think panel\n")
 	b.WriteString("  tab        cycle focus (input → think → tools)\n")
 	b.WriteString("  up/down    scroll focused panel\n")
-	b.WriteString("  ctrl+r     cycle reasoning mode (OFF → HIGH → MAX)\n")
-	b.WriteString("  ctrl+y     toggle YOLO auto-prompt mode\n")
-	b.WriteString("  ctrl+m     show model & metrics info\n")
 	b.WriteString("  pgup       previous SVG in session\n")
 	b.WriteString("  pgdown     next SVG in session\n")
-	b.WriteString("  ?          show this help\n")
 	b.WriteString("  ctrl+q     quit\n")
 	b.WriteString("  ctrl+c     quit\n")
 	b.WriteString("\n" + infoDimStyle.Render("  press any key to close"))
