@@ -339,7 +339,7 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 		backend:       backend,
 		workDir:       wd,
 		input:         ti,
-		statusText:    "GPU initializing…",
+		statusText:    "Ready · viewer mode (press Enter to load engine)",
 		ctxSize:       ctxSize,
 		logger:        logger,
 		debug:         debug,
