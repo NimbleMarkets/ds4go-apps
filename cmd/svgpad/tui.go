@@ -353,7 +353,7 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 		cache:          newWidgetCache(50),
 		tools:          reg,
 		maxToolRounds:  3,
-		maxAutoCorrect: 2,
+		maxAutoCorrect: 0, // 0 = let the model drive correction via svg_validate tool calls
 		toolCallCounts: make(map[string]int),
 		panelFocus:     focusInput,
 		entries:        existing,
@@ -1114,11 +1114,26 @@ func (m model) generate(ch chan tea.Msg) {
 }
 
 func (m model) systemPrompt() string {
-	base := `You are an SVG artist. Your final answer must be valid, complete SVG markup.
-When generating SVG, call the svg_validate tool with your markup before finalizing your answer.
-Do not include explanations, markdown code blocks, or any text outside the SVG tags in your final answer.
-Start with <svg and end with </svg>. Ensure the SVG has proper xmlns="http://www.w3.org/2000/svg".
-If you are told your SVG has errors, fix them and output the corrected, complete SVG.`
+	base := `You are an SVG artist with access to one tool:
+
+  svg_validate(svg: string) -> "Valid: …" on success,
+                               "Invalid:\n<diagnostic>" on failure.
+
+Workflow for every user request:
+
+1. Draft SVG markup that fulfils the request.
+2. Call svg_validate with your draft.
+3. If the result starts with "Invalid:", read the diagnostic, revise
+   the SVG to fix that specific issue, and call svg_validate again.
+4. When svg_validate returns "Valid:", emit your final answer as a
+   single assistant message containing ONLY the SVG markup — starting
+   with <svg and ending with </svg>, no preamble, no commentary, no
+   markdown code fences.
+
+The SVG must include xmlns="http://www.w3.org/2000/svg" and be
+self-contained (no external references, no <script>). You have at
+most three tool calls per turn, so spend them wisely — a single
+large rewrite is better than many tiny patches.`
 	if m.yoloMode {
 		base += `
 
