@@ -61,12 +61,8 @@ type loadEntryMsg struct{}
 type engineReadyMsg engineinit.Result
 
 // engineReleasedMsg is delivered after a releaseEngineCmd finishes
-// closing the session and engine. Close errors are logged but not
-// surfaced as errText because the next open will reflect the real
-// state.
-type engineReleasedMsg struct {
-	err error
-}
+// closing the session and engine.
+type engineReleasedMsg struct{}
 
 // widgetCache is an LRU cache of rasterized SVG bitmaps, keyed by
 // filename. Caching the bitmap — rather than a svg.Model copy — lets a
@@ -716,11 +712,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case engineReleasedMsg:
 		m.lifecycle = m.lifecycle.onEngineReleased()
 		m.statusText = "Engine released"
-		if msg.err != nil {
-			m.logger.Printf("[ENGINE] release error: %v", msg.err)
-		} else {
-			m.logger.Printf("[ENGINE] released")
-		}
+		m.logger.Printf("[ENGINE] released")
 		return m, nil
 
 	case submitMsg:
