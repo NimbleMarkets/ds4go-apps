@@ -719,6 +719,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.entries[m.entryIndex].filename == base {
 			m.outputText = entryText(m.entries[m.entryIndex])
 		}
+		m.metadataInFlight = false
+		var action engineAction
+		m.lifecycle, action = m.lifecycle.onWorkDone(m.generating)
+		if action == actionRelease {
+			eng, sess := m.engine, m.session
+			m.engine, m.session = nil, nil
+			m.statusText = "Engine released"
+			return m, releaseEngineCmd(eng, sess)
+		}
 		return m, nil
 
 	case engineReadyMsg:
@@ -1000,6 +1009,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// into the saved file on a fresh session so the main
 				// conversation isn't polluted.
 				m.statusText += " · enriching"
+				m.metadataInFlight = true
 				cmds = append(cmds, enrichMetadataCmd(
 					m.engine, filepath.Base(m.modelPath), path, currentPrompt, svgData))
 			}
@@ -1028,6 +1038,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
 				return yoloSubmitMsg{text: nextPrompt}
 			}))
+		}
+
+		// Deferred release after a fully-complete turn: if the user
+		// pressed `x` mid-turn, fire releaseEngineCmd now that both
+		// generation and (any in-flight) metadata are accounted for.
+		var releaseAction engineAction
+		m.lifecycle, releaseAction = m.lifecycle.onWorkDone(m.metadataInFlight)
+		if releaseAction == actionRelease {
+			eng, sess := m.engine, m.session
+			m.engine, m.session = nil, nil
+			m.statusText = "Engine released"
+			cmds = append(cmds, releaseEngineCmd(eng, sess))
 		}
 
 	default:
