@@ -448,19 +448,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "enter":
-			if m.input.Focused() && !m.generating {
-				if m.lifecycle.status != engineinit.StatusReady {
-					m.statusText = "GPU initializing… please wait"
-					return m, nil
-				}
-				text := strings.TrimSpace(m.input.Value())
-				if text == "" {
-					text = defaultPrompt
-				}
+			if !m.input.Focused() || m.generating {
+				return m, tea.Batch(cmds...)
+			}
+			text := strings.TrimSpace(m.input.Value())
+			if text == "" {
+				text = defaultPrompt
+			}
+
+			var action engineAction
+			m.lifecycle, action = m.lifecycle.onSubmit()
+			switch action {
+			case actionGenerate:
+				// Engine ready — start the turn as before.
 				m.input.Blur()
 				m.panelFocus = focusThinking
-				m.yoloCount = 0 // manual reset
+				m.yoloCount = 0
 				cmds = append(cmds, func() tea.Msg { return submitMsg{text} })
+			case actionOpen:
+				// Dormant or Error — open the engine now; the
+				// engineReadyMsg handler will start generation when ready.
+				// Leave m.input alone so the user can still edit/abandon.
+				m.statusText = "opening engine…"
+				m.errText = ""
+				cmds = append(cmds, openEngineCmd(m.lib, m.engOpts, m.ctxSize))
+			case actionNone:
+				// Already Opening — submit is queued.
+				m.statusText = "opening engine… (will submit when ready)"
 			}
 			return m, tea.Batch(cmds...)
 
