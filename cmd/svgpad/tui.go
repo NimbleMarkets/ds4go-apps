@@ -456,6 +456,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text = defaultPrompt
 			}
 
+			m.errText = ""
 			var action engineAction
 			m.lifecycle, action = m.lifecycle.onSubmit()
 			switch action {
@@ -470,7 +471,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// engineReadyMsg handler will start generation when ready.
 				// Leave m.input alone so the user can still edit/abandon.
 				m.statusText = "opening engine…"
-				m.errText = ""
 				cmds = append(cmds, openEngineCmd(m.lib, m.engOpts, m.ctxSize))
 			case actionNone:
 				// Already Opening — submit is queued.
