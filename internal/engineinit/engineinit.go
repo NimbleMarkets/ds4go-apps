@@ -24,6 +24,10 @@ var (
 			Background(lipgloss.Color("214")).
 			Foreground(lipgloss.Color("16")).
 			Bold(true)
+	dormantBadgeStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("240")).
+			Foreground(lipgloss.Color("231")).
+			Bold(true)
 	readyBadgeStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("28")).
 			Foreground(lipgloss.Color("231")).
@@ -49,6 +53,8 @@ type Status int
 
 const (
 	StatusInit Status = iota
+	StatusDormant
+	StatusOpening
 	StatusReady
 	StatusError
 )
@@ -95,6 +101,10 @@ func Open(lib *ds4.Library, opts ds4.EngineOptions, ctxSize int) Result {
 // width (see badgeCellWidth) so transitions never reflow the header.
 func Badge(s Status) string {
 	switch s {
+	case StatusDormant:
+		return renderPill(dormantBadgeStyle, "💤 idle")
+	case StatusOpening:
+		return renderPill(initBadgeStyle, "⏳ open")
 	case StatusReady:
 		return renderPill(readyBadgeStyle, "⚡ GPU")
 	case StatusError:

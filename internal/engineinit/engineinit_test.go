@@ -39,9 +39,11 @@ func TestBadgesShareCellWidth(t *testing.T) {
 	// transition (init→ready or ready→error) cannot shift the header bar
 	// and trigger a width mismatch with the terminal's emoji rendering.
 	widths := map[Status]int{
-		StatusInit:  lipgloss.Width(Badge(StatusInit)),
-		StatusReady: lipgloss.Width(Badge(StatusReady)),
-		StatusError: lipgloss.Width(Badge(StatusError)),
+		StatusInit:    lipgloss.Width(Badge(StatusInit)),
+		StatusDormant: lipgloss.Width(Badge(StatusDormant)),
+		StatusOpening: lipgloss.Width(Badge(StatusOpening)),
+		StatusReady:   lipgloss.Width(Badge(StatusReady)),
+		StatusError:   lipgloss.Width(Badge(StatusError)),
 	}
 	first := widths[StatusInit]
 	for s, w := range widths {
@@ -56,5 +58,23 @@ func TestBadgeUnknownFallsBackToInit(t *testing.T) {
 	out := Badge(Status(99))
 	if !strings.Contains(out, "init") {
 		t.Errorf("Badge(unknown) = %q, want init fallback", out)
+	}
+}
+
+func TestBadgeDormant(t *testing.T) {
+	out := Badge(StatusDormant)
+	for _, want := range []string{"💤", "idle"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Badge(StatusDormant) = %q, missing %q", out, want)
+		}
+	}
+}
+
+func TestBadgeOpening(t *testing.T) {
+	out := Badge(StatusOpening)
+	for _, want := range []string{"⏳", "open"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Badge(StatusOpening) = %q, missing %q", out, want)
+		}
 	}
 }
