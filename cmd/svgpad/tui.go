@@ -201,6 +201,7 @@ type model struct {
 	genCtx     context.Context
 	genCancel  context.CancelFunc
 	generating bool
+	metadataInFlight bool // tracked between enrichMetadataCmd dispatch and metadataDoneMsg
 	statusText string
 	errText    string
 
@@ -648,6 +649,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "g":
 			cmds = append(cmds, m.svgWidget.ToggleRenderMode())
+
+		case "x":
+			busy := m.generating || m.metadataInFlight
+			var action engineAction
+			m.lifecycle, action = m.lifecycle.onReleaseRequest(busy)
+			if action == actionRelease {
+				eng, sess := m.engine, m.session
+				m.engine, m.session = nil, nil
+				m.statusText = "Engine released"
+				return m, releaseEngineCmd(eng, sess)
+			}
+			if m.lifecycle.releaseRequested {
+				if !strings.Contains(m.statusText, "releasing") {
+					m.statusText += " · releasing"
+				}
+			}
+			return m, nil
 
 		case "y":
 			m.yoloMode = !m.yoloMode
@@ -1774,6 +1792,7 @@ func (m model) keymap() editmode.Keymap {
 		{Keys: "r", Desc: "reason:" + strings.TrimSpace(m.thinkModeLabel())},
 		{Keys: "y", Desc: "yolo"},
 		{Keys: "m", Desc: "info"},
+		{Keys: "x", Desc: "release"},
 		{Keys: "?", Desc: "help"},
 		{Keys: "ctrl+n", Desc: "log"},
 		{Keys: "ctrl+c", Desc: "quit"},
