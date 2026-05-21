@@ -60,6 +60,14 @@ type loadEntryMsg struct{}
 // and session. The model holds nil engine/session until this lands.
 type engineReadyMsg engineinit.Result
 
+// engineReleasedMsg is delivered after a releaseEngineCmd finishes
+// closing the session and engine. Close errors are logged but not
+// surfaced as errText because the next open will reflect the real
+// state.
+type engineReleasedMsg struct {
+	err error
+}
+
 // widgetCache is an LRU cache of rasterized SVG bitmaps, keyed by
 // filename. Caching the bitmap — rather than a svg.Model copy — lets a
 // revisited entry render instantly via svg.Model.SetImage with no async
@@ -143,6 +151,21 @@ func spinnerTick() tea.Cmd {
 func openEngineCmd(lib *ds4.Library, opts ds4.EngineOptions, ctxSize int) tea.Cmd {
 	return func() tea.Msg {
 		return engineReadyMsg(engineinit.Open(lib, opts, ctxSize))
+	}
+}
+
+// releaseEngineCmd closes the supplied session and engine off the TUI
+// goroutine. Caller MUST null out m.engine / m.session before dispatch
+// so neither is used while the close is racing.
+func releaseEngineCmd(eng *ds4.Engine, sess *ds4.Session) tea.Cmd {
+	return func() tea.Msg {
+		if sess != nil {
+			sess.Close()
+		}
+		if eng != nil {
+			eng.Close()
+		}
+		return engineReleasedMsg{}
 	}
 }
 
@@ -688,6 +711,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.statusText = "Ready"
 		m.logger.Printf("[ENGINE] ready  mtp=%v mtpDraft=%d ctx=%d",
 			m.hasMTP, m.mtpDraft, m.ctxSize)
+		return m, nil
+
+	case engineReleasedMsg:
+		m.lifecycle = m.lifecycle.onEngineReleased()
+		m.statusText = "Engine released"
+		if msg.err != nil {
+			m.logger.Printf("[ENGINE] release error: %v", msg.err)
+		} else {
+			m.logger.Printf("[ENGINE] released")
+		}
 		return m, nil
 
 	case submitMsg:

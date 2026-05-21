@@ -210,3 +210,19 @@ func TestEngineReleased(t *testing.T) {
 		t.Errorf("status = %v, want Dormant", s.status)
 	}
 }
+
+func TestEngineReleasedHandlerLandsInDormant(t *testing.T) {
+	// Defensive: the helper used by the engineReleasedMsg handler must
+	// land any prior status in Dormant.
+	for _, start := range []engineinit.Status{
+		engineinit.StatusReady,
+		engineinit.StatusError,
+		engineinit.StatusOpening,
+	} {
+		s := engineLifecycle{status: start, releaseRequested: true}
+		s = s.onEngineReleased()
+		if s.status != engineinit.StatusDormant {
+			t.Errorf("from %v: status = %v, want Dormant", start, s.status)
+		}
+	}
+}
