@@ -21,6 +21,7 @@ import (
 	"github.com/NimbleMarkets/ds4go-playground/internal/ds4log"
 	"github.com/NimbleMarkets/ds4go-playground/internal/editmode"
 	"github.com/NimbleMarkets/ds4go-playground/internal/engineinit"
+	"github.com/NimbleMarkets/ds4go-playground/internal/headerbar"
 	svg "github.com/NimbleMarkets/ntcharts-svg/svg"
 )
 
@@ -116,11 +117,16 @@ type toolCallEntry struct {
 }
 
 type svgEntry struct {
-	filename  string
-	prompt    string
-	text      string
-	svgData   []byte
-	toolCalls []toolCallEntry
+	filename    string
+	prompt      string
+	text        string
+	title       string // from the enrichment pass (or pre-existing on-disk metadata)
+	desc        string
+	keywords    string
+	model       string    // model name stamped into <ai:model> at save time
+	generatedAt time.Time // matches <ai:generatedAt> in the saved file
+	svgData     []byte
+	toolCalls   []toolCallEntry
 }
 
 func spinnerTick() tea.Cmd {
@@ -157,7 +163,7 @@ type model struct {
 	showInfo  bool
 	showLog   bool           // libds4 log overlay is up (ctrl+n)
 	logBuf    *ds4log.Buffer // captured libds4 diagnostics
-	logScroll int            // lines scrolled back from the tail (0 = follow)
+	logTop    int            // absolute first-visible line; -1 = follow tail
 
 	history    []ds4.ChatMessage
 	rawBuf     []byte // raw LLM response for the current turn
@@ -251,9 +257,19 @@ func scanExistingSVGs(dir string, logger *log.Logger) []svgEntry {
 			logger.Printf("[SCAN] skip %s: %v", f.Name(), err)
 			continue
 		}
+		// If this file was enriched in a previous session, surface every
+		// field we stamped into it so navigating to it shows the same
+		// info as a freshly enriched entry — without a fresh LLM pass.
+		md := parseSVGMetadata(string(data))
 		result = append(result, svgEntry{
-			filename: f.Name(),
-			svgData:  data,
+			filename:    f.Name(),
+			svgData:     data,
+			title:       md.title,
+			desc:        md.desc,
+			keywords:    md.keywords,
+			prompt:      md.prompt,
+			model:       md.model,
+			generatedAt: md.generatedAt,
 		})
 	}
 	logger.Printf("[SCAN] loaded %d entries", len(result))
@@ -297,6 +313,7 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 		logger:        logger,
 		debug:         debug,
 		logBuf:        logBuf,
+		logTop:        -1, // follow the tail by default
 		svgWidget:     svg.NewWithConfig(svg.Config{Cols: 80, Rows: 24, RenderEdge: svgRenderEdge}),
 		showThinking:  true,
 		thinkBoxH:     defaultThink,
@@ -364,20 +381,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			case "esc":
 				m.showLog = false
-				m.logScroll = 0
+				m.logTop = -1 // reset to follow next time
 			case "up":
-				m.logScroll++
+				m.logTop = m.logScrollBy(-1)
 			case "down":
-				if m.logScroll > 0 {
-					m.logScroll--
-				}
+				m.logTop = m.logScrollBy(1)
 			case "pgup":
-				m.logScroll += m.logPageSize()
+				m.logTop = m.logScrollBy(-m.logPageSize())
 			case "pgdown":
-				m.logScroll -= m.logPageSize()
-				if m.logScroll < 0 {
-					m.logScroll = 0
-				}
+				m.logTop = m.logScrollBy(m.logPageSize())
 			}
 			return m, nil
 		}
@@ -609,6 +621,49 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.logger.Printf("[YOLO] mode=%v", m.yoloMode)
 		}
+
+	case metadataDoneMsg:
+		base := filepath.Base(msg.filename)
+		if msg.err != nil {
+			m.logger.Printf("[META] %s failed: %v", base, msg.err)
+			if !m.generating {
+				m.statusText = strings.Replace(m.statusText, " · enriching", " · metadata failed", 1)
+			}
+		} else {
+			m.logger.Printf("[META] %s enriched  title=%q", base, msg.title)
+			if !m.generating {
+				m.statusText = strings.Replace(m.statusText, " · enriching", " · enriched", 1)
+			}
+		}
+		// Even on splice/write failure, the model may have produced a
+		// usable title/desc — surface it on the matching entry. The
+		// deterministic fields (model, generatedAt) come from the cmd
+		// regardless of LLM output, so always copy them through too.
+		for i := range m.entries {
+			if m.entries[i].filename == base {
+				if msg.title != "" {
+					m.entries[i].title = msg.title
+				}
+				if msg.desc != "" {
+					m.entries[i].desc = msg.desc
+				}
+				if msg.keywords != "" {
+					m.entries[i].keywords = msg.keywords
+				}
+				if msg.model != "" {
+					m.entries[i].model = msg.model
+				}
+				if !msg.generatedAt.IsZero() {
+					m.entries[i].generatedAt = msg.generatedAt
+				}
+				break
+			}
+		}
+		if m.entryIndex >= 0 && m.entryIndex < len(m.entries) &&
+			m.entries[m.entryIndex].filename == base {
+			m.outputText = entryText(m.entries[m.entryIndex])
+		}
+		return m, nil
 
 	case engineReadyMsg:
 		if msg.Err != nil {
@@ -857,6 +912,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.statusText += " · saved " + fname
 				m.logger.Printf("[SAVE] %s (%d bytes)", fname, len(svgData))
+				// Fire the second LLM pass: write <title>/<desc>/<metadata>
+				// into the saved file on a fresh session so the main
+				// conversation isn't polluted.
+				m.statusText += " · enriching"
+				cmds = append(cmds, enrichMetadataCmd(
+					m.engine, filepath.Base(m.modelPath), path, currentPrompt, svgData))
 			}
 		}
 
@@ -1204,7 +1265,7 @@ func (m *model) loadEntryCmd() tea.Cmd {
 	}
 	e := m.entries[m.entryIndex]
 	m.thinkText = ""
-	m.outputText = e.text
+	m.outputText = entryText(e)
 	m.thinkScroll = 0
 	m.toolScroll = 0
 	m.toolCalls = make([]toolCallEntry, len(e.toolCalls))
@@ -1269,42 +1330,13 @@ func (m model) render() string {
 			status = m.statusText + " " + m.bicycleSpinner()
 		}
 	}
-	prefix := fmt.Sprintf(" svgpad │ %s │ ", modelName)
-	badge := engineinit.Badge(m.engineStatus)
-	badgeW := lipgloss.Width(badge)
-	avail := m.width - lipgloss.Width(prefix) - badgeW
-	metrics := m.headerMetrics()
-	if metrics != "" {
-		avail -= lipgloss.Width(metrics) + 1
-	}
-	if avail < 3 {
-		avail = 3
-	}
-	if lipgloss.Width(status) > avail {
-		runes := []rune(status)
-		if len(runes) > avail-3 {
-			status = string(runes[:avail-3]) + "..."
-		}
-	}
-	headerLine := prefix + status
-	if metrics != "" {
-		gap := m.width - lipgloss.Width(headerLine) - lipgloss.Width(metrics) - badgeW
-		if gap < 1 {
-			gap = 1
-		}
-		headerLine = headerLine + strings.Repeat(" ", gap) + metrics
-	}
-	// Pad to within badgeW of full width, then append the badge.
-	pad := m.width - lipgloss.Width(headerLine) - badgeW
-	if pad < 0 {
-		pad = 0
-	}
-	headerLine = headerLine + strings.Repeat(" ", pad) + badge
-	pad = m.width - lipgloss.Width(headerLine)
-	if pad < 0 {
-		pad = 0
-	}
-	header := headerLine + strings.Repeat(" ", pad)
+	header := headerbar.Layout(
+		m.width,
+		fmt.Sprintf(" svgpad │ %s │ ", modelName),
+		status,
+		m.headerMetrics(),
+		engineinit.Badge(m.engineStatus),
+	)
 
 	// Footer
 	// Footer help bar — swaps with mode (edit vs command) via the shared
@@ -1380,18 +1412,33 @@ func (m model) render() string {
 			}
 		}
 
+		// Left "Image" info panel takes a narrow fixed slice; think/tool
+		// share what remains, divided by m.thinkBoxW. Skip the info
+		// panel when the terminal is too narrow to host three columns.
+		infoW := 30
+		if max := m.width / 3; infoW > max {
+			infoW = max
+		}
+		if infoW < 18 {
+			infoW = 0
+		}
+		if m.width-infoW < 2*minPanelW {
+			infoW = 0
+		}
+		remaining := m.width - infoW
+
 		if m.thinkBoxW == 0 {
-			m.thinkBoxW = m.width * 3 / 4
+			m.thinkBoxW = remaining * 3 / 4
 		}
 		if m.thinkBoxW < minPanelW {
 			m.thinkBoxW = minPanelW
 		}
-		if m.thinkBoxW > m.width-minPanelW {
-			m.thinkBoxW = m.width - minPanelW
+		if m.thinkBoxW > remaining-minPanelW {
+			m.thinkBoxW = remaining - minPanelW
 		}
 		thinkW := m.thinkBoxW
-		toolW := m.width - thinkW
-		thinkContentW := thinkW - 2  // borders
+		toolW := remaining - thinkW
+		thinkContentW := thinkW - 2 // borders
 		toolContentW := toolW - 2
 
 		// Compute wrapped line count for auto-scroll and bottom-detection.
@@ -1437,7 +1484,23 @@ func (m model) render() string {
 			Height(m.thinkBoxH + 2).MaxHeight(m.thinkBoxH + 2).
 			Render(toolContent)
 
-		topRow := lipgloss.JoinHorizontal(lipgloss.Top, thinkingPanel, toolPanel)
+		var topRow string
+		if infoW > 0 {
+			var infoContent string
+			if m.entryIndex >= 0 && m.entryIndex < len(m.entries) {
+				infoContent = renderEntryInfo(m.entries[m.entryIndex])
+			}
+			infoContent = wrapAndTruncate(infoContent, infoW-2, m.thinkBoxH, 0)
+			infoPanel := lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder()).
+				BorderForeground(lipgloss.Color("240")).
+				Width(infoW).MaxWidth(infoW).
+				Height(m.thinkBoxH + 2).MaxHeight(m.thinkBoxH + 2).
+				Render(infoContent)
+			topRow = lipgloss.JoinHorizontal(lipgloss.Top, infoPanel, thinkingPanel, toolPanel)
+		} else {
+			topRow = lipgloss.JoinHorizontal(lipgloss.Top, thinkingPanel, toolPanel)
+		}
 		sections = append(sections, topRow)
 	}
 	sections = append(sections, svgContent)
@@ -1662,10 +1725,56 @@ func (m model) logPageSize() int {
 	return h
 }
 
+// logScrollBy returns a new logTop after moving by delta lines from the
+// current view. A scroll up from follow-tail mode anchors the view at the
+// current tail; scrolling back to the bottom of the buffer re-enables
+// follow mode (-1). The result is clamped to [0, total-innerH].
+func (m model) logScrollBy(delta int) int {
+	total, innerH := m.logVisibleMetrics()
+	maxTop := total - innerH
+	if maxTop < 0 {
+		maxTop = 0
+	}
+	top := m.logTop
+	if top < 0 { // currently following the tail — anchor here
+		top = maxTop
+	}
+	top += delta
+	if top < 0 {
+		top = 0
+	}
+	if top >= maxTop {
+		return -1 // back at the tail; resume following
+	}
+	return top
+}
+
+// logVisibleMetrics returns (total wrapped lines, visible content height)
+// for the current buffer and window — the two numbers needed for any
+// scroll/clamp arithmetic. Computing both in one place keeps the scroll
+// math consistent between the dispatcher and the renderer.
+func (m model) logVisibleMetrics() (total, innerH int) {
+	innerW := m.width - 6
+	if innerW < 10 {
+		innerW = 10
+	}
+	innerH = m.height - 6
+	if innerH < 1 {
+		innerH = 1
+	}
+	lines := m.logBuf.Lines()
+	if len(lines) == 0 {
+		return 0, innerH
+	}
+	wrapped := lipgloss.NewStyle().Width(innerW).Render(strings.Join(lines, "\n"))
+	return strings.Count(wrapped, "\n") + 1, innerH
+}
+
 // logOverlay renders the ctrl+n popup — recent libds4 diagnostics captured
 // by the in-memory ring buffer — centered over a blank full-screen area.
-// up/down/pgup/pgdown scroll via m.logScroll (0 = follow the tail); esc
-// closes the overlay.
+// When m.logTop == -1 the view follows the tail; any scroll back anchors
+// it at an absolute line so incoming "done" lines do not shift the view.
+// esc closes; ctrl+c/q quits.
 func (m model) logOverlay() string {
 	lines := m.logBuf.Lines()
 	if len(lines) == 0 {
@@ -1682,25 +1791,33 @@ func (m model) logOverlay() string {
 	wrapped := lipgloss.NewStyle().Width(innerW).Render(strings.Join(lines, "\n"))
 	allLines := strings.Split(wrapped, "\n")
 
-	// Clamp scroll to [0, max] and slice the visible window.
 	total := len(allLines)
-	maxScroll := total - innerH
-	if maxScroll < 0 {
-		maxScroll = 0
+	maxTop := total - innerH
+	if maxTop < 0 {
+		maxTop = 0
 	}
-	scroll := m.logScroll
-	if scroll > maxScroll {
-		scroll = maxScroll
+	var start int
+	following := m.logTop < 0
+	if following {
+		start = maxTop
+	} else {
+		start = m.logTop
+		if start > maxTop {
+			start = maxTop
+		}
 	}
-	end := total - scroll
-	start := end - innerH
-	if start < 0 {
-		start = 0
+	end := start + innerH
+	if end > total {
+		end = total
 	}
 	body := strings.Join(allLines[start:end], "\n")
 
-	hint := fmt.Sprintf("  up/down · pgup/pgdown scroll · esc close   [%d/%d]",
-		scroll, maxScroll)
+	mode := "TAIL"
+	if !following {
+		mode = "FROZEN"
+	}
+	hint := fmt.Sprintf("  up/down · pgup/pgdown scroll · esc close   [%s %d/%d]",
+		mode, start, maxTop)
 	body += "\n\n" + infoDimStyle.Render(hint)
 
 	box := titledBox(lipgloss.NewStyle().
