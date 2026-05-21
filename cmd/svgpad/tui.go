@@ -135,6 +135,17 @@ func spinnerTick() tea.Cmd {
 	})
 }
 
+// openEngineCmd opens the ds4 engine on the goroutine bubbletea spawns
+// for this Cmd. It is dispatched both on first user submit and on
+// re-acquisition after a manual release. The library handle, engine
+// options, and ctx size are captured by value so the goroutine can
+// run independently of any later model mutation.
+func openEngineCmd(lib *ds4.Library, opts ds4.EngineOptions, ctxSize int) tea.Cmd {
+	return func() tea.Msg {
+		return engineReadyMsg(engineinit.Open(lib, opts, ctxSize))
+	}
+}
+
 // ── model ────────────────────────────────────────────────────────────────────
 
 type panelFocus int
@@ -152,7 +163,7 @@ type model struct {
 	session      *ds4.Session
 	lib          *ds4.Library      // resolved in main, used by Init's goroutine
 	engOpts      ds4.EngineOptions // captured to fire async open
-	engineStatus engineinit.Status // drives the header badge
+	lifecycle engineLifecycle // engine state machine, drives badge + transitions
 	engineErr    error             // set when StatusError
 	modelPath    string
 	mtpPath      string
@@ -302,7 +313,7 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 	return model{
 		lib:           lib,
 		engOpts:       engOpts,
-		engineStatus:  engineinit.StatusInit,
+		lifecycle:     engineLifecycle{status: engineinit.StatusDormant},
 		modelPath:     modelPath,
 		mtpPath:       mtpPath,
 		backend:       backend,
@@ -333,16 +344,10 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 // ── BubbleTea interface ───────────────────────────────────────────────────────
 
 func (m model) Init() tea.Cmd {
-	lib, opts, ctxSize := m.lib, m.engOpts, m.ctxSize
-	return tea.Batch(
-		m.svgWidget.Init(),
-		// Open the engine in the goroutine bubbletea spawns for this Cmd.
-		// Until engineReadyMsg lands the TUI is interactive but Enter is
-		// gated; the header badge shows the init/ready state.
-		func() tea.Msg {
-			return engineReadyMsg(engineinit.Open(lib, opts, ctxSize))
-		},
-	)
+	// The engine is opened lazily on first prompt submit. Startup is
+	// Dormant: the viewer panel and entry navigation work without any
+	// model loaded.
+	return m.svgWidget.Init()
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -425,7 +430,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "enter":
 			if m.input.Focused() && !m.generating {
-				if m.engineStatus != engineinit.StatusReady {
+				if m.lifecycle.status != engineinit.StatusReady {
 					m.statusText = "GPU initializing… please wait"
 					return m, nil
 				}
@@ -667,7 +672,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case engineReadyMsg:
 		if msg.Err != nil {
-			m.engineStatus = engineinit.StatusError
+			m.lifecycle.status = engineinit.StatusError
 			m.engineErr = msg.Err
 			m.statusText = "Error"
 			m.errText = msg.Err.Error()
@@ -679,7 +684,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.hasMTP = msg.HasMTP
 		m.mtpDraft = msg.MTPDraft
 		m.ctxSize = msg.Session.Ctx()
-		m.engineStatus = engineinit.StatusReady
+		m.lifecycle.status = engineinit.StatusReady
 		m.statusText = "Ready"
 		m.logger.Printf("[ENGINE] ready  mtp=%v mtpDraft=%d ctx=%d",
 			m.hasMTP, m.mtpDraft, m.ctxSize)
@@ -1335,7 +1340,7 @@ func (m model) render() string {
 		fmt.Sprintf(" svgpad │ %s │ ", modelName),
 		status,
 		m.headerMetrics(),
-		engineinit.Badge(m.engineStatus),
+		engineinit.Badge(m.lifecycle.status),
 	)
 
 	// Footer
