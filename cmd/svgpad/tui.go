@@ -705,22 +705,44 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case engineReadyMsg:
 		if msg.Err != nil {
-			m.lifecycle.status = engineinit.StatusError
+			m.lifecycle, _ = m.lifecycle.onEngineOpened(false)
 			m.engineErr = msg.Err
 			m.statusText = "Error"
 			m.errText = msg.Err.Error()
 			m.logger.Printf("[ENGINE] open failed: %v", msg.Err)
 			return m, nil
 		}
+		// On success the engine/session are owned by us until release.
 		m.engine = msg.Engine
 		m.session = msg.Session
 		m.hasMTP = msg.HasMTP
 		m.mtpDraft = msg.MTPDraft
 		m.ctxSize = msg.Session.Ctx()
-		m.lifecycle.status = engineinit.StatusReady
+		var action engineAction
+		m.lifecycle, action = m.lifecycle.onEngineOpened(true)
 		m.statusText = "Ready"
 		m.logger.Printf("[ENGINE] ready  mtp=%v mtpDraft=%d ctx=%d",
 			m.hasMTP, m.mtpDraft, m.ctxSize)
+
+		switch action {
+		case actionGenerate:
+			// Queued submit — fire it now using whatever's currently in
+			// the input box (the user could have edited it during open).
+			text := strings.TrimSpace(m.input.Value())
+			if text == "" {
+				text = defaultPrompt
+			}
+			m.input.Blur()
+			m.panelFocus = focusThinking
+			m.yoloCount = 0
+			return m, func() tea.Msg { return submitMsg{text} }
+		case actionRelease:
+			// Queued release — give the lock back immediately.
+			eng, sess := m.engine, m.session
+			m.engine, m.session = nil, nil
+			m.statusText = "Engine released"
+			return m, releaseEngineCmd(eng, sess)
+		}
 		return m, nil
 
 	case engineReleasedMsg:
