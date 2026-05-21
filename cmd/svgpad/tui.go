@@ -858,7 +858,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case yoloSubmitMsg:
-		if m.yoloMode && !m.generating && m.yoloCount < 20 {
+		// Drop the YOLO tick if the engine was released between when
+		// this tick was scheduled and when it fired (e.g., user pressed
+		// `x` mid-turn). Re-arming would crash submitMsg with a nil
+		// session.
+		if m.yoloMode && !m.generating && m.yoloCount < 20 && m.lifecycle.status == engineinit.StatusReady {
 			cmds = append(cmds, func() tea.Msg { return submitMsg{msg.text} })
 		}
 
