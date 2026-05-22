@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"image"
 	"log"
@@ -17,6 +18,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/76creates/stickers/flexbox"
 	"github.com/NimbleMarkets/ds4go"
 	"github.com/NimbleMarkets/ds4go-playground/internal/ds4log"
 	"github.com/NimbleMarkets/ds4go-playground/internal/editmode"
@@ -241,6 +243,7 @@ type model struct {
 
 	autoCorrectCount int
 	maxAutoCorrect   int
+	lastErr          error
 
 	// metrics
 	genStart       time.Time
@@ -353,7 +356,7 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 		cache:          newWidgetCache(50),
 		tools:          reg,
 		maxToolRounds:  3,
-		maxAutoCorrect: 0, // 0 = let the model drive correction via svg_validate tool calls
+		maxAutoCorrect: 3, // automatically trigger correction turns via svg_validate tool calls
 		toolCallCounts: make(map[string]int),
 		panelFocus:     focusInput,
 		entries:        existing,
@@ -619,8 +622,76 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "n":
 			m.input.SetValue("")
 			m.thinkText = ""
+			m.history = nil
+			m.lastErr = nil
+			m.errText = ""
 			m.panelFocus = focusInput
 			cmds = append(cmds, m.input.Focus())
+
+		case "c":
+			if m.generating {
+				return m, nil
+			}
+			isTruncated := false
+			if m.lastErr != nil {
+				if errors.Is(m.lastErr, ds4.ErrContextFull) || m.lastErr.Error() == "ds4go: session context full" || errors.Is(m.lastErr, context.Canceled) {
+					isTruncated = true
+				}
+			}
+			if isTruncated {
+				if len(m.history) > 0 && m.history[len(m.history)-1].Role == "assistant" {
+					m.history = m.history[:len(m.history)-1]
+				}
+				m.generating = true
+				m.statusText = fmt.Sprintf("Continue [%d/%d]...", m.toolRounds, m.maxToolRounds)
+				m.errText = ""
+				m.spinnerFrame = 0
+				m.genStart = time.Now()
+				m.firstTokenTime = time.Time{}
+				m.genEnd = time.Time{}
+				m.tokenCount = 0
+				m.genCtx, m.genCancel = context.WithCancel(context.Background())
+				cmds = append(cmds, spinnerTick())
+				ch := make(chan tea.Msg, 64)
+				m.tokenCh = ch
+				go m.generateContinue(ch)
+				cmds = append(cmds, waitMsg(ch))
+			} else {
+				var svgData []byte
+				if m.entryIndex >= 0 && m.entryIndex < len(m.entries) {
+					svgData = m.entries[m.entryIndex].svgData
+				}
+				var v string
+				if len(svgData) == 0 {
+					v = "no SVG markup found — your response must start with <svg and end with </svg>"
+				} else {
+					v = validateSVG(svgData)
+				}
+				if v != "valid" {
+					m.generating = true
+					m.statusText = "Correcting SVG · " + v
+					m.errText = ""
+					m.thinkAutoScroll = true
+					m.spinnerFrame = 0
+					m.genStart = time.Now()
+					m.firstTokenTime = time.Time{}
+					m.genEnd = time.Time{}
+					m.tokenCount = 0
+					m.rawBuf = m.rawBuf[:0]
+					m.thinkText = ""
+					m.outputText = ""
+					m.toolCalls = m.toolCalls[:0]
+					feedback := fmt.Sprintf("Your output was invalid: %s. Please output ONLY a corrected, complete SVG.", v)
+					m.history = append(m.history, ds4.ChatMessage{Role: "user", Content: feedback})
+					m.genCtx, m.genCancel = context.WithCancel(context.Background())
+					cmds = append(cmds, spinnerTick())
+					ch := make(chan tea.Msg, 64)
+					m.tokenCh = ch
+					go m.generate(ch)
+					cmds = append(cmds, waitMsg(ch))
+				}
+			}
+			return m, tea.Batch(cmds...)
 
 		case "m":
 			m.showInfo = true
@@ -863,11 +934,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// `x` mid-turn). Re-arming would crash submitMsg with a nil
 		// session.
 		if m.yoloMode && !m.generating && m.yoloCount < 20 && m.lifecycle.status == engineinit.StatusReady {
+			m.history = nil
 			cmds = append(cmds, func() tea.Msg { return submitMsg{msg.text} })
 		}
 
 	case doneMsg:
 		m.generating = false
+		m.lastErr = msg.err
 		if m.genCtx != nil && m.genCtx.Err() == context.Canceled {
 			m.statusText = "Aborted"
 		} else {
@@ -881,8 +954,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.genEnd = time.Now()
 		m.ctxPos = msg.ctxPos
 		if msg.err != nil && msg.err != context.Canceled {
-			m.errText = msg.err.Error()
-			m.statusText = "Error"
+			if errors.Is(msg.err, ds4.ErrContextFull) || msg.err.Error() == "ds4go: session context full" {
+				m.statusText = "Ready · Context full"
+				m.errText = "Session context capacity reached. Press 'c' to continue or 'n' for a new prompt."
+			} else {
+				m.errText = msg.err.Error()
+				m.statusText = "Error"
+			}
 		}
 		m.logger.Printf("[DONE] %d tok  %.1f tok/s  ttft=%s  gen=%s  ctx=%d/%d",
 			m.tokenCount, m.decodeSpeed(), fmtDuration(m.ttft()), fmtDuration(m.genTime()),
@@ -993,10 +1071,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(svgData) > 0 {
 			cmds = append(cmds, m.svgWidget.SetSVGData("output.svg", svgData))
 			v := validateSVG(svgData)
-			if v == "valid" {
-				m.statusText = "Ready · SVG valid"
+			if msg.err != nil && (errors.Is(msg.err, ds4.ErrContextFull) || msg.err.Error() == "ds4go: session context full") {
+				m.statusText = "Ready · Context full"
 			} else {
-				m.statusText = "Ready · " + v
+				if v == "valid" {
+					m.statusText = "Ready · SVG valid"
+				} else {
+					m.statusText = "Ready · " + v
+				}
 			}
 			m.logger.Printf("[SVG] %s (%d bytes)", v, len(svgData))
 
@@ -1110,6 +1192,33 @@ func (m model) generate(ch chan tea.Msg) {
 
 	gen := ds4.Generator{Engine: m.engine, Session: m.session}
 	_, genErr := gen.GenerateTokens(prompt, opts)
+	done(genErr)
+}
+
+func (m model) generateContinue(ch chan tea.Msg) {
+	defer close(ch)
+
+	done := func(err error) {
+		ch <- doneMsg{err: err, ctxPos: m.session.Pos()}
+	}
+
+	opts := ds4.GenerateOptions{
+		MaxTokens: 8192,
+		StopOnEOS: true,
+	}
+	opts.OnToken = func(token int) {
+		if text, err := m.engine.TokenText(token); err == nil {
+			select {
+			case ch <- tokenMsg(text):
+			default:
+				// Channel full — drop token so Continue can check context.
+			}
+		}
+	}
+	opts.Context = m.genCtx
+
+	gen := ds4.Generator{Engine: m.engine, Session: m.session}
+	_, genErr := gen.Continue(opts)
 	done(genErr)
 }
 
@@ -1537,17 +1646,16 @@ func (m model) render() string {
 			}
 		}
 
-		// Left "Image" info panel takes a narrow fixed slice; think/tool
-		// share what remains, divided by m.thinkBoxW. Skip the info
-		// panel when the terminal is too narrow to host three columns.
+		// Three side-by-side panels — info / reasoning / tools — laid
+		// out by a stickers FlexBox. FlexBox owns each cell's width,
+		// height, and border frame, so there is no manual border math.
+		// The info panel takes a narrow fixed slice; reasoning/tools
+		// share what remains, divided by the resizable m.thinkBoxW.
 		infoW := 30
-		if max := m.width / 3; infoW > max {
-			infoW = max
+		if mx := m.width / 3; infoW > mx {
+			infoW = mx
 		}
-		if infoW < 18 {
-			infoW = 0
-		}
-		if m.width-infoW < 2*minPanelW {
+		if infoW < 18 || m.width-infoW < 2*minPanelW {
 			infoW = 0
 		}
 		remaining := m.width - infoW
@@ -1563,30 +1671,22 @@ func (m model) render() string {
 		}
 		thinkW := m.thinkBoxW
 		toolW := remaining - thinkW
-		thinkContentW := thinkW - 2 // borders
-		toolContentW := toolW - 2
 
-		// Compute wrapped line count for auto-scroll and bottom-detection.
-		wrapped := lipgloss.NewStyle().Width(thinkContentW).Render(thinkContent)
-		totalLines := len(strings.Split(wrapped, "\n"))
-		bottomScroll := totalLines - m.thinkBoxH
+		// Auto-scroll: estimate the wrapped line count against the
+		// reasoning cell's inner width (cell width minus its 2-cell
+		// border) so the scroll offset follows new content. The exact
+		// re-wrap happens inside each cell's content generator.
+		wrapped := lipgloss.NewStyle().Width(thinkW - 2).Render(thinkContent)
+		bottomScroll := len(strings.Split(wrapped, "\n")) - m.thinkBoxH
 		if bottomScroll < 0 {
 			bottomScroll = 0
 		}
-
-		// Auto-scroll to bottom unless user has manually scrolled up.
-		// If they scroll back to the bottom, re-enable auto-scroll.
 		if m.thinkAutoScroll {
 			m.thinkScroll = bottomScroll
 		} else if m.thinkScroll >= bottomScroll {
 			m.thinkAutoScroll = true
 			m.thinkScroll = bottomScroll
 		}
-
-		// Apply scroll offset, pre-wrap to content width, and truncate to exact height.
-		thinkContent = wrapAndTruncate(thinkContent, thinkContentW, m.thinkBoxH, m.thinkScroll)
-		toolContent := m.renderToolPanel()
-		toolContent = wrapAndTruncate(toolContent, toolContentW, m.thinkBoxH, m.toolScroll)
 
 		thinkBorderColor := lipgloss.Color("240")
 		toolBorderColor := lipgloss.Color("240")
@@ -1595,38 +1695,43 @@ func (m model) render() string {
 		} else if m.panelFocus == focusTools {
 			toolBorderColor = lipgloss.Color("75")
 		}
+		baseBorder := lipgloss.NewStyle().Border(lipgloss.NormalBorder())
 
-		thinkingPanel := lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(thinkBorderColor).
-			Width(thinkW).MaxWidth(thinkW).
-			Height(m.thinkBoxH + 2).MaxHeight(m.thinkBoxH + 2).
-			Render(thinkContent)
-		toolPanel := lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(toolBorderColor).
-			Width(toolW).MaxWidth(toolW).
-			Height(m.thinkBoxH + 2).MaxHeight(m.thinkBoxH + 2).
-			Render(toolContent)
-
-		var topRow string
-		if infoW > 0 {
-			var infoContent string
-			if m.entryIndex >= 0 && m.entryIndex < len(m.entries) {
-				infoContent = renderEntryInfo(m.entries[m.entryIndex])
-			}
-			infoContent = wrapAndTruncate(infoContent, infoW-2, m.thinkBoxH, 0)
-			infoPanel := lipgloss.NewStyle().
-				Border(lipgloss.NormalBorder()).
-				BorderForeground(lipgloss.Color("240")).
-				Width(infoW).MaxWidth(infoW).
-				Height(m.thinkBoxH + 2).MaxHeight(m.thinkBoxH + 2).
-				Render(infoContent)
-			topRow = lipgloss.JoinHorizontal(lipgloss.Top, infoPanel, thinkingPanel, toolPanel)
-		} else {
-			topRow = lipgloss.JoinHorizontal(lipgloss.Top, thinkingPanel, toolPanel)
+		// Raw (unwrapped) panel bodies; the cell content generators
+		// wrap them to whatever inner size FlexBox hands them.
+		rawThink := thinkContent
+		rawTool := m.renderToolPanel()
+		var rawInfo string
+		if m.entryIndex >= 0 && m.entryIndex < len(m.entries) {
+			rawInfo = renderEntryInfo(m.entries[m.entryIndex])
 		}
-		sections = append(sections, topRow)
+		thinkScroll, toolScroll := m.thinkScroll, m.toolScroll
+
+		fb := flexbox.New(m.width, m.thinkBoxH+2)
+		fbRow := fb.NewRow()
+		var cells []*flexbox.Cell
+		if infoW > 0 {
+			cells = append(cells, flexbox.NewCell(infoW, 1).
+				SetStyle(baseBorder.BorderForeground(lipgloss.Color("240"))).
+				SetContentGenerator(func(x, y int) string {
+					return wrapAndTruncate(rawInfo, x, y, 0)
+				}))
+		}
+		cells = append(cells,
+			flexbox.NewCell(thinkW, 1).
+				SetStyle(baseBorder.BorderForeground(thinkBorderColor)).
+				SetContentGenerator(func(x, y int) string {
+					return wrapAndTruncate(rawThink, x, y, thinkScroll)
+				}),
+			flexbox.NewCell(toolW, 1).
+				SetStyle(baseBorder.BorderForeground(toolBorderColor)).
+				SetContentGenerator(func(x, y int) string {
+					return wrapAndTruncate(rawTool, x, y, toolScroll)
+				}),
+		)
+		fbRow.AddCells(cells...)
+		fb.AddRows([]*flexbox.Row{fbRow})
+		sections = append(sections, fb.Render())
 	}
 	sections = append(sections, svgContent)
 
@@ -1828,6 +1933,7 @@ func (m model) keymap() editmode.Keymap {
 	cmd := []editmode.Binding{
 		{Keys: "e", Desc: "edit"},
 		{Keys: "n", Desc: "new"},
+		{Keys: "c", Desc: "continue"},
 		{Keys: "g", Desc: "glyph"},
 		{Keys: "t", Desc: "think"},
 		{Keys: "r", Desc: "reason:" + strings.TrimSpace(m.thinkModeLabel())},
@@ -1962,6 +2068,7 @@ func (m model) helpOverlay() string {
 	b.WriteString("Command mode (edit box not targeted)\n")
 	b.WriteString("  e          edit prompt (target the box)\n")
 	b.WriteString("  n          new prompt\n")
+	b.WriteString("  c          continue generating or correct SVG\n")
 	b.WriteString("  g          toggle glyph/image render mode\n")
 	b.WriteString("  t          toggle thinking/output box\n")
 	b.WriteString("  r          cycle reasoning mode (OFF → HIGH → MAX)\n")
