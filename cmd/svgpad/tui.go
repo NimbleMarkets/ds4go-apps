@@ -748,6 +748,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusText = "YOLO mode OFF"
 			}
 			m.logger.Printf("[YOLO] mode=%v", m.yoloMode)
+
+		case "p":
+			m.preserveContext = !m.preserveContext
+			if m.preserveContext {
+				m.statusText = "Context: preserved across generations"
+			} else {
+				m.statusText = "Context: cleared per generation"
+			}
+			m.logger.Printf("[CONTEXT] preserve=%v", m.preserveContext)
 		}
 
 	case metadataDoneMsg:
@@ -1885,6 +1894,11 @@ func (m model) infoOverlay() string {
 	row("backend", m.backend)
 	row("context", fmt.Sprintf("%d tokens", m.ctxSize))
 	row("reasoning", strings.TrimSpace(m.thinkModeLabel()))
+	ctxMode := "cleared per generation"
+	if m.preserveContext {
+		ctxMode = "preserved across generations"
+	}
+	row("context mode", ctxMode)
 	b.WriteString("\n")
 
 	head("Metrics — last turn")
@@ -1942,6 +1956,7 @@ func (m model) keymap() editmode.Keymap {
 		{Keys: "t", Desc: "think"},
 		{Keys: "r", Desc: "reason:" + strings.TrimSpace(m.thinkModeLabel())},
 		{Keys: "y", Desc: "yolo"},
+		{Keys: "p", Desc: "preserve"},
 		{Keys: "m", Desc: "info"},
 		{Keys: "x", Desc: "release"},
 		{Keys: "?", Desc: "help"},
