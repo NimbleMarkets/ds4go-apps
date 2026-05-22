@@ -228,6 +228,7 @@ type model struct {
 	entries    []svgEntry
 	entryIndex int
 	yoloMode   bool
+	preserveContext bool // when false, m.history is cleared before each new generation
 	yoloCount  int
 	outputText string
 	cache      *widgetCache
@@ -851,6 +852,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case submitMsg:
 		m.logger.Printf("[USER] %s", msg.text)
+		if !m.preserveContext {
+			m.history = nil
+		}
 		m.history = append(m.history, ds4.ChatMessage{Role: "user", Content: msg.text})
 		m.rawBuf = m.rawBuf[:0]
 		m.thinkText = ""
