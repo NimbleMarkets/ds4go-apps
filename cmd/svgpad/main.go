@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/NimbleMarkets/ds4go"
@@ -22,7 +23,7 @@ func main() {
 	)
 	pflag.StringVarP(&modelPath, "model", "m", "", "path to GGUF model file (default: $DS4_DIR/models/ds4flash.gguf)")
 	pflag.StringVar(&libPath, "lib", "", "path to libds4 shared library (optional, uses default search)")
-	pflag.IntVar(&ctxSize, "ctx", 32768, "context window size in tokens")
+	pflag.IntVar(&ctxSize, "ctx", 32768, "context window size in tokens; lower to 16384 or 8192 if VRAM is tight")
 	pflag.StringVar(&backend, "backend", "metal", "inference backend: metal, cuda, cpu")
 	pflag.BoolVarP(&debug, "debug", "d", false, "log raw LLM token stream and tee libds4 diagnostics to svgpad.log")
 	pflag.Parse()
@@ -76,16 +77,33 @@ func main() {
 	}
 	ds4.SetDefaultLibrary(lib)
 
-	engOpts := ds4.EngineOptions{ModelPath: modelPath, Backend: be}
+	engOpts := ds4.EngineOptions{ModelPath: modelPath, Backend: be, WarmWeights: true}
 	ds4.ApplyMTPDefaults(&engOpts)
 	mtpPath := engOpts.MTPPath
 
 	logger.Printf("=== svgpad start  model=%s backend=%s ctx=%d debug=%v ===",
 		filepath.Base(modelPath), backend, ctxSize, debug)
 
+	// Redirect stderr to /dev/null to squelch C/C++ backend library log spam
+	var originalStderrFd int
+	var dupErr error
+	if devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
+		originalStderrFd, dupErr = syscall.Dup(2)
+		if dupErr == nil {
+			_ = syscall.Dup2(int(devNull.Fd()), 2)
+		}
+		devNull.Close()
+	}
+
 	m := newModel(lib, engOpts, ctxSize, modelPath, mtpPath, backend, logger, logBuf, debug)
 	p := tea.NewProgram(m)
 	final, runErr := p.Run()
+
+	// Restore stderr
+	if dupErr == nil {
+		_ = syscall.Dup2(originalStderrFd, 2)
+		_ = syscall.Close(originalStderrFd)
+	}
 
 	// The model owns the engine/session once Init's goroutine fires; on
 	// exit we recover them from the final model state and close in order.

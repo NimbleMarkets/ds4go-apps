@@ -13,18 +13,19 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"regexp"
 	"time"
 
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/76creates/stickers/flexbox"
 	"github.com/NimbleMarkets/ds4go"
 	"github.com/NimbleMarkets/ds4go-playground/internal/ds4log"
 	"github.com/NimbleMarkets/ds4go-playground/internal/editmode"
 	"github.com/NimbleMarkets/ds4go-playground/internal/engineinit"
 	"github.com/NimbleMarkets/ds4go-playground/internal/headerbar"
 	svg "github.com/NimbleMarkets/ntcharts-svg/svg"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -129,8 +130,9 @@ type svgEntry struct {
 	title       string // from the enrichment pass (or pre-existing on-disk metadata)
 	desc        string
 	keywords    string
-	model       string    // model name stamped into <ai:model> at save time
-	generatedAt time.Time // matches <ai:generatedAt> in the saved file
+	model       string        // model name stamped into <ai:model> at save time
+	generatedAt time.Time     // matches <ai:generatedAt> in the saved file
+	genTime     time.Duration // matches <ai:genTime> in the saved file
 	svgData     []byte
 	toolCalls   []toolCallEntry
 }
@@ -305,6 +307,7 @@ func scanExistingSVGs(dir string, logger *log.Logger) []svgEntry {
 			prompt:      md.prompt,
 			model:       md.model,
 			generatedAt: md.generatedAt,
+			genTime:     md.genTime,
 		})
 	}
 	logger.Printf("[SCAN] loaded %d entries", len(result))
@@ -319,19 +322,135 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 
 	wd, _ := os.Getwd()
 	existing := scanExistingSVGs(wd, logger)
+	draftPath := filepath.Join(wd, "draft.svg")
 	reg := ds4.NewToolRegistry()
+
 	reg.RegisterFunc(ds4.ToolSchema{
-		Name:        "svg_validate",
-		Description: "Validate an SVG markup string and report any issues with XML well-formedness, missing attributes, or structural problems. Call this if your SVG may be malformed to get diagnostic feedback.",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{"svg":{"type":"string","description":"The SVG markup to validate"}},"required":["svg"]}`),
+		Name:        "svg_clear",
+		Description: "Clear the current draft SVG file. Call this before starting to write a new SVG.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+	}, func(ctx context.Context, args json.RawMessage) (string, error) {
+		err := os.WriteFile(draftPath, nil, 0644)
+		if err != nil {
+			return fmt.Sprintf("Error clearing draft: %v", err), nil
+		}
+		return "Draft cleared.", nil
+	})
+
+	reg.RegisterFunc(ds4.ToolSchema{
+		Name:        "svg_read",
+		Description: "Read and return the entire contents of the draft SVG file.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+	}, func(ctx context.Context, args json.RawMessage) (string, error) {
+		data, err := os.ReadFile(draftPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return "Error: Draft file does not exist. Call svg_clear first.", nil
+			}
+			return fmt.Sprintf("Error reading draft: %v", err), nil
+		}
+		return string(data), nil
+	})
+
+	reg.RegisterFunc(ds4.ToolSchema{
+		Name:        "svg_append",
+		Description: "Append markup to the end of the draft SVG file.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"chunk":{"type":"string","description":"Markup to append"}},"required":["chunk"]}`),
 	}, func(ctx context.Context, args json.RawMessage) (string, error) {
 		var params struct {
-			SVG string `json:"svg"`
+			Chunk string `json:"chunk"`
 		}
 		if err := json.Unmarshal(args, &params); err != nil {
 			return "", err
 		}
-		return validateSVGDetailed(params.SVG), nil
+		f, err := os.OpenFile(draftPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			return fmt.Sprintf("Error opening draft file: %v", err), nil
+		}
+		defer f.Close()
+		if _, err := f.WriteString(params.Chunk); err != nil {
+			return fmt.Sprintf("Error appending to draft: %v", err), nil
+		}
+		return "Chunk appended successfully.", nil
+	})
+
+	reg.RegisterFunc(ds4.ToolSchema{
+		Name:        "svg_replace",
+		Description: "Replace occurrences of a target substring in the draft SVG file with a replacement string. Useful for targeted corrections.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"target":{"type":"string","description":"The exact substring to replace"},"replacement":{"type":"string","description":"The replacement string"}},"required":["target","replacement"]}`),
+	}, func(ctx context.Context, args json.RawMessage) (string, error) {
+		var params struct {
+			Target      string `json:"target"`
+			Replacement string `json:"replacement"`
+		}
+		if err := json.Unmarshal(args, &params); err != nil {
+			return "", err
+		}
+		data, err := os.ReadFile(draftPath)
+		if err != nil {
+			return fmt.Sprintf("Error reading draft: %v", err), nil
+		}
+		content := string(data)
+		if !strings.Contains(content, params.Target) {
+			return "Error: target substring not found in draft file.", nil
+		}
+		newContent := strings.Replace(content, params.Target, params.Replacement, 1)
+		err = os.WriteFile(draftPath, []byte(newContent), 0644)
+		if err != nil {
+			return fmt.Sprintf("Error writing draft: %v", err), nil
+		}
+		return "Target substring replaced successfully.", nil
+	})
+
+	reg.RegisterFunc(ds4.ToolSchema{
+		Name:        "svg_replace_lines",
+		Description: "Replace a range of lines (1-indexed, inclusive) in the draft SVG file with the specified replacement lines.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"start_line":{"type":"integer","description":"The 1-indexed starting line number (inclusive)"},"end_line":{"type":"integer","description":"The 1-indexed ending line number (inclusive)"},"replacement":{"type":"string","description":"The replacement lines"}},"required":["start_line","end_line","replacement"]}`),
+	}, func(ctx context.Context, args json.RawMessage) (string, error) {
+		var params struct {
+			StartLine   int    `json:"start_line"`
+			EndLine     int    `json:"end_line"`
+			Replacement string `json:"replacement"`
+		}
+		if err := json.Unmarshal(args, &params); err != nil {
+			return "", err
+		}
+		data, err := os.ReadFile(draftPath)
+		if err != nil {
+			return fmt.Sprintf("Error reading draft: %v", err), nil
+		}
+		lines := strings.Split(string(data), "\n")
+		if params.StartLine < 1 || params.EndLine < 1 || params.StartLine > len(lines) || params.EndLine > len(lines) || params.StartLine > params.EndLine {
+			return fmt.Sprintf("Error: line range %d-%d is invalid. Total lines in file: %d.", params.StartLine, params.EndLine, len(lines)), nil
+		}
+		var newLines []string
+		newLines = append(newLines, lines[0:params.StartLine-1]...)
+		newLines = append(newLines, params.Replacement)
+		newLines = append(newLines, lines[params.EndLine:]...)
+		newContent := strings.Join(newLines, "\n")
+		err = os.WriteFile(draftPath, []byte(newContent), 0644)
+		if err != nil {
+			return fmt.Sprintf("Error writing draft: %v", err), nil
+		}
+		return "Lines replaced successfully.", nil
+	})
+
+	reg.RegisterFunc(ds4.ToolSchema{
+		Name:        "svg_validate",
+		Description: "Validate the current draft SVG file and report any XML or structural issues.",
+		Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+	}, func(ctx context.Context, args json.RawMessage) (string, error) {
+		data, err := os.ReadFile(draftPath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return "Error: Draft file is empty or does not exist. Call svg_clear and svg_append first.", nil
+			}
+			return fmt.Sprintf("Error reading draft: %v", err), nil
+		}
+		if len(data) == 0 {
+			return "Error: Draft file is empty.", nil
+		}
+		return validateSVGDetailed(string(data)), nil
 	})
 
 	return model{
@@ -356,7 +475,7 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 		thinkMode:     ds4.ThinkNone,
 		cache:          newWidgetCache(50),
 		tools:          reg,
-		maxToolRounds:  3,
+		maxToolRounds:  10,
 		maxAutoCorrect: 3, // automatically trigger correction turns via svg_validate tool calls
 		toolCallCounts: make(map[string]int),
 		panelFocus:     focusInput,
@@ -793,6 +912,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !msg.generatedAt.IsZero() {
 					m.entries[i].generatedAt = msg.generatedAt
 				}
+				if msg.genTime > 0 {
+					m.entries[i].genTime = msg.genTime
+				}
 				break
 			}
 		}
@@ -861,6 +983,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case submitMsg:
 		m.logger.Printf("[USER] %s", msg.text)
+		_ = os.Remove(filepath.Join(m.workDir, "draft.svg"))
 		if !m.preserveContext {
 			m.history = nil
 		}
@@ -1045,7 +1168,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			content = string(m.rawBuf)
 		}
-		svgData := extractSVG(content)
+		var svgData []byte
+		if draftData, err := os.ReadFile(filepath.Join(m.workDir, "draft.svg")); err == nil && len(draftData) > 0 {
+			svgData = draftData
+		} else {
+			svgData = extractSVG(content)
+		}
 		outputText := extractOutputText(content)
 		nextPrompt := extractPrompt(content)
 		m.outputText = outputText
@@ -1110,7 +1238,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusText += " · enriching"
 				m.metadataInFlight = true
 				cmds = append(cmds, enrichMetadataCmd(
-					m.engine, filepath.Base(m.modelPath), path, currentPrompt, svgData))
+					m.engine, filepath.Base(m.modelPath), path, currentPrompt, svgData, m.genTime()))
 			}
 		}
 
@@ -1120,6 +1248,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			prompt:    currentPrompt,
 			text:      outputText,
 			svgData:   svgData,
+			genTime:   m.genTime(),
 			toolCalls: make([]toolCallEntry, len(m.toolCalls)),
 		}
 		copy(entry.toolCalls, m.toolCalls)
@@ -1236,26 +1365,24 @@ func (m model) generateContinue(ch chan tea.Msg) {
 }
 
 func (m model) systemPrompt() string {
-	base := `You are an SVG artist with access to one tool:
+	base := `You are an SVG artist with access to tools for drafting, editing, and validating SVGs:
 
-  svg_validate(svg: string) -> "Valid: …" on success,
-                               "Invalid:\n<diagnostic>" on failure.
+  svg_clear() -> "Draft cleared."
+  svg_read() -> Returns current draft content.
+  svg_append(chunk: string) -> "Chunk appended successfully."
+  svg_replace(target: string, replacement: string) -> "Target substring replaced successfully."
+  svg_replace_lines(start_line: int, end_line: int, replacement: string) -> "Lines replaced successfully."
+  svg_validate() -> "Valid: …" on success, "Invalid:\n<diagnostic>" on failure.
 
 Workflow for every user request:
 
-1. Draft SVG markup that fulfils the request.
-2. Call svg_validate with your draft.
-3. If the result starts with "Invalid:", read the diagnostic, revise
-   the SVG to fix that specific issue, and call svg_validate again.
-4. When svg_validate returns "Valid:", emit your final answer as a
-   single assistant message containing ONLY the SVG markup — starting
-   with <svg and ending with </svg>, no preamble, no commentary, no
-   markdown code fences.
+1. At the start of a new request, clear the draft file using svg_clear. (Do NOT call svg_clear if you are correcting, editing, or validating an existing draft).
+2. Construct the SVG by appending chunks using svg_append.
+3. Validate the drafted SVG by calling svg_validate.
+4. If it returns "Invalid:", read the diagnostic, read the current draft using svg_read (if needed), use svg_replace or svg_replace_lines to edit/correct specific parts of the SVG, and call svg_validate again. Do NOT clear the draft.
+5. When svg_validate returns "Valid:", emit your final response. You do not need to output the complete SVG in your text response if it has been written to the draft, but confirm completion to the user.
 
-The SVG must include xmlns="http://www.w3.org/2000/svg" and be
-self-contained (no external references, no <script>). You have at
-most three tool calls per turn, so spend them wisely — a single
-large rewrite is better than many tiny patches.`
+The SVG must include xmlns="http://www.w3.org/2000/svg" and be self-contained.`
 	if m.yoloMode {
 		base += `
 
@@ -1346,7 +1473,7 @@ func extractOutputText(s string) string {
 		}
 		s = strings.TrimSpace(s[:start] + s[start+end+len("</prompt>"):])
 	}
-	return s
+	return formatDSMLStream(s)
 }
 
 // validateSVG checks well-formedness and returns a short status string.
@@ -1660,8 +1787,7 @@ func (m model) render() string {
 		}
 
 		// Three side-by-side panels — info / reasoning / tools — laid
-		// out by a stickers FlexBox. FlexBox owns each cell's width,
-		// height, and border frame, so there is no manual border math.
+		// out side-by-side using lipgloss.JoinHorizontal.
 		// The info panel takes a narrow fixed slice; reasoning/tools
 		// share what remains, divided by the resizable m.thinkBoxW.
 		infoW := 30
@@ -1720,31 +1846,27 @@ func (m model) render() string {
 		}
 		thinkScroll, toolScroll := m.thinkScroll, m.toolScroll
 
-		fb := flexbox.New(m.width, m.thinkBoxH+2)
-		fbRow := fb.NewRow()
-		var cells []*flexbox.Cell
+		var panels []string
 		if infoW > 0 {
-			cells = append(cells, flexbox.NewCell(infoW, 1).
-				SetStyle(baseBorder.BorderForeground(lipgloss.Color("240"))).
-				SetContentGenerator(func(x, y int) string {
-					return wrapAndTruncate(rawInfo, x, y, 0)
-				}))
+			infoPanel := baseBorder.BorderForeground(lipgloss.Color("240")).
+				Width(infoW).
+				Height(m.thinkBoxH + 2).
+				Render(wrapAndTruncate(rawInfo, infoW-2, m.thinkBoxH, 0))
+			panels = append(panels, infoPanel)
 		}
-		cells = append(cells,
-			flexbox.NewCell(thinkW, 1).
-				SetStyle(baseBorder.BorderForeground(thinkBorderColor)).
-				SetContentGenerator(func(x, y int) string {
-					return wrapAndTruncate(rawThink, x, y, thinkScroll)
-				}),
-			flexbox.NewCell(toolW, 1).
-				SetStyle(baseBorder.BorderForeground(toolBorderColor)).
-				SetContentGenerator(func(x, y int) string {
-					return wrapAndTruncate(rawTool, x, y, toolScroll)
-				}),
-		)
-		fbRow.AddCells(cells...)
-		fb.AddRows([]*flexbox.Row{fbRow})
-		sections = append(sections, fb.Render())
+		thinkPanel := baseBorder.BorderForeground(thinkBorderColor).
+			Width(thinkW).
+			Height(m.thinkBoxH + 2).
+			Render(wrapAndTruncate(rawThink, thinkW-2, m.thinkBoxH, thinkScroll))
+		panels = append(panels, thinkPanel)
+
+		toolPanel := baseBorder.BorderForeground(toolBorderColor).
+			Width(toolW).
+			Height(m.thinkBoxH + 2).
+			Render(wrapAndTruncate(rawTool, toolW-2, m.thinkBoxH, toolScroll))
+		panels = append(panels, toolPanel)
+
+		sections = append(sections, lipgloss.JoinHorizontal(lipgloss.Top, panels...))
 	}
 	sections = append(sections, svgContent)
 
@@ -2148,6 +2270,7 @@ func titledBox(rendered, title string) string {
 // wrapAndTruncate pre-wraps content to the given width using lipgloss,
 // applies a scroll offset, then truncates/pads to exactly maxLines.
 func wrapAndTruncate(content string, width, maxLines, scroll int) string {
+	content = strings.ReplaceAll(content, "\r", "")
 	wrapped := lipgloss.NewStyle().Width(width).Render(content)
 	lines := strings.Split(wrapped, "\n")
 	if scroll > len(lines)-maxLines && len(lines) > maxLines {
@@ -2167,6 +2290,9 @@ func wrapAndTruncate(content string, width, maxLines, scroll int) string {
 	lines = lines[start:end]
 	for len(lines) < maxLines {
 		lines = append(lines, "")
+	}
+	for i := range lines {
+		lines[i] = ansi.Truncate(lines[i], width, "")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -2192,3 +2318,94 @@ func fmtDuration(d time.Duration) string {
 	}
 	return d.Round(time.Second).String()
 }
+
+var (
+	reToolCallsStart = regexp.MustCompile(`(?i)<(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?tool_calls>`)
+	reToolCallsEnd   = regexp.MustCompile(`(?i)</(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?tool_calls>`)
+	reInvokeStart    = regexp.MustCompile(`(?i)<(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?invoke(?:\s+[^>]*?)?\s+(?i:name)\s*=\s*(?:"([^"]*)"|'([^']*)')(?:\s+[^>]*?)?>`)
+	reInvokeEnd      = regexp.MustCompile(`(?i)</(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?invoke>`)
+	reParamStart     = regexp.MustCompile(`(?i)<(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?parameter(?:\s+[^>]*?)?\s+(?i:name)\s*=\s*(?:"([^"]*)"|'([^']*)')(?:\s+[^>]*?)?>`)
+	reParamEnd       = regexp.MustCompile(`(?i)</(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?parameter>`)
+)
+
+var (
+	dsmlToolBlockStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true) // Orange
+	dsmlInvokeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)  // Blue
+	dsmlParamStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))             // Grey
+)
+
+var dsmlUnescaper = strings.NewReplacer(
+	"&amp;", "&",
+	"&lt;", "<",
+	"&gt;", ">",
+	"&quot;", `"`,
+	"&apos;", "'",
+)
+
+func formatDSMLStream(text string) string {
+	if text == "" {
+		return ""
+	}
+
+	// 1. Replace tool calls start/end
+	text = reToolCallsStart.ReplaceAllString(text, "\n"+dsmlToolBlockStyle.Render("🔧 [Calling Tools]")+"\n")
+	text = reToolCallsEnd.ReplaceAllString(text, "\n"+dsmlToolBlockStyle.Render("🔧 [Tools Completed]")+"\n")
+
+	// 2. Replace invoke start/end
+	text = reInvokeStart.ReplaceAllStringFunc(text, func(m string) string {
+		match := reInvokeStart.FindStringSubmatch(m)
+		name := ""
+		if len(match) > 1 {
+			if match[1] != "" {
+				name = match[1]
+			} else if len(match) > 2 && match[2] != "" {
+				name = match[2]
+			}
+		}
+		if name != "" {
+			return fmt.Sprintf("  👉 %s\n", dsmlInvokeStyle.Render("Invoke: "+name))
+		}
+		return m
+	})
+	text = reInvokeEnd.ReplaceAllString(text, "")
+
+	// 3. Replace parameter start/end
+	text = reParamStart.ReplaceAllStringFunc(text, func(m string) string {
+		match := reParamStart.FindStringSubmatch(m)
+		name := ""
+		if len(match) > 1 {
+			if match[1] != "" {
+				name = match[1]
+			} else if len(match) > 2 && match[2] != "" {
+				name = match[2]
+			}
+		}
+		if name != "" {
+			// Start cyan formatting: \x1b[38;5;86m
+			return fmt.Sprintf("    ✏️ %s = \x1b[38;5;86m", dsmlParamStyle.Render(name))
+		}
+		return m
+	})
+	text = reParamEnd.ReplaceAllString(text, "\x1b[0m\n")
+
+	// 4. Unescape HTML/XML entities
+	text = dsmlUnescaper.Replace(text)
+
+	// 5. Hide unclosed tags at the end of the stream
+	if idx := strings.LastIndex(text, "<"); idx >= 0 {
+		tail := strings.ToLower(text[idx:])
+		if !strings.Contains(tail, ">") {
+			if strings.Contains(tail, "｜") ||
+				strings.Contains(tail, "|") ||
+				strings.Contains(tail, "ds") ||
+				strings.Contains(tail, "tool") ||
+				strings.Contains(tail, "invoke") ||
+				strings.Contains(tail, "param") {
+				text = text[:idx]
+			}
+		}
+	}
+
+	return text
+}
+

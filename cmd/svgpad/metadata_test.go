@@ -48,7 +48,7 @@ func TestBuildMetadataBlockDeterministic(t *testing.T) {
 	now := time.Date(2026, 5, 21, 14, 30, 0, 0, time.UTC)
 	block := buildMetadataBlock(
 		"My Title", "A description.", "a, b, c",
-		"draw a fox", "qwen.gguf", now,
+		"draw a fox", "qwen.gguf", now, 12*time.Second,
 	)
 
 	// Deterministic Go-supplied fields must appear verbatim, NOT echoed
@@ -59,6 +59,7 @@ func TestBuildMetadataBlockDeterministic(t *testing.T) {
 		"<ai:prompt>draw a fox</ai:prompt>",
 		"<ai:model>qwen.gguf</ai:model>",
 		"<ai:provider>local ds4</ai:provider>",
+		"<ai:genTime>12s</ai:genTime>",
 		"<dc:creator>svgpad</dc:creator>",
 		"<dc:title>My Title</dc:title>",
 		"<dc:description>A description.</dc:description>",
@@ -82,6 +83,7 @@ func TestBuildMetadataBlockEscapesXML(t *testing.T) {
 		`<script>alert('x')</script> & friends`,
 		"m&m",
 		now,
+		0,
 	)
 	// Raw reserved characters must not survive in element bodies.
 	for _, bad := range []string{"<script>", "alert('x')", "Cats & Dogs"} {
@@ -98,7 +100,7 @@ func TestBuildMetadataBlockEscapesXML(t *testing.T) {
 }
 
 func TestBuildMetadataBlockEmptyWhenNoTitleOrDesc(t *testing.T) {
-	if got := buildMetadataBlock("", "", "k", "p", "m", time.Now()); got != "" {
+	if got := buildMetadataBlock("", "", "k", "p", "m", time.Now(), 0); got != "" {
 		t.Errorf("expected empty block, got %q", got)
 	}
 }
@@ -132,7 +134,7 @@ func TestParseSVGMetadataRoundTrip(t *testing.T) {
 	now := time.Date(2026, 5, 21, 14, 30, 0, 0, time.UTC)
 	prompt := `draw a "fox" & a <hound>`
 	block := buildMetadataBlock("My Title", "A description.", "a, b, c",
-		prompt, "qwen.gguf", now)
+		prompt, "qwen.gguf", now, 15*time.Second)
 	svg := spliceMetadataIntoSVG(
 		`<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>`, block)
 
@@ -154,6 +156,9 @@ func TestParseSVGMetadataRoundTrip(t *testing.T) {
 	}
 	if !md.generatedAt.Equal(now) {
 		t.Errorf("generatedAt = %v, want %v", md.generatedAt, now)
+	}
+	if md.genTime != 15*time.Second {
+		t.Errorf("genTime = %v, want 15s", md.genTime)
 	}
 }
 

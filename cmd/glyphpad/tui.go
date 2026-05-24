@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/NimbleMarkets/ds4go-playground/internal/ds4log"
 	"github.com/NimbleMarkets/ds4go-playground/internal/editmode"
 	"github.com/NimbleMarkets/ds4go-playground/internal/engineinit"
+	"github.com/NimbleMarkets/ds4go-playground/internal/headerbar"
 	"github.com/NimbleMarkets/ntcharts/v2/canvas"
 )
 
@@ -71,7 +73,7 @@ type model struct {
 	showInfo  bool           // info overlay is up (m in command mode)
 	showLog   bool           // libds4 log overlay is up (ctrl+n)
 	logBuf    *ds4log.Buffer // captured libds4 diagnostics
-	logScroll int            // lines scrolled back from the tail (0 = follow)
+	logTop    int            // absolute first-visible line; -1 = follow tail
 
 	history    []chatMsg
 	rawBuf     []byte // raw LLM response for the current turn
@@ -81,6 +83,7 @@ type model struct {
 	generating bool
 	statusText string
 	errText    string
+	lastErr    error
 
 	parser    *Parser
 	canvas    canvas.Model
@@ -133,6 +136,7 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 		ctxSize:      ctxSize,
 		logger:       logger,
 		logBuf:       logBuf,
+		logTop:       -1, // follow the tail by default
 		debug:        debug,
 	}
 }
@@ -172,20 +176,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Quit
 			case "esc":
 				m.showLog = false
-				m.logScroll = 0
+				m.logTop = -1 // reset to follow next time
 			case "up":
-				m.logScroll++
+				m.logTop = m.logScrollBy(-1)
 			case "down":
-				if m.logScroll > 0 {
-					m.logScroll--
-				}
+				m.logTop = m.logScrollBy(1)
 			case "pgup":
-				m.logScroll += m.logPageSize()
+				m.logTop = m.logScrollBy(-m.logPageSize())
 			case "pgdown":
-				m.logScroll -= m.logPageSize()
-				if m.logScroll < 0 {
-					m.logScroll = 0
-				}
+				m.logTop = m.logScrollBy(m.logPageSize())
 			}
 			return m, nil
 		}
@@ -265,7 +264,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "n": // new prompt — clear and target
 			m.input.SetValue("")
+			m.history = nil
+			m.lastErr = nil
+			m.errText = ""
+			m.descText = ""
+			m.thinkText = ""
+			m.parser.Reset()
+			m.canvas.Clear()
 			cmds = append(cmds, m.input.Focus())
+
+		case "c": // continue generating
+			if m.generating {
+				return m, nil
+			}
+			isTruncated := false
+			if m.lastErr != nil {
+				if errors.Is(m.lastErr, ds4.ErrContextFull) || m.lastErr.Error() == "ds4go: session context full" || errors.Is(m.lastErr, context.Canceled) {
+					isTruncated = true
+				}
+			}
+			if isTruncated {
+				m.generating = true
+				m.statusText = "Continuing..."
+				m.errText = ""
+				m.genStart = time.Now()
+				m.firstTokenTime = time.Time{}
+				m.genEnd = time.Time{}
+				m.tokenCount = 0
+				m.genCtx, m.genCancel = context.WithCancel(context.Background())
+				ch := make(chan tea.Msg, 64)
+				m.tokenCh = ch
+				go m.generateContinue(ch)
+				cmds = append(cmds, waitMsg(ch))
+			}
+			return m, tea.Batch(cmds...)
 
 		case "m": // info overlay
 			m.showInfo = true
@@ -408,6 +440,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case doneMsg:
 		m.generating = false
+		m.lastErr = msg.err
 		if m.genCtx != nil && m.genCtx.Err() == context.Canceled {
 			m.statusText = "Aborted"
 		} else {
@@ -421,9 +454,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.genEnd = time.Now()
 		m.ctxPos = msg.ctxPos
 		if msg.err != nil {
-			m.errText = msg.err.Error()
-			if m.statusText != "Aborted" {
-				m.statusText = "Error"
+			if errors.Is(msg.err, ds4.ErrContextFull) || msg.err.Error() == "ds4go: session context full" {
+				m.statusText = "Ready · Context full"
+				m.errText = "Session context capacity reached. Press 'c' to continue or 'n' for a new prompt."
+			} else {
+				m.errText = msg.err.Error()
+				if m.statusText != "Aborted" {
+					m.statusText = "Error"
+				}
 			}
 			m.logger.Printf("[ERROR] %v", msg.err)
 		} else {
@@ -629,34 +667,22 @@ func (m model) render() string {
 	if fw, fh := m.fitCanvasSize(); fw != m.canvasW || fh != m.canvasH {
 		canvasInfo += " (l)" // window changed — l (command mode) would re-fit
 	}
-	headerLeft := fmt.Sprintf(" ds4 TUI │ %s │ %s │ %s", modelName, canvasInfo, status)
-	headerRight := m.metricsText()
+	metricsText := m.metricsText()
 	if m.hasMTP {
 		if m.mtpDraft > 1 {
-			headerRight += fmt.Sprintf(" · MTP · %d", m.mtpDraft)
+			metricsText += fmt.Sprintf(" · MTP · %d", m.mtpDraft)
 		} else {
-			headerRight += " · MTP (off)"
+			metricsText += " · MTP (off)"
 		}
 	}
-	badge := engineinit.Badge(m.engineStatus)
-	badgeW := lipgloss.Width(badge)
-	// Reserve room on the right edge for the badge (plus one space gap).
-	headerContent := headerLeft
-	if headerRight != "" {
-		headerRight += " "
-	}
-	avail := m.width - lipgloss.Width(headerLeft) - lipgloss.Width(headerRight) - badgeW
-	if avail < 0 {
-		// Window too narrow for full metrics — drop them, keep the badge.
-		headerRight = ""
-		avail = m.width - lipgloss.Width(headerLeft) - badgeW
-	}
-	if avail < 0 {
-		avail = 0
-	}
-	headerContent = headerLeft + strings.Repeat(" ", avail) + headerRight + badge
+	headerContent := headerbar.Layout(
+		m.width,
+		fmt.Sprintf(" ds4go-glyphpad │ %s │ %s │ ", modelName, canvasInfo),
+		status,
+		strings.TrimLeft(metricsText, " ·"),
+		engineinit.Badge(m.engineStatus),
+	)
 	header := lipgloss.NewStyle().
-		Width(m.width).
 		Bold(true).
 		Foreground(lipgloss.Color("#ffffff")).
 		Background(lipgloss.Color("#1d3557")).
@@ -1026,6 +1052,7 @@ func (m model) keymap() editmode.Keymap {
 		cmd = []editmode.Binding{
 			{Keys: "e", Desc: "edit"},
 			{Keys: "n", Desc: "new"},
+			{Keys: "c", Desc: "continue"},
 			{Keys: "m", Desc: "info"},
 			{Keys: "k", Desc: "clear"},
 			{Keys: "l", Desc: "fit"},
@@ -1051,10 +1078,52 @@ func (m model) logPageSize() int {
 	return h
 }
 
+// logScrollBy returns a new logTop after moving by delta lines. A scroll
+// up from follow-tail mode anchors the view at the current tail so
+// incoming "done" lines do not slide what the user is reading; scrolling
+// back to the bottom re-enables follow mode (-1).
+func (m model) logScrollBy(delta int) int {
+	total, innerH := m.logVisibleMetrics()
+	maxTop := total - innerH
+	if maxTop < 0 {
+		maxTop = 0
+	}
+	top := m.logTop
+	if top < 0 {
+		top = maxTop
+	}
+	top += delta
+	if top < 0 {
+		top = 0
+	}
+	if top >= maxTop {
+		return -1
+	}
+	return top
+}
+
+// logVisibleMetrics returns (total wrapped lines, visible content height).
+func (m model) logVisibleMetrics() (total, innerH int) {
+	innerW := m.width - 6
+	if innerW < 10 {
+		innerW = 10
+	}
+	innerH = m.height - 6
+	if innerH < 1 {
+		innerH = 1
+	}
+	lines := m.logBuf.Lines()
+	if len(lines) == 0 {
+		return 0, innerH
+	}
+	return len(wrapText(strings.Join(lines, "\n"), innerW)), innerH
+}
+
 // logOverlay renders the ctrl+n popup — recent libds4 diagnostics captured
 // by the in-memory ring buffer — centered over a blank full-screen area.
-// up/down/pgup/pgdown scroll via m.logScroll (0 = follow the tail); esc
-// closes the overlay.
+// When m.logTop == -1 the view follows the tail; any scroll back anchors
+// it at an absolute line so incoming "done" lines do not shift the view.
+// esc closes; ctrl+c/q quits.
 func (m model) logOverlay() string {
 	lines := m.logBuf.Lines()
 	if len(lines) == 0 {
@@ -1070,25 +1139,33 @@ func (m model) logOverlay() string {
 	}
 	wrapped := wrapText(strings.Join(lines, "\n"), innerW)
 
-	// Clamp scroll to [0, max] and slice the visible window.
 	total := len(wrapped)
-	maxScroll := total - innerH
-	if maxScroll < 0 {
-		maxScroll = 0
+	maxTop := total - innerH
+	if maxTop < 0 {
+		maxTop = 0
 	}
-	scroll := m.logScroll
-	if scroll > maxScroll {
-		scroll = maxScroll
+	var start int
+	following := m.logTop < 0
+	if following {
+		start = maxTop
+	} else {
+		start = m.logTop
+		if start > maxTop {
+			start = maxTop
+		}
 	}
-	end := total - scroll
-	start := end - innerH
-	if start < 0 {
-		start = 0
+	end := start + innerH
+	if end > total {
+		end = total
 	}
 	body := strings.Join(wrapped[start:end], "\n")
 
-	hint := fmt.Sprintf("  up/down · pgup/pgdown scroll · esc close   [%d/%d]",
-		scroll, maxScroll)
+	mode := "TAIL"
+	if !following {
+		mode = "FROZEN"
+	}
+	hint := fmt.Sprintf("  up/down · pgup/pgdown scroll · esc close   [%s %d/%d]",
+		mode, start, maxTop)
 	body += "\n\n" + infoDimStyle.Render(hint)
 
 	box := titledBox(lipgloss.NewStyle().
@@ -1296,5 +1373,32 @@ func (m model) generate(ch chan tea.Msg) {
 	gen := ds4.Generator{Engine: m.engine, Session: m.session}
 	_, genErr := gen.GenerateTokens(tokens, opts)
 	tokens.Free()
+	done(genErr)
+}
+
+func (m model) generateContinue(ch chan tea.Msg) {
+	defer close(ch)
+
+	done := func(err error) {
+		ch <- doneMsg{err: err, ctxPos: m.session.Pos()}
+	}
+
+	opts := ds4.GenerateOptions{
+		MaxTokens: 8192,
+		StopOnEOS: true,
+	}
+	opts.OnToken = func(token int) {
+		if text, err := m.engine.TokenText(token); err == nil {
+			select {
+			case ch <- tokenMsg(text):
+			default:
+				// Channel full — drop token so Continue can check context.
+			}
+		}
+	}
+	opts.Context = m.genCtx
+
+	gen := ds4.Generator{Engine: m.engine, Session: m.session}
+	_, genErr := gen.Continue(opts)
 	done(genErr)
 }

@@ -8,10 +8,10 @@ require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.6
 	charm.land/lipgloss/v2 v2.0.3
-	github.com/76creates/stickers v1.5.1-0.20260428110351-18e201d03ccc
 	github.com/NimbleMarkets/ds4go v0.3.0
 	github.com/NimbleMarkets/ntcharts-svg v0.1.2
 	github.com/NimbleMarkets/ntcharts/v2 v2.0.4-0.20260515012450-ff02dc6e2e04
+	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/spf13/pflag v1.0.10
 )
 
@@ -20,7 +20,6 @@ require (
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260428153724-66037269d7be // indirect
-	github.com/charmbracelet/x/ansi v0.11.7 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect

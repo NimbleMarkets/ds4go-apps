@@ -40,6 +40,7 @@ type metadataDoneMsg struct {
 	keywords    string
 	model       string
 	generatedAt time.Time
+	genTime     time.Duration
 	err         error
 }
 
@@ -63,6 +64,7 @@ type svgFileMetadata struct {
 	prompt      string
 	model       string
 	generatedAt time.Time
+	genTime     time.Duration
 }
 
 // parseSVGMetadata pulls our metadata fields out of a previously saved
@@ -81,6 +83,11 @@ func parseSVGMetadata(svg string) svgFileMetadata {
 			m.generatedAt = t
 		}
 	}
+	if gts := innerText(svg, "<ai:genTime>", "</ai:genTime>"); gts != "" {
+		if d, err := time.ParseDuration(gts); err == nil {
+			m.genTime = d
+		}
+	}
 	return m
 }
 
@@ -96,12 +103,7 @@ func innerText(s, open, close string) string {
 	return strings.TrimSpace(inner)
 }
 
-// buildMetadataBlock assembles the <title>/<desc>/<metadata> region that
-// gets spliced into the SVG. The only values the LLM contributes are
-// title, desc, and keywords — prompt, model, and timestamp come straight
-// from Go, so they cannot be paraphrased, mistimed, or hallucinated.
-// All text content is XML-escaped.
-func buildMetadataBlock(title, desc, keywords, prompt, model string, now time.Time) string {
+func buildMetadataBlock(title, desc, keywords, prompt, model string, now time.Time, genTime time.Duration) string {
 	if title == "" && desc == "" {
 		return ""
 	}
@@ -136,6 +138,9 @@ func buildMetadataBlock(title, desc, keywords, prompt, model string, now time.Ti
 	fmt.Fprintf(&b, "        <ai:model>%s</ai:model>\n", xmlEscape(model))
 	b.WriteString("        <ai:provider>local ds4</ai:provider>\n")
 	fmt.Fprintf(&b, "        <ai:generatedAt>%s</ai:generatedAt>\n", ts)
+	if genTime > 0 {
+		fmt.Fprintf(&b, "        <ai:genTime>%s</ai:genTime>\n", genTime.String())
+	}
 	b.WriteString("      </ai:generation>\n")
 	b.WriteString("    </rdf:Description>\n")
 	b.WriteString("  </rdf:RDF>\n")
@@ -220,6 +225,9 @@ func renderEntryInfo(e svgEntry) string {
 	if !e.generatedAt.IsZero() {
 		row("when", e.generatedAt.Local().Format("2006-01-02 15:04"))
 	}
+	if e.genTime > 0 {
+		row("gen time", fmtDuration(e.genTime))
+	}
 	row("tags", e.keywords)
 	return b.String()
 }
@@ -248,11 +256,7 @@ func spliceMetadataIntoSVG(svg, block string) string {
 	return svg[:closeTag+1] + "\n" + block + "\n" + svg[closeTag+1:]
 }
 
-// enrichMetadataCmd opens a fresh ds4 session, asks the model for a
-// title/desc/keywords trio, assembles a full deterministic metadata
-// block around those values, and splices it into the file on disk.
-// Failures are non-fatal: the SVG is already valid without metadata.
-func enrichMetadataCmd(eng *ds4.Engine, modelName, filename, prompt string, svgData []byte) tea.Cmd {
+func enrichMetadataCmd(eng *ds4.Engine, modelName, filename, prompt string, svgData []byte, genTime time.Duration) tea.Cmd {
 	return func() tea.Msg {
 		sess, err := eng.NewSession(metadataSessionCtx)
 		if err != nil {
@@ -301,7 +305,7 @@ func enrichMetadataCmd(eng *ds4.Engine, modelName, filename, prompt string, svgD
 			return metadataDoneMsg{filename: filename, model: modelName, err: fmt.Errorf("no <title>/<desc> in model output")}
 		}
 		generatedAt := time.Now()
-		block := buildMetadataBlock(title, desc, keywords, prompt, modelName, generatedAt)
+		block := buildMetadataBlock(title, desc, keywords, prompt, modelName, generatedAt, genTime)
 
 		base := metadataDoneMsg{
 			filename:    filename,
@@ -310,6 +314,7 @@ func enrichMetadataCmd(eng *ds4.Engine, modelName, filename, prompt string, svgD
 			keywords:    keywords,
 			model:       modelName,
 			generatedAt: generatedAt,
+			genTime:     genTime,
 		}
 		data, err := os.ReadFile(filename)
 		if err != nil {
