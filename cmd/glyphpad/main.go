@@ -20,13 +20,20 @@ func main() {
 		ctxSize   int
 		backend   string
 		debug     bool
+		power     int
 	)
 	pflag.StringVarP(&modelPath, "model", "m", "", "path to GGUF model file (default: $DS4_DIR/models/ds4flash.gguf)")
 	pflag.StringVar(&libPath, "lib", "", "path to libds4 shared library (optional, uses default search)")
 	pflag.IntVar(&ctxSize, "ctx", 32768, "context window size in tokens; lower to 16384 or 8192 if VRAM is tight")
 	pflag.StringVar(&backend, "backend", "metal", "inference backend: metal, cuda, cpu")
 	pflag.BoolVarP(&debug, "debug", "d", false, "log raw LLM token stream and tee libds4 diagnostics to glyphpad.log")
+	pflag.IntVar(&power, "power", 100, "GPU power duty-cycle throttle percentage (1..100)")
 	pflag.Parse()
+
+	if power < 1 || power > 100 {
+		fmt.Fprintln(os.Stderr, "error: power must be between 1 and 100")
+		os.Exit(1)
+	}
 
 	if modelPath == "" {
 		modelPath = ds4.DefaultModelPath()
@@ -77,7 +84,7 @@ func main() {
 	}
 	ds4.SetDefaultLibrary(lib)
 
-	engOpts := ds4.EngineOptions{ModelPath: modelPath, Backend: be, WarmWeights: true}
+	engOpts := ds4.EngineOptions{ModelPath: modelPath, Backend: be, WarmWeights: true, PowerPercent: power}
 	ds4.ApplyMTPDefaults(&engOpts)
 	mtpPath := engOpts.MTPPath
 

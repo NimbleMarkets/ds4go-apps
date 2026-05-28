@@ -7,15 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
-	"regexp"
 	"time"
 
+	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -25,6 +27,7 @@ import (
 	"github.com/NimbleMarkets/ds4go-playground/internal/engineinit"
 	"github.com/NimbleMarkets/ds4go-playground/internal/headerbar"
 	svg "github.com/NimbleMarkets/ntcharts-svg/svg"
+	"github.com/NimbleMarkets/ntcharts/v2/picture"
 	"github.com/charmbracelet/x/ansi"
 )
 
@@ -45,6 +48,15 @@ const (
 )
 
 const defaultPrompt = "Generate an SVG of a pelican riding a bicycle"
+
+const placeholderSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+  <rect width="100%" height="100%" fill="#181825"/>
+  <circle cx="200" cy="180" r="50" fill="none" stroke="#cba6f7" stroke-width="4" stroke-dasharray="8 4"/>
+  <path d="M 180 180 L 220 180 M 200 160 L 200 200" stroke="#cba6f7" stroke-width="4" stroke-linecap="round"/>
+  <text x="200" y="270" fill="#cdd6f4" font-family="sans-serif" font-size="18" font-weight="bold" text-anchor="middle">SVG Playground</text>
+  <text x="200" y="300" fill="#a6adc8" font-family="sans-serif" font-size="13" text-anchor="middle">Press 'e' to edit the prompt below</text>
+  <text x="200" y="320" fill="#a6adc8" font-family="sans-serif" font-size="13" text-anchor="middle">Press 'Enter' to generate</text>
+</svg>`
 
 // ── message types ────────────────────────────────────────────────────────────
 
@@ -67,19 +79,28 @@ type engineReadyMsg engineinit.Result
 // closing the session and engine.
 type engineReleasedMsg struct{}
 
-// widgetCache is an LRU cache of rasterized SVG bitmaps, keyed by
-// filename. Caching the bitmap — rather than a svg.Model copy — lets a
-// revisited entry render instantly via svg.Model.SetImage with no async
-// reload, and avoids sharing the widget's generation counters across
-// copies (which silently dropped or misrouted in-flight load results).
+// cachedWidget wraps the rasterized image, document renderer, and document info
+// to allow instant rendering and vector-sharp zooming.
+type cachedWidget struct {
+	img      image.Image
+	renderer svg.Renderer
+	doc      *svg.Document
+}
+
+// widgetCache is an LRU cache of rasterized SVG bitmaps and their renderers,
+// keyed by filename. Caching the bitmap and renderer lets a revisited entry
+// render instantly while preserving the ability to perform vector-sharp zooming.
 type widgetCache struct {
 	maxSize int
 	keys    []string // least-recently-used first
-	images  map[string]image.Image
+	entries map[string]cachedWidget
 }
 
 func newWidgetCache(maxSize int) *widgetCache {
-	return &widgetCache{maxSize: maxSize, images: make(map[string]image.Image)}
+	return &widgetCache{
+		maxSize: maxSize,
+		entries: make(map[string]cachedWidget),
+	}
 }
 
 // touch moves key to the most-recently-used end of the recency list.
@@ -93,25 +114,28 @@ func (c *widgetCache) touch(key string) {
 	c.keys = append(c.keys, key)
 }
 
-// Get returns the cached bitmap for key, marking it most-recently-used.
-func (c *widgetCache) Get(key string) (image.Image, bool) {
-	img, ok := c.images[key]
+// Get returns the cached widget for key, marking it most-recently-used.
+func (c *widgetCache) Get(key string) (cachedWidget, bool) {
+	entry, ok := c.entries[key]
 	if !ok {
-		return nil, false
+		return cachedWidget{}, false
 	}
 	c.touch(key)
-	return img, true
+	return entry, true
 }
 
-// Put stores a bitmap under key, evicting the least-recently-used entry
+// Put stores a widget under key, evicting the least-recently-used entry
 // when a new key would push the cache over capacity.
-func (c *widgetCache) Put(key string, img image.Image) {
-	if _, exists := c.images[key]; !exists && len(c.keys) >= c.maxSize {
+func (c *widgetCache) Put(key string, entry cachedWidget) {
+	if _, exists := c.entries[key]; !exists && len(c.keys) >= c.maxSize {
 		oldest := c.keys[0]
 		c.keys = c.keys[1:]
-		delete(c.images, oldest)
+		if old, ok := c.entries[oldest]; ok && old.renderer != nil {
+			_ = old.renderer.Close()
+		}
+		delete(c.entries, oldest)
 	}
-	c.images[key] = img
+	c.entries[key] = entry
 	c.touch(key)
 }
 
@@ -127,6 +151,7 @@ type svgEntry struct {
 	filename    string
 	prompt      string
 	text        string
+	think       string
 	title       string // from the enrichment pass (or pre-existing on-disk metadata)
 	desc        string
 	keywords    string
@@ -175,6 +200,7 @@ type panelFocus int
 
 const (
 	focusInput panelFocus = iota
+	focusSVG
 	focusThinking
 	focusTools
 )
@@ -182,58 +208,59 @@ const (
 type model struct {
 	width, height int
 
-	engine       *ds4.Engine  // nil until engineReadyMsg
-	session      *ds4.Session
-	lib          *ds4.Library      // resolved in main, used by Init's goroutine
-	engOpts      ds4.EngineOptions // captured to fire async open
-	lifecycle engineLifecycle // engine state machine, drives badge + transitions
-	engineErr    error             // set when StatusError
-	modelPath    string
-	mtpPath      string
-	hasMTP       bool
-	mtpDraft     int
-	backend      string
-	workDir      string
-	showInfo  bool
-	showLog   bool           // libds4 log overlay is up (ctrl+n)
-	logBuf    *ds4log.Buffer // captured libds4 diagnostics
-	logTop    int            // absolute first-visible line; -1 = follow tail
+	engine        *ds4.Engine // nil until engineReadyMsg
+	session       *ds4.Session
+	lib           *ds4.Library      // resolved in main, used by Init's goroutine
+	engOpts       ds4.EngineOptions // captured to fire async open
+	lifecycle     engineLifecycle   // engine state machine, drives badge + transitions
+	engineErr     error             // set when StatusError
+	modelPath     string
+	mtpPath       string
+	hasMTP        bool
+	mtpDraft      int
+	backend       string
+	workDir       string
+	showInfo      bool
+	showImageInfo bool
+	showLog       bool           // libds4 log overlay is up (ctrl+n)
+	logBuf        *ds4log.Buffer // captured libds4 diagnostics
+	logTop        int            // absolute first-visible line; -1 = follow tail
 
-	history    []ds4.ChatMessage
-	rawBuf     []byte // raw LLM response for the current turn
-	tokenCh    chan tea.Msg
-	genCtx     context.Context
-	genCancel  context.CancelFunc
-	generating bool
+	history          []ds4.ChatMessage
+	rawBuf           []byte // raw LLM response for the current turn
+	tokenCh          chan tea.Msg
+	genCtx           context.Context
+	genCancel        context.CancelFunc
+	generating       bool
 	metadataInFlight bool // tracked between enrichMetadataCmd dispatch and metadataDoneMsg
-	statusText string
-	errText    string
+	statusText       string
+	errText          string
 
 	svgWidget svg.Model
 
 	input textinput.Model
 
-	showThinking   bool
-	thinkBoxH      int
-	thinkBoxW      int // width of the thinking panel (divider position)
-	thinkText      string
-	thinkMode      ds4.ThinkMode
-	thinkScroll    int
+	showThinking    bool
+	thinkBoxH       int
+	thinkBoxW       int // width of the thinking panel (divider position)
+	thinkText       string
+	thinkMode       ds4.ThinkMode
+	thinkScroll     int
 	thinkAutoScroll bool // when true, scroll follows new content
 
 	showHelp bool
 
-	panelFocus panelFocus
-	toolScroll int
+	panelFocus   panelFocus
+	toolScroll   int
 	spinnerFrame int
 
-	entries    []svgEntry
-	entryIndex int
-	yoloMode   bool
+	entries         []svgEntry
+	entryIndex      int
+	yoloMode        bool
 	preserveContext bool // when false, m.history is cleared before each new generation
-	yoloCount  int
-	outputText string
-	cache      *widgetCache
+	yoloCount       int
+	outputText      string
+	cache           *widgetCache
 
 	tools         *ds4.ToolRegistry
 	toolRounds    int
@@ -305,9 +332,11 @@ func scanExistingSVGs(dir string, logger *log.Logger) []svgEntry {
 			desc:        md.desc,
 			keywords:    md.keywords,
 			prompt:      md.prompt,
+			think:       md.think,
 			model:       md.model,
 			generatedAt: md.generatedAt,
 			genTime:     md.genTime,
+			toolCalls:   md.toolCalls,
 		})
 	}
 	logger.Printf("[SCAN] loaded %d entries", len(result))
@@ -315,13 +344,22 @@ func scanExistingSVGs(dir string, logger *log.Logger) []svgEntry {
 }
 
 func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPath, mtpPath, backend string, logger *log.Logger, logBuf *ds4log.Buffer, debug bool) model {
-	ti := textinput.New()
-	ti.Placeholder = defaultPrompt
-	ti.SetValue(defaultPrompt)
-	ti.Focus()
-
 	wd, _ := os.Getwd()
 	existing := scanExistingSVGs(wd, logger)
+
+	ti := textinput.New()
+	ti.Placeholder = defaultPrompt
+	initialPrompt := defaultPrompt
+	entryIdx := -1
+	for i, e := range existing {
+		if validateSVG(e.svgData) == "valid" {
+			entryIdx = i
+			initialPrompt = e.prompt
+			break
+		}
+	}
+	ti.SetValue(initialPrompt)
+
 	draftPath := filepath.Join(wd, "draft.svg")
 	reg := ds4.NewToolRegistry()
 
@@ -453,34 +491,57 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 		return validateSVGDetailed(string(data)), nil
 	})
 
+	cellW, cellH := 8, 16 // default fallback
+	if w, h, err := getTerminalCellSize(); err == nil {
+		cellW, cellH = w, h
+		logger.Printf("[INIT] queried terminal cell size: %dx%d", cellW, cellH)
+	} else {
+		logger.Printf("[INIT] failed to query terminal cell size: %v (falling back to %dx%d)", err, cellW, cellH)
+	}
+
+	svgWidget := svg.NewWithConfig(svg.Config{
+		Cols:       80,
+		Rows:       24,
+		RenderEdge: svgRenderEdge,
+		PictureConfig: picture.Config{
+			CellPixelWidth:  cellW,
+			CellPixelHeight: cellH,
+		},
+	})
+	km := svgWidget.KeyMap()
+	km.ToggleMode = key.Binding{}   // Let svgpad handle 't' and 'm'
+	km.Reload = key.Binding{}       // Let svgpad handle 'r'
+	km.ToggleRender = key.Binding{} // Let svgpad handle 'g'
+
 	return model{
-		lib:           lib,
-		engOpts:       engOpts,
-		lifecycle:     engineLifecycle{status: engineinit.StatusDormant},
-		modelPath:     modelPath,
-		mtpPath:       mtpPath,
-		backend:       backend,
-		workDir:       wd,
-		input:         ti,
-		statusText:    "Ready · viewer mode (press Enter to load engine)",
-		ctxSize:       ctxSize,
-		logger:        logger,
-		debug:         debug,
-		logBuf:        logBuf,
-		logTop:        -1, // follow the tail by default
-		svgWidget:     svg.NewWithConfig(svg.Config{Cols: 80, Rows: 24, RenderEdge: svgRenderEdge}),
-		showThinking:  true,
-		thinkBoxH:     defaultThink,
-		thinkBoxW:     0, // set to 75% of width on first render
-		thinkMode:     ds4.ThinkNone,
+		lib:            lib,
+		engOpts:        engOpts,
+		lifecycle:      engineLifecycle{status: engineinit.StatusDormant},
+		modelPath:      modelPath,
+		mtpPath:        mtpPath,
+		backend:        backend,
+		workDir:        wd,
+		input:          ti,
+		statusText:     "Ready · viewer mode (press Enter to load engine)",
+		ctxSize:        ctxSize,
+		logger:         logger,
+		debug:          debug,
+		logBuf:         logBuf,
+		logTop:         -1, // follow the tail by default
+		svgWidget:      svgWidget,
+		showThinking:   true,
+		showImageInfo:  true,
+		thinkBoxH:      defaultThink,
+		thinkBoxW:      0, // set to 75% of width on first render
+		thinkMode:      ds4.ThinkNone,
 		cache:          newWidgetCache(50),
 		tools:          reg,
 		maxToolRounds:  10,
 		maxAutoCorrect: 3, // automatically trigger correction turns via svg_validate tool calls
 		toolCallCounts: make(map[string]int),
-		panelFocus:     focusInput,
+		panelFocus:     focusThinking,
 		entries:        existing,
-		entryIndex:     len(existing) - 1,
+		entryIndex:     entryIdx,
 	}
 }
 
@@ -490,7 +551,12 @@ func (m model) Init() tea.Cmd {
 	// The engine is opened lazily on first prompt submit. Startup is
 	// Dormant: the viewer panel and entry navigation work without any
 	// model loaded.
-	return m.svgWidget.Init()
+	var cmds []tea.Cmd
+	cmds = append(cmds, m.svgWidget.Init())
+	if m.entryIndex < 0 {
+		cmds = append(cmds, m.svgWidget.SetSVGData("placeholder.svg", []byte(placeholderSVG)))
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -654,8 +720,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.showThinking {
 				switch m.panelFocus {
 				case focusInput:
-					m.panelFocus = focusThinking
+					m.panelFocus = focusSVG
 					m.input.Blur()
+				case focusSVG:
+					m.panelFocus = focusThinking
 				case focusThinking:
 					m.panelFocus = focusTools
 				case focusTools:
@@ -663,37 +731,70 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					cmds = append(cmds, m.input.Focus())
 				}
 			} else {
-				if m.input.Focused() {
-					m.panelFocus = focusInput
+				switch m.panelFocus {
+				case focusInput:
+					m.panelFocus = focusSVG
 					m.input.Blur()
-				} else {
+				case focusSVG:
+					m.panelFocus = focusInput
+					cmds = append(cmds, m.input.Focus())
+				default:
 					m.panelFocus = focusInput
 					cmds = append(cmds, m.input.Focus())
 				}
 			}
 			return m, tea.Batch(cmds...)
 
-		case "pgup":
-			if !m.input.Focused() && len(m.entries) > 0 {
-				if m.entryIndex > 0 {
+		case "shift+tab":
+			if m.showThinking {
+				switch m.panelFocus {
+				case focusInput:
+					m.panelFocus = focusTools
+					m.input.Blur()
+				case focusTools:
+					m.panelFocus = focusThinking
+				case focusThinking:
+					m.panelFocus = focusSVG
+				case focusSVG:
+					m.panelFocus = focusInput
+					cmds = append(cmds, m.input.Focus())
+				}
+			} else {
+				switch m.panelFocus {
+				case focusInput:
+					m.panelFocus = focusSVG
+					m.input.Blur()
+				case focusSVG:
+					m.panelFocus = focusInput
+					cmds = append(cmds, m.input.Focus())
+				default:
+					m.panelFocus = focusInput
+					cmds = append(cmds, m.input.Focus())
+				}
+			}
+			return m, tea.Batch(cmds...)
+
+		case "pgup", "k":
+			if !m.input.Focused() {
+				if len(m.entries) > 0 && m.entryIndex > 0 {
 					m.entryIndex--
 					if cmd := m.loadEntryCmd(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 				}
+				return m, tea.Batch(cmds...)
 			}
-			return m, tea.Batch(cmds...)
 
-		case "pgdown":
-			if !m.input.Focused() && len(m.entries) > 0 {
-				if m.entryIndex < len(m.entries)-1 {
+		case "pgdown", "j":
+			if !m.input.Focused() {
+				if len(m.entries) > 0 && m.entryIndex < len(m.entries)-1 {
 					m.entryIndex++
 					if cmd := m.loadEntryCmd(); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
 				}
+				return m, tea.Batch(cmds...)
 			}
-			return m, tea.Batch(cmds...)
 
 		case "up":
 			// Panel-aware scroll. When the input owns focus, fall through
@@ -710,6 +811,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.toolScroll--
 				}
 				return m, nil
+			case focusSVG:
+				var cmd tea.Cmd
+				m.svgWidget, cmd = m.svgWidget.Update(msg)
+				cmds = append(cmds, cmd)
+				return m, tea.Batch(cmds...)
 			}
 
 		case "down":
@@ -720,6 +826,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case focusTools:
 				m.toolScroll++
 				return m, nil
+			case focusSVG:
+				var cmd tea.Cmd
+				m.svgWidget, cmd = m.svgWidget.Update(msg)
+				cmds = append(cmds, cmd)
+				return m, tea.Batch(cmds...)
 			}
 		}
 
@@ -742,11 +853,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "n":
 			m.input.SetValue("")
 			m.thinkText = ""
+			m.outputText = ""
 			m.history = nil
 			m.lastErr = nil
 			m.errText = ""
 			m.panelFocus = focusInput
+			m.entryIndex = -1
 			cmds = append(cmds, m.input.Focus())
+			cmds = append(cmds, m.svgWidget.SetSVGData("placeholder.svg", []byte(placeholderSVG)))
 
 		case "c":
 			if m.generating {
@@ -821,10 +935,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "t":
 			m.showThinking = !m.showThinking
-			if !m.showThinking && m.panelFocus != focusInput {
-				m.panelFocus = focusInput
-				cmds = append(cmds, m.input.Focus())
+			if !m.showThinking && (m.panelFocus == focusThinking || m.panelFocus == focusTools) {
+				m.panelFocus = focusSVG
 			}
+			cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
+
+		case "i":
+			m.showImageInfo = !m.showImageInfo
 			cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
 
 		case "r":
@@ -876,6 +993,63 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusText = "Context: cleared per generation"
 			}
 			m.logger.Printf("[CONTEXT] preserve=%v", m.preserveContext)
+
+		case "<", ",":
+			if m.engine != nil {
+				cur := m.engine.Power()
+				newPower := cur - 10
+				if newPower < 1 {
+					newPower = 1
+				}
+				if err := m.engine.SetPower(newPower); err == nil {
+					m.statusText = fmt.Sprintf("GPU Power set to %d%%", newPower)
+				} else {
+					m.statusText = fmt.Sprintf("Error setting power: %v", err)
+				}
+			} else {
+				p := m.engOpts.PowerPercent
+				if p == 0 {
+					p = 100
+				}
+				p -= 10
+				if p < 1 {
+					p = 1
+				}
+				m.engOpts.PowerPercent = p
+				m.statusText = fmt.Sprintf("Initial GPU Power set to %d%%", p)
+			}
+
+		case ">", ".":
+			if m.engine != nil {
+				cur := m.engine.Power()
+				newPower := cur + 10
+				if newPower > 100 {
+					newPower = 100
+				}
+				if err := m.engine.SetPower(newPower); err == nil {
+					m.statusText = fmt.Sprintf("GPU Power set to %d%%", newPower)
+				} else {
+					m.statusText = fmt.Sprintf("Error setting power: %v", err)
+				}
+			} else {
+				p := m.engOpts.PowerPercent
+				if p == 0 {
+					p = 100
+				}
+				p += 10
+				if p > 100 {
+					p = 100
+				}
+				m.engOpts.PowerPercent = p
+				m.statusText = fmt.Sprintf("Initial GPU Power set to %d%%", p)
+			}
+
+		default:
+			if m.panelFocus == focusSVG {
+				var cmd tea.Cmd
+				m.svgWidget, cmd = m.svgWidget.Update(msg)
+				cmds = append(cmds, cmd)
+			}
 		}
 
 	case metadataDoneMsg:
@@ -992,6 +1166,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinkText = ""
 		m.outputText = ""
 		m.toolCalls = m.toolCalls[:0]
+		m.totalToolCalls = 0
+		m.totalToolRounds = 0
+		m.toolCallCounts = make(map[string]int)
 		m.thinkScroll = 0
 		m.toolScroll = 0
 		m.thinkAutoScroll = true
@@ -1041,8 +1218,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.tokenCount++
 		m.rawBuf = append(m.rawBuf, text...)
-		m.thinkText = extractThink(string(m.rawBuf))
-		m.outputText = extractOutputText(string(m.rawBuf))
+		m.thinkText = extractThink(string(m.rawBuf), m.thinkMode != ds4.ThinkNone)
+		m.outputText = extractOutputText(string(m.rawBuf), m.thinkMode != ds4.ThinkNone)
+
+		if incSVG := extractIncrementalSVG(string(m.rawBuf)); incSVG != nil {
+			if strings.Contains(text, "\n") || m.tokenCount%15 == 0 {
+				cmds = append(cmds, m.svgWidget.SetSVGData("incremental.svg", incSVG))
+			}
+		}
 
 		cmds = append(cmds, waitMsg(m.tokenCh))
 
@@ -1117,9 +1300,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.statusText = fmt.Sprintf("Running %s...", strings.Join(toolNames, ", "))
 			m.logger.Printf("[TOOL] round=%d calls=%d", m.toolRounds, len(assistant.ToolCalls))
-		for _, call := range assistant.ToolCalls {
-			m.logger.Printf("[TOOL] arg %s=%q", call.Name, truncateString(call.Arguments, 500))
-		}
+			for _, call := range assistant.ToolCalls {
+				m.logger.Printf("[TOOL] arg %s=%q", call.Name, truncateString(call.Arguments, 500))
+			}
 			results, toolErr := m.tools.ExecuteToolCalls(context.Background(), assistant.ToolCalls)
 			if toolErr != nil {
 				m.statusText = "Tool error"
@@ -1174,7 +1357,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			svgData = extractSVG(content)
 		}
-		outputText := extractOutputText(content)
+		outputText := extractOutputText(content, m.thinkMode != ds4.ThinkNone)
 		nextPrompt := extractPrompt(content)
 		m.outputText = outputText
 
@@ -1191,7 +1374,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.autoCorrectCount < m.maxAutoCorrect && msg.err == nil {
 			var v string
 			if len(svgData) == 0 {
-				v = "no SVG markup found — your response must start with <svg and end with </svg>"
+				v = "no SVG markup found in the draft file or in your response"
 			} else {
 				v = validateSVG(svgData)
 			}
@@ -1199,7 +1382,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.autoCorrectCount++
 				m.statusText = fmt.Sprintf("Fixing SVG (%d/%d) · %s", m.autoCorrectCount, m.maxAutoCorrect, v)
 				m.logger.Printf("[AUTOCORRECT] #%d error=%q", m.autoCorrectCount, v)
-				feedback := fmt.Sprintf("Your output was invalid: %s. Please output ONLY a corrected, complete SVG.", v)
+				feedback := fmt.Sprintf("Your output was invalid: %s. Please correct this by using tools (svg_append, svg_replace) on the draft file, or by providing the corrected SVG.", v)
 				m.history = append(m.history, ds4.ChatMessage{Role: "user", Content: feedback})
 				cmds = append(cmds, func() tea.Msg { return toolRoundMsg{} })
 				return m, tea.Batch(cmds...)
@@ -1238,7 +1421,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.statusText += " · enriching"
 				m.metadataInFlight = true
 				cmds = append(cmds, enrichMetadataCmd(
-					m.engine, filepath.Base(m.modelPath), path, currentPrompt, svgData, m.genTime()))
+					m.engine, filepath.Base(m.modelPath), path, currentPrompt, svgData, m.genTime(), m.toolCalls, m.thinkText))
 			}
 		}
 
@@ -1247,6 +1430,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			filename:  fname,
 			prompt:    currentPrompt,
 			text:      outputText,
+			think:     m.thinkText,
 			svgData:   svgData,
 			genTime:   m.genTime(),
 			toolCalls: make([]toolCallEntry, len(m.toolCalls)),
@@ -1254,6 +1438,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		copy(entry.toolCalls, m.toolCalls)
 		m.entries = append(m.entries, entry)
 		m.entryIndex = len(m.entries) - 1
+		cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
 
 		// Structured log entry.
 		m.logger.Printf("[ENTRY] filename=%q prompt=%q text=%q", fname, currentPrompt, outputText)
@@ -1382,7 +1567,12 @@ Workflow for every user request:
 4. If it returns "Invalid:", read the diagnostic, read the current draft using svg_read (if needed), use svg_replace or svg_replace_lines to edit/correct specific parts of the SVG, and call svg_validate again. Do NOT clear the draft.
 5. When svg_validate returns "Valid:", emit your final response. You do not need to output the complete SVG in your text response if it has been written to the draft, but confirm completion to the user.
 
-The SVG must include xmlns="http://www.w3.org/2000/svg" and be self-contained.`
+The SVG must include xmlns="http://www.w3.org/2000/svg" and be self-contained.
+
+Tips for successful generation:
+- The SVG will be rendered by a static pure-Go parser (no Javascript engine, no HTML5 canvas support, no CSS animations, no external resource loading). You MUST construct the drawing using static SVG elements (like <rect>, <path>, <circle>, <g>, etc.). Do NOT use <script> tags or attempt to draw via Javascript.
+- Keep your thoughts inside the <think>...</think> block concise, focusing primarily on the visual design, coordinate mapping, and SVG structures. Do NOT output long mathematical derivations or conversational explanations outside the tool calls.
+- Always output tool calls using the exact XML syntax: <｜DSML｜invoke name="tool_name"> and </｜DSML｜invoke>. Do not make typos in the tag names (e.g., do not write DSLI, DSigname, or DSML incorrectly).`
 	if m.yoloMode {
 		base += `
 
@@ -1406,17 +1596,48 @@ func extractSVG(s string) []byte {
 	return []byte(s[start : start+end+len("</svg>")])
 }
 
-// extractThink pulls the <think>...</think> content from a string.
-func extractThink(s string) string {
-	start := strings.Index(s, "<think>")
+// extractIncrementalSVG pulls a partial <svg> block from a generating stream
+// and appends a closing </svg> tag if it is still open, making it possible
+// to render a preview of the SVG as it generates.
+func extractIncrementalSVG(s string) []byte {
+	start := strings.Index(s, "<svg")
 	if start == -1 {
-		return ""
+		return nil
 	}
-	end := strings.Index(s[start:], "</think>")
+	end := strings.Index(s[start:], "</svg>")
 	if end == -1 {
-		return s[start+len("<think>"):]
+		partial := s[start:]
+		if !strings.HasSuffix(strings.TrimSpace(partial), "</svg>") {
+			partial = partial + "</svg>"
+		}
+		return []byte(partial)
 	}
-	return s[start+len("<think>") : start+end]
+	return []byte(s[start : start+end+len("</svg>")])
+}
+
+// extractThink pulls the <think>...</think> content from a string.
+// If thinkActive is true and <think> is missing, we assume the thinking content
+// starts at the beginning of the string and goes up to </think> (or the end if no </think>).
+func extractThink(s string, thinkActive bool) string {
+	start := strings.Index(s, "<think>")
+	if start != -1 {
+		end := strings.Index(s[start:], "</think>")
+		if end == -1 {
+			return s[start+len("<think>"):]
+		}
+		return s[start+len("<think>") : start+end]
+	}
+
+	// If <think> is not found, but thinkActive is true:
+	if thinkActive {
+		end := strings.Index(s, "</think>")
+		if end == -1 {
+			return s
+		}
+		return s[:end]
+	}
+
+	return ""
 }
 
 // extractPrompt pulls the first <prompt>...</prompt> block from raw buffer.
@@ -1433,19 +1654,36 @@ func extractPrompt(s string) string {
 }
 
 // extractOutputText returns text that is NOT inside <think>, <svg>, or <prompt> tags.
-func extractOutputText(s string) string {
+// If thinkActive is true, it also strips the thinking block which may start at the
+// beginning without a <think> tag.
+func extractOutputText(s string, thinkActive bool) string {
 	// Strip <think>...</think>
 	for {
 		start := strings.Index(s, "<think>")
-		if start == -1 {
+		if start != -1 {
+			end := strings.Index(s[start:], "</think>")
+			if end == -1 {
+				s = strings.TrimSpace(s[:start])
+				break
+			}
+			s = strings.TrimSpace(s[:start] + s[start+end+len("</think>"):])
+			thinkActive = false
+		} else {
+			if thinkActive {
+				end := strings.Index(s, "</think>")
+				if end != -1 {
+					s = strings.TrimSpace(s[end+len("</think>"):])
+					// Set thinkActive to false so we don't try to strip again (which would loop infinitely)
+					thinkActive = false
+					continue
+				}
+				// If thinkActive is true but </think> is not yet received, then the entire string is thinking,
+				// so the output text is empty.
+				s = ""
+				break
+			}
 			break
 		}
-		end := strings.Index(s[start:], "</think>")
-		if end == -1 {
-			s = strings.TrimSpace(s[:start])
-			break
-		}
-		s = strings.TrimSpace(s[:start] + s[start+end+len("</think>"):])
 	}
 	// Strip <svg>...</svg>
 	for {
@@ -1526,6 +1764,9 @@ func validateSVGDetailed(svg string) string {
 	for {
 		tok, err := decoder.Token()
 		if err != nil {
+			if err == io.EOF {
+				break
+			}
 			issues = append(issues, fmt.Sprintf("XML parse error at byte %d: %v", decoder.InputOffset(), err))
 			break
 		}
@@ -1617,6 +1858,42 @@ func (m model) headerMetrics() string {
 	return strings.Join(parts, " · ")
 }
 
+// kittyBadge renders the header status pill indicating whether Kitty graphics is supported.
+func (m model) kittyBadge() string {
+	supported := m.svgWidget.KittySupported()
+
+	var style lipgloss.Style
+	var label string
+
+	switch supported {
+	case picture.KittyCapabilitySupported:
+		style = lipgloss.NewStyle().
+			Background(lipgloss.Color("33")). // Vibrant blue for active Kitty graphics
+			Foreground(lipgloss.Color("231")).
+			Bold(true)
+		label = "🐱 kitty"
+	case picture.KittyCapabilityUnsupported:
+		style = lipgloss.NewStyle().
+			Background(lipgloss.Color("240")). // Muted gray for fallback glyph rendering
+			Foreground(lipgloss.Color("250")).
+			Bold(true)
+		label = "🐱 glyph"
+	default:
+		style = lipgloss.NewStyle().
+			Background(lipgloss.Color("214")). // Amber/yellow for checking status
+			Foreground(lipgloss.Color("16")).
+			Bold(true)
+		label = "🐱 query"
+	}
+
+	padded := " " + label + " "
+	const width = 10
+	for lipgloss.Width(padded) < width {
+		padded += " "
+	}
+	return style.Render(padded)
+}
+
 // thinkModeLabel returns a fixed-width (4-char) label for the reasoning mode.
 func (m model) thinkModeLabel() string {
 	switch m.thinkMode {
@@ -1638,15 +1915,16 @@ func (m *model) loadEntryCmd() tea.Cmd {
 		return nil
 	}
 	e := m.entries[m.entryIndex]
-	m.thinkText = ""
+	m.thinkText = e.think
 	m.outputText = entryText(e)
 	m.thinkScroll = 0
 	m.toolScroll = 0
 	m.toolCalls = make([]toolCallEntry, len(e.toolCalls))
 	copy(m.toolCalls, e.toolCalls)
+	m.input.SetValue(e.prompt)
 	if e.filename != "" {
-		if img, ok := m.cache.Get(e.filename); ok {
-			return m.svgWidget.SetImage(img)
+		if cached, ok := m.cache.Get(e.filename); ok {
+			return m.svgWidget.SetImageAndRenderer(cached.img, cached.renderer, cached.doc)
 		}
 	}
 	if len(e.svgData) > 0 {
@@ -1655,8 +1933,25 @@ func (m *model) loadEntryCmd() tea.Cmd {
 	return nil
 }
 
+func (m model) infoWidth() int {
+	if !m.showImageInfo {
+		return 0
+	}
+	if m.entryIndex < 0 || m.entryIndex >= len(m.entries) {
+		return 0
+	}
+	infoW := 30
+	if mx := m.width / 3; infoW > mx {
+		infoW = mx
+	}
+	if infoW < 18 || m.width-infoW < 40 {
+		return 0
+	}
+	return infoW
+}
+
 func (m model) svgWidth() int {
-	w := m.width
+	w := m.width - m.infoWidth() - 2
 	if w < 10 {
 		w = 10
 	}
@@ -1664,12 +1959,41 @@ func (m model) svgWidth() int {
 }
 
 // svgHeight returns the content height for the SVG widget, accounting for the
-// thinking box when visible.
+// thinking box and error bars when visible.
 func (m model) svgHeight() int {
 	h := m.height - headerH - footerH - inputH
 	if m.showThinking {
 		h -= m.thinkBoxH + 2 // + border
 	}
+	if m.errText != "" {
+		h -= 1
+	}
+
+	// Compute SVG errors to see if we need an error bar for partial rendering
+	var svgErr error
+	if !m.generating {
+		if err := m.svgWidget.Err(); err != nil {
+			svgErr = err
+		} else if err := m.svgWidget.RendererErr(); err != nil {
+			svgErr = err
+		} else if m.entryIndex >= 0 && m.entryIndex < len(m.entries) {
+			e := m.entries[m.entryIndex]
+			if len(e.svgData) > 0 {
+				if v := validateSVG(e.svgData); v != "valid" {
+					svgErr = fmt.Errorf("SVG validation failed: %s", v)
+				}
+			}
+		}
+	}
+	hasPartialRender := false
+	if m.svgWidget.Image() != nil && strings.TrimSpace(m.svgWidget.View().Content) != "" {
+		hasPartialRender = true
+	}
+	if svgErr != nil && hasPartialRender {
+		h -= 1
+	}
+
+	h -= 2 // border around SVG pane
 	if h < 3 {
 		h = 3
 	}
@@ -1689,6 +2013,23 @@ func (m model) render() string {
 		return ""
 	}
 
+	// Compute SVG errors early so we can show them in the header or style the border
+	var svgErr error
+	if !m.generating {
+		if err := m.svgWidget.Err(); err != nil {
+			svgErr = err
+		} else if err := m.svgWidget.RendererErr(); err != nil {
+			svgErr = err
+		} else if m.entryIndex >= 0 && m.entryIndex < len(m.entries) {
+			e := m.entries[m.entryIndex]
+			if len(e.svgData) > 0 {
+				if v := validateSVG(e.svgData); v != "valid" {
+					svgErr = fmt.Errorf("SVG validation failed: %s", v)
+				}
+			}
+		}
+	}
+
 	// Header — plain text to avoid lipgloss v2 truncation issues
 	modelName := filepath.Base(m.modelPath)
 	if lipgloss.Width(modelName) > 20 {
@@ -1696,7 +2037,17 @@ func (m model) render() string {
 	}
 	status := m.statusText
 	if m.errText != "" {
-		status = "Error: " + m.errText
+		cleanErr := strings.ReplaceAll(m.errText, "\n", " | ")
+		status = "Error: " + cleanErr
+		if len(status) > 40 {
+			status = status[:37] + "..."
+		}
+	} else if svgErr != nil {
+		cleanErr := strings.ReplaceAll(svgErr.Error(), "\n", " | ")
+		status = "Error: " + cleanErr
+		if len(status) > 40 {
+			status = status[:37] + "..."
+		}
 	} else if m.generating {
 		if m.elapsedText != "" {
 			status = m.statusText + " " + m.elapsedText + " " + m.bicycleSpinner()
@@ -1709,7 +2060,7 @@ func (m model) render() string {
 		fmt.Sprintf(" svgpad │ %s │ ", modelName),
 		status,
 		m.headerMetrics(),
-		engineinit.Badge(m.lifecycle.status),
+		engineinit.Badge(m.lifecycle.status) + " " + m.kittyBadge(),
 	)
 
 	// Footer
@@ -1728,38 +2079,118 @@ func (m model) render() string {
 
 	// Render the SVG widget into a panel.
 	svgPanel := m.svgWidget.View().Content
-	if strings.TrimSpace(svgPanel) == "" {
-		svgPanel = " No SVG yet — press Enter to generate"
-	} else if m.entryIndex >= 0 && m.entryIndex < len(m.entries) {
-		// Cache the rasterized bitmap so revisiting this entry is
-		// instant. Image() is nil until the async render completes, so
-		// half-loaded entries are simply skipped until they finish.
+	if m.entryIndex >= 0 && m.entryIndex < len(m.entries) {
 		fname := m.entries[m.entryIndex].filename
 		if fname != "" {
 			if img := m.svgWidget.Image(); img != nil {
-				m.cache.Put(fname, img)
+				m.cache.Put(fname, cachedWidget{
+					img:      img,
+					renderer: m.svgWidget.Renderer(),
+					doc:      m.svgWidget.Document(),
+				})
 			}
 		}
 	}
-	svgLines := strings.Split(svgPanel, "\n")
-	for len(svgLines) < svgH {
-		svgLines = append(svgLines, strings.Repeat(" ", svgW))
+
+	// Determine if the widget was able to render partial drawing content.
+	hasPartialRender := false
+	if m.svgWidget.Image() != nil && strings.TrimSpace(svgPanel) != "" {
+		hasPartialRender = true
 	}
-	if len(svgLines) > svgH {
-		svgLines = svgLines[:svgH]
-	}
-	for i := range svgLines {
-		if lipgloss.Width(svgLines[i]) < svgW {
-			svgLines[i] += strings.Repeat(" ", svgW-lipgloss.Width(svgLines[i]))
-		} else if lipgloss.Width(svgLines[i]) > svgW {
-			svgLines[i] = svgLines[i][:svgW]
+
+	var svgContent string
+	if svgErr != nil && !hasPartialRender {
+		// Format error message nicely
+		var b strings.Builder
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true).Render("SVG Render/Parse Error"))
+		b.WriteString("\n\n")
+		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(svgErr.Error()))
+		if m.entryIndex >= 0 && m.entryIndex < len(m.entries) {
+			b.WriteString("\n\n")
+			b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render(fmt.Sprintf("File: %s", m.entries[m.entryIndex].filename)))
 		}
+		svgContent = wrapAndTruncate(b.String(), svgW, svgH, 0)
+	} else if strings.TrimSpace(svgPanel) == "" || svgPanel == " No SVG yet — press Enter to generate" {
+		svgContent = wrapAndTruncate(" No SVG yet — press Enter to generate", svgW, svgH, 0)
+	} else {
+		// Normal drawing containing Kitty graphics or block art
+		svgLines := strings.Split(svgPanel, "\n")
+		for len(svgLines) < svgH {
+			svgLines = append(svgLines, strings.Repeat(" ", svgW))
+		}
+		if len(svgLines) > svgH {
+			svgLines = svgLines[:svgH]
+		}
+		for i := range svgLines {
+			if lipgloss.Width(svgLines[i]) < svgW {
+				svgLines[i] += strings.Repeat(" ", svgW-lipgloss.Width(svgLines[i]))
+			} else if lipgloss.Width(svgLines[i]) > svgW {
+				svgLines[i] = ansi.Truncate(svgLines[i], svgW, "")
+			}
+		}
+		svgContent = strings.Join(svgLines, "\n")
 	}
-	svgContent := strings.Join(svgLines, "\n")
+
+	borderStyle := lipgloss.NewStyle().Border(lipgloss.NormalBorder())
+	if svgErr != nil {
+		borderStyle = borderStyle.BorderForeground(lipgloss.Color("203")) // Red border on error
+	} else if m.panelFocus == focusSVG {
+		borderStyle = borderStyle.BorderForeground(lipgloss.Color("99")) // Highlighted mauve/purple when focused
+	} else {
+		borderStyle = borderStyle.BorderForeground(lipgloss.Color("240")) // Muted when unfocused
+	}
+	svgContentBox := borderStyle.Width(svgW + 2).Height(svgH + 2).Render(svgContent)
+
+	infoW := m.infoWidth()
+	var svgRow string
+	if infoW > 0 {
+		var rawInfo string
+		if m.entryIndex >= 0 && m.entryIndex < len(m.entries) {
+			rawInfo = renderEntryInfo(m.entries[m.entryIndex], m.svgWidget.Document(), infoW-2)
+		}
+		baseBorder := lipgloss.NewStyle().Border(lipgloss.NormalBorder())
+		infoPanel := baseBorder.BorderForeground(lipgloss.Color("240")).
+			Width(infoW).
+			Height(svgH + 2).
+			Render(wrapAndTruncate(rawInfo, infoW-2, svgH, 0))
+		svgRow = lipgloss.JoinHorizontal(lipgloss.Top, infoPanel, svgContentBox)
+	} else {
+		svgRow = svgContentBox
+	}
 
 	// Thinking / output box + tool calls panel
 	var sections []string
 	sections = append(sections, header)
+	if m.errText != "" {
+		errStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("203")).
+			Foreground(lipgloss.Color("255")).
+			Bold(true).
+			Width(m.width)
+		msg := " ERROR: " + strings.ReplaceAll(m.errText, "\n", " | ")
+		if lipgloss.Width(msg) > m.width {
+			msg = ansi.Truncate(msg, m.width-3, "...")
+		}
+		if w := lipgloss.Width(msg); w < m.width {
+			msg += strings.Repeat(" ", m.width-w)
+		}
+		sections = append(sections, errStyle.Render(msg))
+	}
+	if svgErr != nil && hasPartialRender {
+		errStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("208")). // Amber/orange background for recoverable SVG errors
+			Foreground(lipgloss.Color("255")).
+			Bold(true).
+			Width(m.width)
+		msg := " SVG WARNING: " + strings.ReplaceAll(svgErr.Error(), "\n", " | ")
+		if lipgloss.Width(msg) > m.width {
+			msg = ansi.Truncate(msg, m.width-3, "...")
+		}
+		if w := lipgloss.Width(msg); w < m.width {
+			msg += strings.Repeat(" ", m.width-w)
+		}
+		sections = append(sections, errStyle.Render(msg))
+	}
 	if m.showThinking {
 		var thinkContent string
 		if m.thinkText != "" && m.outputText != "" {
@@ -1786,18 +2217,10 @@ func (m model) render() string {
 			}
 		}
 
-		// Three side-by-side panels — info / reasoning / tools — laid
+		// Two side-by-side panels — reasoning / tools — laid
 		// out side-by-side using lipgloss.JoinHorizontal.
-		// The info panel takes a narrow fixed slice; reasoning/tools
-		// share what remains, divided by the resizable m.thinkBoxW.
-		infoW := 30
-		if mx := m.width / 3; infoW > mx {
-			infoW = mx
-		}
-		if infoW < 18 || m.width-infoW < 2*minPanelW {
-			infoW = 0
-		}
-		remaining := m.width - infoW
+		// They share the full width, divided by the resizable m.thinkBoxW.
+		remaining := m.width
 
 		if m.thinkBoxW == 0 {
 			m.thinkBoxW = remaining * 3 / 4
@@ -1840,20 +2263,9 @@ func (m model) render() string {
 		// wrap them to whatever inner size FlexBox hands them.
 		rawThink := thinkContent
 		rawTool := m.renderToolPanel()
-		var rawInfo string
-		if m.entryIndex >= 0 && m.entryIndex < len(m.entries) {
-			rawInfo = renderEntryInfo(m.entries[m.entryIndex])
-		}
 		thinkScroll, toolScroll := m.thinkScroll, m.toolScroll
 
 		var panels []string
-		if infoW > 0 {
-			infoPanel := baseBorder.BorderForeground(lipgloss.Color("240")).
-				Width(infoW).
-				Height(m.thinkBoxH + 2).
-				Render(wrapAndTruncate(rawInfo, infoW-2, m.thinkBoxH, 0))
-			panels = append(panels, infoPanel)
-		}
 		thinkPanel := baseBorder.BorderForeground(thinkBorderColor).
 			Width(thinkW).
 			Height(m.thinkBoxH + 2).
@@ -1868,7 +2280,7 @@ func (m model) render() string {
 
 		sections = append(sections, lipgloss.JoinHorizontal(lipgloss.Top, panels...))
 	}
-	sections = append(sections, svgContent)
+	sections = append(sections, svgRow)
 
 	// Input
 	inputStyle := lipgloss.NewStyle().
@@ -1929,9 +2341,9 @@ func (m model) metricsText() string {
 func (m model) renderToolPanel() string {
 	var b strings.Builder
 
-	// Catalog header
+	// Tool Calls header
 	headStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
-	b.WriteString(headStyle.Render("Catalog") + "\n")
+	b.WriteString(headStyle.Render("Tool Calls") + "\n")
 
 	// List registered tools with call counts
 	for _, schema := range m.tools.Schemas() {
@@ -1954,14 +2366,14 @@ func (m model) renderToolPanel() string {
 			b.WriteString(nameStyle.Render(tc.name))
 			b.WriteString(fmt.Sprintf("  round %d\n", tc.round))
 			if tc.args != "" {
-				b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("  args: " + tc.args) + "\n")
+				b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("244")).Render("  args: "+tc.args) + "\n")
 			}
 			if tc.result != "" {
 				res := tc.result
 				if strings.Contains(res, "Invalid:") {
-					b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render("  → " + res) + "\n")
+					b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render("  → "+res) + "\n")
 				} else if strings.Contains(res, "Valid:") {
-					b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render("  → " + res) + "\n")
+					b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("82")).Render("  → "+res) + "\n")
 				} else {
 					b.WriteString("  → " + res + "\n")
 				}
@@ -1998,6 +2410,17 @@ func (m model) infoOverlay() string {
 	row := func(k, v string) { b.WriteString(fmt.Sprintf("  %-9s %s\n", k, v)) }
 
 	head("Model")
+	if m.engine != nil {
+		row("shape", m.engine.ModelName())
+		row("shape id", strconv.Itoa(m.engine.ModelID()))
+		row("gpu power", fmt.Sprintf("%d%%", m.engine.Power()))
+	} else {
+		p := m.engOpts.PowerPercent
+		if p == 0 {
+			p = 100
+		}
+		row("gpu power", fmt.Sprintf("%d%%", p))
+	}
 	row("file", filepath.Base(m.modelPath))
 	row("path", m.modelPath)
 	mtpDisplay := "--"
@@ -2079,10 +2502,12 @@ func (m model) keymap() editmode.Keymap {
 		{Keys: "r", Desc: "reason:" + strings.TrimSpace(m.thinkModeLabel())},
 		{Keys: "y", Desc: "yolo"},
 		{Keys: "p", Desc: "preserve"},
+		{Keys: "i", Desc: "image info"},
 		{Keys: "m", Desc: "info"},
 		{Keys: "x", Desc: "release"},
 		{Keys: "?", Desc: "help"},
 		{Keys: "ctrl+n", Desc: "log"},
+		{Keys: "< / >", Desc: "power"},
 		{Keys: "ctrl+c", Desc: "quit"},
 	}
 	return editmode.Keymap{Edit: edit, Command: cmd}
@@ -2214,6 +2639,8 @@ func (m model) helpOverlay() string {
 	b.WriteString("  t          toggle thinking/output box\n")
 	b.WriteString("  r          cycle reasoning mode (OFF → HIGH → MAX)\n")
 	b.WriteString("  y          toggle YOLO auto-prompt mode\n")
+	b.WriteString("  i          toggle image info pane\n")
+	b.WriteString("  < / >      adjust GPU throttle power (-/+ 10%)\n")
 	b.WriteString("  m          show model & metrics info\n")
 	b.WriteString("  ? / h      show this help\n\n")
 	b.WriteString("Edit mode (edit box targeted)\n")
@@ -2229,10 +2656,10 @@ func (m model) helpOverlay() string {
 	b.WriteString("  shift+down enlarge thinking box\n")
 	b.WriteString("  shift+left shrink think panel\n")
 	b.WriteString("  shift+right enlarge think panel\n")
-	b.WriteString("  tab        cycle focus (input → think → tools)\n")
-	b.WriteString("  up/down    scroll focused panel\n")
-	b.WriteString("  pgup       previous SVG in session\n")
-	b.WriteString("  pgdown     next SVG in session\n")
+	b.WriteString("  tab/shift+tab cycle focus (input → SVG → think → tools)\n")
+	b.WriteString("  up/down/left/right scroll or pan focused panel\n")
+	b.WriteString("  pgup/pgdown or k/j previous/next SVG in session\n")
+	b.WriteString("  +/-/0      zoom in / zoom out / reset (when SVG pane is focused)\n")
 	b.WriteString("  ctrl+q     quit\n")
 	b.WriteString("  ctrl+c     quit\n")
 	b.WriteString("\n" + infoDimStyle.Render("  press any key to close"))
@@ -2331,7 +2758,7 @@ var (
 var (
 	dsmlToolBlockStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true) // Orange
 	dsmlInvokeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)  // Blue
-	dsmlParamStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))             // Grey
+	dsmlParamStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))            // Grey
 )
 
 var dsmlUnescaper = strings.NewReplacer(
@@ -2408,4 +2835,3 @@ func formatDSMLStream(text string) string {
 
 	return text
 }
-

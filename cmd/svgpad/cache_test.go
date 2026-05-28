@@ -13,12 +13,12 @@ func testImg() image.Image { return image.NewRGBA(image.Rect(0, 0, 4, 4)) }
 func TestCachePutGet(t *testing.T) {
 	c := newWidgetCache(8)
 	img := testImg()
-	c.Put("a.svg", img)
+	c.Put("a.svg", cachedWidget{img: img})
 	got, ok := c.Get("a.svg")
 	if !ok {
 		t.Fatal("Get(a.svg) = ok false, want true")
 	}
-	if got != image.Image(img) {
+	if got.img != image.Image(img) {
 		t.Error("Get returned a different image than Put stored")
 	}
 }
@@ -35,9 +35,9 @@ func TestCacheGetMissing(t *testing.T) {
 // once the cache is over capacity.
 func TestCacheEvictsLRU(t *testing.T) {
 	c := newWidgetCache(2)
-	c.Put("a.svg", testImg())
-	c.Put("b.svg", testImg())
-	c.Put("c.svg", testImg()) // evicts a.svg, the oldest
+	c.Put("a.svg", cachedWidget{img: testImg()})
+	c.Put("b.svg", cachedWidget{img: testImg()})
+	c.Put("c.svg", cachedWidget{img: testImg()}) // evicts a.svg, the oldest
 	if _, ok := c.Get("a.svg"); ok {
 		t.Error("a.svg should have been evicted")
 	}
@@ -53,10 +53,10 @@ func TestCacheEvictsLRU(t *testing.T) {
 // recently used, so it survives the next eviction.
 func TestCacheGetRefreshesRecency(t *testing.T) {
 	c := newWidgetCache(2)
-	c.Put("a.svg", testImg())
-	c.Put("b.svg", testImg())
+	c.Put("a.svg", cachedWidget{img: testImg()})
+	c.Put("b.svg", cachedWidget{img: testImg()})
 	c.Get("a.svg")            // a.svg is now most-recently-used
-	c.Put("c.svg", testImg()) // should evict b.svg, not a.svg
+	c.Put("c.svg", cachedWidget{img: testImg()}) // should evict b.svg, not a.svg
 	if _, ok := c.Get("a.svg"); !ok {
 		t.Error("a.svg was touched by Get and should have survived eviction")
 	}
@@ -75,7 +75,7 @@ func TestLoadEntryUsesCachedBitmap(t *testing.T) {
 		entries:   []svgEntry{{filename: "a.svg", svgData: sampleSVGData}},
 	}
 	m.entryIndex = 0
-	m.cache.Put("a.svg", img)
+	m.cache.Put("a.svg", cachedWidget{img: img})
 
 	m.loadEntryCmd()
 

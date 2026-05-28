@@ -4,6 +4,7 @@ vars:
   CTX: '{{.CTX | default "32768"}}'
   BACKEND: '{{.BACKEND | default "metal"}}'
   DEBUG: '{{.DEBUG | default ""}}'
+  POWER: '{{.POWER | default ""}}'
 
 env:
   MODEL: '{{.MODEL | default ""}}'
@@ -43,6 +44,7 @@ tasks:
         if [ -n "{{.MODEL}}" ]; then args="$args --model {{.MODEL}}"; fi
         if [ -n "{{.LIB}}" ]; then args="$args --lib {{.LIB}}"; fi
         if [ -n "{{.DEBUG}}" ]; then args="$args --debug"; fi
+        if [ -n "{{.POWER}}" ]; then args="$args --power {{.POWER}}"; fi
         ./bin/ds4go-toy-glyphpad $args
 
   build:svgpad:
@@ -60,6 +62,7 @@ tasks:
         if [ -n "{{.MODEL}}" ]; then args="$args --model {{.MODEL}}"; fi
         if [ -n "{{.LIB}}" ]; then args="$args --lib {{.LIB}}"; fi
         if [ -n "{{.DEBUG}}" ]; then args="$args --debug"; fi
+        if [ -n "{{.POWER}}" ]; then args="$args --power {{.POWER}}"; fi
         ./bin/ds4go-toy-svgpad $args
 
   log:

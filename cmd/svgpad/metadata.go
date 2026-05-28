@@ -10,6 +10,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	ds4 "github.com/NimbleMarkets/ds4go"
+	svg "github.com/NimbleMarkets/ntcharts-svg/svg"
 )
 
 // metadataSessionCtx is the per-session context budget for the metadata
@@ -41,6 +42,7 @@ type metadataDoneMsg struct {
 	model       string
 	generatedAt time.Time
 	genTime     time.Duration
+	toolCalls   []toolCallEntry
 	err         error
 }
 
@@ -62,9 +64,11 @@ type svgFileMetadata struct {
 	desc        string
 	keywords    string
 	prompt      string
+	think       string
 	model       string
 	generatedAt time.Time
 	genTime     time.Duration
+	toolCalls   []toolCallEntry
 }
 
 // parseSVGMetadata pulls our metadata fields out of a previously saved
@@ -76,6 +80,7 @@ func parseSVGMetadata(svg string) svgFileMetadata {
 		desc:     xmlUnescape(innerText(svg, "<desc>", "</desc>")),
 		keywords: xmlUnescape(innerText(svg, "<dc:subject>", "</dc:subject>")),
 		prompt:   xmlUnescape(innerText(svg, "<ai:prompt>", "</ai:prompt>")),
+		think:    xmlUnescape(innerText(svg, "<ai:think>", "</ai:think>")),
 		model:    xmlUnescape(innerText(svg, "<ai:model>", "</ai:model>")),
 	}
 	if ts := innerText(svg, "<ai:generatedAt>", "</ai:generatedAt>"); ts != "" {
@@ -88,7 +93,39 @@ func parseSVGMetadata(svg string) svgFileMetadata {
 			m.genTime = d
 		}
 	}
+	m.toolCalls = parseSVGToolCalls(svg)
 	return m
+}
+
+func parseSVGToolCalls(svg string) []toolCallEntry {
+	var list []toolCallEntry
+	content := innerText(svg, "<ai:toolCalls>", "</ai:toolCalls>")
+	if content == "" {
+		return nil
+	}
+	remaining := content
+	for {
+		tcBlock := innerText(remaining, "<ai:toolCall>", "</ai:toolCall>")
+		if tcBlock == "" {
+			break
+		}
+		roundVal := 0
+		if rs := innerText(tcBlock, "<ai:round>", "</ai:round>"); rs != "" {
+			fmt.Sscanf(rs, "%d", &roundVal)
+		}
+		list = append(list, toolCallEntry{
+			round:  roundVal,
+			name:   xmlUnescape(innerText(tcBlock, "<ai:name>", "</ai:name>")),
+			args:   xmlUnescape(innerText(tcBlock, "<ai:args>", "</ai:args>")),
+			result: xmlUnescape(innerText(tcBlock, "<ai:result>", "</ai:result>")),
+		})
+		idx := strings.Index(remaining, "</ai:toolCall>")
+		if idx == -1 {
+			break
+		}
+		remaining = remaining[idx+len("</ai:toolCall>"):]
+	}
+	return list
 }
 
 func innerText(s, open, close string) string {
@@ -103,7 +140,7 @@ func innerText(s, open, close string) string {
 	return strings.TrimSpace(inner)
 }
 
-func buildMetadataBlock(title, desc, keywords, prompt, model string, now time.Time, genTime time.Duration) string {
+func buildMetadataBlock(title, desc, keywords, prompt, model string, now time.Time, genTime time.Duration, toolCalls []toolCallEntry, think string) string {
 	if title == "" && desc == "" {
 		return ""
 	}
@@ -135,11 +172,26 @@ func buildMetadataBlock(title, desc, keywords, prompt, model string, now time.Ti
 	fmt.Fprintf(&b, "      <dc:date>%s</dc:date>\n", date)
 	b.WriteString("      <ai:generation>\n")
 	fmt.Fprintf(&b, "        <ai:prompt>%s</ai:prompt>\n", xmlEscape(prompt))
+	if think != "" {
+		fmt.Fprintf(&b, "        <ai:think>%s</ai:think>\n", xmlEscape(think))
+	}
 	fmt.Fprintf(&b, "        <ai:model>%s</ai:model>\n", xmlEscape(model))
 	b.WriteString("        <ai:provider>local ds4</ai:provider>\n")
 	fmt.Fprintf(&b, "        <ai:generatedAt>%s</ai:generatedAt>\n", ts)
 	if genTime > 0 {
 		fmt.Fprintf(&b, "        <ai:genTime>%s</ai:genTime>\n", genTime.String())
+	}
+	if len(toolCalls) > 0 {
+		b.WriteString("        <ai:toolCalls>\n")
+		for _, tc := range toolCalls {
+			b.WriteString("          <ai:toolCall>\n")
+			fmt.Fprintf(&b, "            <ai:round>%d</ai:round>\n", tc.round)
+			fmt.Fprintf(&b, "            <ai:name>%s</ai:name>\n", xmlEscape(tc.name))
+			fmt.Fprintf(&b, "            <ai:args>%s</ai:args>\n", xmlEscape(tc.args))
+			fmt.Fprintf(&b, "            <ai:result>%s</ai:result>\n", xmlEscape(tc.result))
+			b.WriteString("          </ai:toolCall>\n")
+		}
+		b.WriteString("        </ai:toolCalls>\n")
 	}
 	b.WriteString("      </ai:generation>\n")
 	b.WriteString("    </rdf:Description>\n")
@@ -208,7 +260,7 @@ func entryText(e svgEntry) string {
 // the currently-shown entry. Width is the content width (the caller
 // supplies the border). Empty fields are skipped so the panel collapses
 // gracefully when an old file has no metadata.
-func renderEntryInfo(e svgEntry) string {
+func renderEntryInfo(e svgEntry, doc *svg.Document, width int) string {
 	var b strings.Builder
 	b.WriteString(infoHeadStyle.Render("Image"))
 	b.WriteByte('\n')
@@ -220,6 +272,34 @@ func renderEntryInfo(e svgEntry) string {
 		fmt.Fprintf(&b, "  %-7s %s\n", label, value)
 	}
 
+	rowRight := func(label, valStr string) {
+		leftPadding := "  "
+		rightMargin := "  "
+		avail := width - len(leftPadding) - len(rightMargin)
+		if avail < 10 {
+			avail = 10
+		}
+
+		lbl := label
+		valLen := len(valStr)
+		if len(lbl)+1+valLen > avail {
+			maxLblLen := avail - valLen - 1
+			if maxLblLen > 3 {
+				lbl = lbl[:maxLblLen-3] + "..."
+			} else {
+				lbl = lbl[:maxLblLen]
+			}
+		}
+
+		padLen := avail - len(lbl) - valLen
+		if padLen < 1 {
+			padLen = 1
+		}
+		padding := strings.Repeat(" ", padLen)
+
+		fmt.Fprintf(&b, "%s%s%s%s%s\n", leftPadding, lbl, padding, valStr, rightMargin)
+	}
+
 	row("file", e.filename)
 	row("model", e.model)
 	if !e.generatedAt.IsZero() {
@@ -229,6 +309,38 @@ func renderEntryInfo(e svgEntry) string {
 		row("gen time", fmtDuration(e.genTime))
 	}
 	row("tags", e.keywords)
+
+	if len(e.toolCalls) > 0 {
+		b.WriteByte('\n')
+		b.WriteString(infoHeadStyle.Render("Tool Calls"))
+		b.WriteByte('\n')
+		var maxRound int
+		for _, tc := range e.toolCalls {
+			if tc.round > maxRound {
+				maxRound = tc.round
+			}
+		}
+		rowRight("calls", fmt.Sprintf("%d", len(e.toolCalls)))
+		rowRight("rounds", fmt.Sprintf("%d", maxRound+1))
+	}
+
+	if doc != nil {
+		b.WriteByte('\n')
+		b.WriteString(infoHeadStyle.Render("SVG Elements"))
+		b.WriteByte('\n')
+
+		total := fmt.Sprintf("%d", doc.TotalElements())
+		if doc.CountCapped() {
+			total += "+"
+		}
+		rowRight("total", total)
+
+		hist := doc.Histogram()
+		for _, item := range hist {
+			rowRight(item.Name, fmt.Sprintf("%d", item.Count))
+		}
+	}
+
 	return b.String()
 }
 
@@ -256,7 +368,7 @@ func spliceMetadataIntoSVG(svg, block string) string {
 	return svg[:closeTag+1] + "\n" + block + "\n" + svg[closeTag+1:]
 }
 
-func enrichMetadataCmd(eng *ds4.Engine, modelName, filename, prompt string, svgData []byte, genTime time.Duration) tea.Cmd {
+func enrichMetadataCmd(eng *ds4.Engine, modelName, filename, prompt string, svgData []byte, genTime time.Duration, toolCalls []toolCallEntry, think string) tea.Cmd {
 	return func() tea.Msg {
 		sess, err := eng.NewSession(metadataSessionCtx)
 		if err != nil {
@@ -305,7 +417,7 @@ func enrichMetadataCmd(eng *ds4.Engine, modelName, filename, prompt string, svgD
 			return metadataDoneMsg{filename: filename, model: modelName, err: fmt.Errorf("no <title>/<desc> in model output")}
 		}
 		generatedAt := time.Now()
-		block := buildMetadataBlock(title, desc, keywords, prompt, modelName, generatedAt, genTime)
+		block := buildMetadataBlock(title, desc, keywords, prompt, modelName, generatedAt, genTime, toolCalls, think)
 
 		base := metadataDoneMsg{
 			filename:    filename,
@@ -315,6 +427,7 @@ func enrichMetadataCmd(eng *ds4.Engine, modelName, filename, prompt string, svgD
 			model:       modelName,
 			generatedAt: generatedAt,
 			genTime:     genTime,
+			toolCalls:   toolCalls,
 		}
 		data, err := os.ReadFile(filename)
 		if err != nil {

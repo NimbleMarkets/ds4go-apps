@@ -21,6 +21,7 @@ import (
 	"github.com/NimbleMarkets/ds4go-playground/internal/engineinit"
 	"github.com/NimbleMarkets/ds4go-playground/internal/headerbar"
 	"github.com/NimbleMarkets/ntcharts/v2/canvas"
+	"github.com/charmbracelet/x/ansi"
 )
 
 const (
@@ -358,6 +359,56 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "l": // re-fit the canvas to the current window size
 			m = m.lockCanvas()
 
+		case "<", ",":
+			if m.engine != nil {
+				cur := m.engine.Power()
+				newPower := cur - 10
+				if newPower < 1 {
+					newPower = 1
+				}
+				if err := m.engine.SetPower(newPower); err == nil {
+					m.statusText = fmt.Sprintf("GPU Power set to %d%%", newPower)
+				} else {
+					m.statusText = fmt.Sprintf("Error setting power: %v", err)
+				}
+			} else {
+				p := m.engOpts.PowerPercent
+				if p == 0 {
+					p = 100
+				}
+				p -= 10
+				if p < 1 {
+					p = 1
+				}
+				m.engOpts.PowerPercent = p
+				m.statusText = fmt.Sprintf("Initial GPU Power set to %d%%", p)
+			}
+
+		case ">", ".":
+			if m.engine != nil {
+				cur := m.engine.Power()
+				newPower := cur + 10
+				if newPower > 100 {
+					newPower = 100
+				}
+				if err := m.engine.SetPower(newPower); err == nil {
+					m.statusText = fmt.Sprintf("GPU Power set to %d%%", newPower)
+				} else {
+					m.statusText = fmt.Sprintf("Error setting power: %v", err)
+				}
+			} else {
+				p := m.engOpts.PowerPercent
+				if p == 0 {
+					p = 100
+				}
+				p += 10
+				if p > 100 {
+					p = 100
+				}
+				m.engOpts.PowerPercent = p
+				m.statusText = fmt.Sprintf("Initial GPU Power set to %d%%", p)
+			}
+
 		case "k": // clear the canvas, output, and conversation
 			if !m.generating {
 				m.parser.Reset()
@@ -563,6 +614,9 @@ func (m model) thinkingHeight() int {
 // middleHeight is the total rows for the canvas/description row.
 func (m model) middleHeight() int {
 	h := m.height - headerH - footerH - inputH - m.thinkingHeight()
+	if m.errText != "" {
+		h -= 1
+	}
 	if h < 3 {
 		h = 3
 	}
@@ -661,7 +715,11 @@ func (m model) render() string {
 	modelName := filepath.Base(m.modelPath)
 	status := m.statusText
 	if m.errText != "" {
-		status = "Error: " + m.errText
+		cleanErr := strings.ReplaceAll(m.errText, "\n", " | ")
+		status = "Error: " + cleanErr
+		if len(status) > 40 {
+			status = status[:37] + "..."
+		}
 	}
 	canvasInfo := fmt.Sprintf("canvas %d×%d", m.canvasW, m.canvasH)
 	if fw, fh := m.fitCanvasSize(); fw != m.canvasW || fh != m.canvasH {
@@ -735,7 +793,23 @@ func (m model) render() string {
 	rightCol := lipgloss.JoinVertical(lipgloss.Left, descPanel, codePanel)
 	middle := lipgloss.JoinHorizontal(lipgloss.Top, canvasPanel, rightCol)
 
-	sections := []string{header, middle}
+	sections := []string{header}
+	if m.errText != "" {
+		errStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("203")).
+			Foreground(lipgloss.Color("255")).
+			Bold(true).
+			Width(m.width)
+		msg := " ERROR: " + strings.ReplaceAll(m.errText, "\n", " | ")
+		if lipgloss.Width(msg) > m.width {
+			msg = ansi.Truncate(msg, m.width-3, "...")
+		}
+		if w := lipgloss.Width(msg); w < m.width {
+			msg += strings.Repeat(" ", m.width-w)
+		}
+		sections = append(sections, errStyle.Render(msg))
+	}
+	sections = append(sections, middle)
 
 	// Thinking box (full width, toggleable with ctrl+t)
 	if m.showThinking {
@@ -1061,6 +1135,7 @@ func (m model) keymap() editmode.Keymap {
 			{Keys: "f/b", Desc: "step"},
 			{Keys: "g", Desc: "run"},
 			{Keys: "ctrl+n", Desc: "log"},
+			{Keys: "< / >", Desc: "power"},
 			{Keys: "ctrl+c", Desc: "quit"},
 		}
 	}
@@ -1189,6 +1264,17 @@ func (m model) infoOverlay() string {
 	row := func(k, v string) { b.WriteString(fmt.Sprintf("  %-9s %s\n", k, v)) }
 
 	head("Model")
+	if m.engine != nil {
+		row("shape", m.engine.ModelName())
+		row("shape id", strconv.Itoa(m.engine.ModelID()))
+		row("gpu power", fmt.Sprintf("%d%%", m.engine.Power()))
+	} else {
+		p := m.engOpts.PowerPercent
+		if p == 0 {
+			p = 100
+		}
+		row("gpu power", fmt.Sprintf("%d%%", p))
+	}
 	row("file", filepath.Base(m.modelPath))
 	row("path", m.modelPath)
 	mtpDisplay := "--"
