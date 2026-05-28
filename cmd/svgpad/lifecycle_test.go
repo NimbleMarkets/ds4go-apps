@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/NimbleMarkets/ds4go-playground/internal/engineinit"
+	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
 )
 
 func TestSubmitFromDormantOpens(t *testing.T) {

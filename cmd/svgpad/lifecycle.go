@@ -1,6 +1,6 @@
 package main
 
-import "github.com/NimbleMarkets/ds4go-playground/internal/engineinit"
+import "github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
 
 // engineAction is the side-effect a lifecycle transition wants the
 // bubbletea Update loop to perform. The state machine is pure; it does

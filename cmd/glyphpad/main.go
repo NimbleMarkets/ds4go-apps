@@ -8,8 +8,8 @@ import (
 	"syscall"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/NimbleMarkets/ds4go"
-	"github.com/NimbleMarkets/ds4go-playground/internal/ds4log"
+	ds4 "github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
 	"github.com/spf13/pflag"
 )
 

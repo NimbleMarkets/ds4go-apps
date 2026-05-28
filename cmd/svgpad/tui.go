@@ -21,11 +21,11 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/NimbleMarkets/ds4go"
-	"github.com/NimbleMarkets/ds4go-playground/internal/ds4log"
-	"github.com/NimbleMarkets/ds4go-playground/internal/editmode"
-	"github.com/NimbleMarkets/ds4go-playground/internal/engineinit"
-	"github.com/NimbleMarkets/ds4go-playground/internal/headerbar"
+	ds4 "github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
+	"github.com/NimbleMarkets/ds4go-apps/internal/editmode"
+	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
+	"github.com/NimbleMarkets/ds4go-apps/internal/headerbar"
 	svg "github.com/NimbleMarkets/ntcharts-svg/svg"
 	"github.com/NimbleMarkets/ntcharts/v2/picture"
 	"github.com/charmbracelet/x/ansi"
@@ -2060,7 +2060,7 @@ func (m model) render() string {
 		fmt.Sprintf(" svgpad │ %s │ ", modelName),
 		status,
 		m.headerMetrics(),
-		engineinit.Badge(m.lifecycle.status) + " " + m.kittyBadge(),
+		engineinit.Badge(m.lifecycle.status)+" "+m.kittyBadge(),
 	)
 
 	// Footer

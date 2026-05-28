@@ -15,11 +15,11 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
-	"github.com/NimbleMarkets/ds4go"
-	"github.com/NimbleMarkets/ds4go-playground/internal/ds4log"
-	"github.com/NimbleMarkets/ds4go-playground/internal/editmode"
-	"github.com/NimbleMarkets/ds4go-playground/internal/engineinit"
-	"github.com/NimbleMarkets/ds4go-playground/internal/headerbar"
+	ds4 "github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
+	"github.com/NimbleMarkets/ds4go-apps/internal/editmode"
+	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
+	"github.com/NimbleMarkets/ds4go-apps/internal/headerbar"
 	"github.com/NimbleMarkets/ntcharts/v2/canvas"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -59,7 +59,7 @@ type model struct {
 	width, height    int
 	canvasW, canvasH int // locked canvas content size — the LLM's coordinate space
 
-	engine       *ds4.Engine  // nil until engineReadyMsg
+	engine       *ds4.Engine // nil until engineReadyMsg
 	session      *ds4.Session
 	lib          *ds4.Library      // resolved in main, used by Init's goroutine
 	engOpts      ds4.EngineOptions // captured to fire async open
@@ -71,10 +71,10 @@ type model struct {
 	mtpDraft     int
 	backend      string
 	workDir      string
-	showInfo  bool           // info overlay is up (m in command mode)
-	showLog   bool           // libds4 log overlay is up (ctrl+n)
-	logBuf    *ds4log.Buffer // captured libds4 diagnostics
-	logTop    int            // absolute first-visible line; -1 = follow tail
+	showInfo     bool           // info overlay is up (m in command mode)
+	showLog      bool           // libds4 log overlay is up (ctrl+n)
+	logBuf       *ds4log.Buffer // captured libds4 diagnostics
+	logTop       int            // absolute first-visible line; -1 = follow tail
 
 	history    []chatMsg
 	rawBuf     []byte // raw LLM response for the current turn
