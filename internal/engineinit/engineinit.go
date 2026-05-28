@@ -25,9 +25,9 @@ var (
 			Foreground(lipgloss.Color("16")).
 			Bold(true)
 	dormantBadgeStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("240")).
-			Foreground(lipgloss.Color("231")).
-			Bold(true)
+				Background(lipgloss.Color("240")).
+				Foreground(lipgloss.Color("231")).
+				Bold(true)
 	readyBadgeStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("28")).
 			Foreground(lipgloss.Color("231")).

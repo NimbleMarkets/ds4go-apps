@@ -12,7 +12,7 @@ env:
 
 tasks:
   default:
-    desc: Build all the toys
+    desc: Build all the apps
     cmds:
       - task: build
 
@@ -27,13 +27,14 @@ tasks:
     deps: [tidy]
     cmds:
       - task: build:glyphpad
+      - task: build:steering
       - task: build:svgpad
 
   build:glyphpad:
     desc: Build glyphpad binary
     deps: [tidy]
     cmds:
-      - go build -o ./bin/ds4go-toy-glyphpad ./cmd/glyphpad
+      - go build -o ./bin/ds4go-glyphpad ./cmd/glyphpad
 
   run:glyphpad:
     desc: Run the glyphpad TUI
@@ -45,13 +46,37 @@ tasks:
         if [ -n "{{.LIB}}" ]; then args="$args --lib {{.LIB}}"; fi
         if [ -n "{{.DEBUG}}" ]; then args="$args --debug"; fi
         if [ -n "{{.POWER}}" ]; then args="$args --power {{.POWER}}"; fi
-        ./bin/ds4go-toy-glyphpad $args
+        ./bin/ds4go-glyphpad $args
+
+  build:steering:
+    desc: Build the steering binary
+    deps: [tidy]
+    sources:
+      - "**/*.go"
+      - go.mod
+      - go.sum
+    generates:
+      - bin/ds4go-steering
+    cmds:
+      - go build -o bin/ds4go-steering ./cmd/steering
+
+  run:steering:
+    desc: Run the steering TUI
+    deps: [build:steering]
+    cmds:
+      - |
+        args="--backend {{.BACKEND}} --ctx {{.CTX}}"
+        if [ -n "{{.MODEL}}" ]; then args="$args --model {{.MODEL}}"; fi
+        if [ -n "{{.LIB}}" ]; then args="$args --lib {{.LIB}}"; fi
+        if [ -n "{{.DEBUG}}" ]; then args="$args --debug"; fi
+        if [ -n "{{.POWER}}" ]; then args="$args --power {{.POWER}}"; fi
+        ./bin/ds4go-steering $args
 
   build:svgpad:
     desc: Build svgpad binary
     deps: [tidy]
     cmds:
-      - go build -o ./bin/ds4go-toy-svgpad ./cmd/svgpad
+      - go build -o ./bin/ds4go-svgpad ./cmd/svgpad
 
   run:svgpad:
     desc: Run the svgpad TUI
@@ -63,7 +88,7 @@ tasks:
         if [ -n "{{.LIB}}" ]; then args="$args --lib {{.LIB}}"; fi
         if [ -n "{{.DEBUG}}" ]; then args="$args --debug"; fi
         if [ -n "{{.POWER}}" ]; then args="$args --power {{.POWER}}"; fi
-        ./bin/ds4go-toy-svgpad $args
+        ./bin/ds4go-svgpad $args
 
   log:
     desc: Tail glyphpad.log and svgpad.log in real time
@@ -102,4 +127,4 @@ tasks:
   clean:
     desc: Remove built binaries
     cmds:
-      - rm -f ./bin/ds4go-toy-glyphpad ./bin/ds4go-toy-svgpad
+      - rm -f ./bin/ds4go-glyphpad ./bin/ds4go-steering ./bin/ds4go-svgpad

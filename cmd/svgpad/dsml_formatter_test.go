@@ -32,18 +32,18 @@ func TestFormatDSMLStream(t *testing.T) {
 				"\n\x1b[1;38;5;214m🔧 [Tools Completed]\x1b[m\n",
 		},
 		{
-			name:  "Parameter value with HTML entity unescaping",
-			input: "<｜DSML｜parameter name=\"chunk\">&lt;svg width=\"100\"&gt;</｜DSML｜parameter>",
+			name:     "Parameter value with HTML entity unescaping",
+			input:    "<｜DSML｜parameter name=\"chunk\">&lt;svg width=\"100\"&gt;</｜DSML｜parameter>",
 			expected: "    ✏️ \x1b[38;5;244mchunk\x1b[m = \x1b[38;5;86m<svg width=\"100\">\x1b[0m\n",
 		},
 		{
-			name:  "Parameter with string=true attribute",
-			input: "<｜DSML｜parameter name=\"chunk\" string=\"true\">&lt;svg&gt;</｜DSML｜parameter>",
+			name:     "Parameter with string=true attribute",
+			input:    "<｜DSML｜parameter name=\"chunk\" string=\"true\">&lt;svg&gt;</｜DSML｜parameter>",
 			expected: "    ✏️ \x1b[38;5;244mchunk\x1b[m = \x1b[38;5;86m<svg>\x1b[0m\n",
 		},
 		{
-			name:  "Parameter with single quotes and other attributes",
-			input: "<parameter type='string' name='chunk'>&lt;svg&gt;</parameter>",
+			name:     "Parameter with single quotes and other attributes",
+			input:    "<parameter type='string' name='chunk'>&lt;svg&gt;</parameter>",
 			expected: "    ✏️ \x1b[38;5;244mchunk\x1b[m = \x1b[38;5;86m<svg>\x1b[0m\n",
 		},
 		{

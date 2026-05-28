@@ -55,7 +55,7 @@ func TestCacheGetRefreshesRecency(t *testing.T) {
 	c := newWidgetCache(2)
 	c.Put("a.svg", cachedWidget{img: testImg()})
 	c.Put("b.svg", cachedWidget{img: testImg()})
-	c.Get("a.svg")            // a.svg is now most-recently-used
+	c.Get("a.svg")                               // a.svg is now most-recently-used
 	c.Put("c.svg", cachedWidget{img: testImg()}) // should evict b.svg, not a.svg
 	if _, ok := c.Get("a.svg"); !ok {
 		t.Error("a.svg was touched by Get and should have survived eviction")
