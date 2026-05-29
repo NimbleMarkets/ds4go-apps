@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -232,6 +233,9 @@ type model struct {
 	genCtx           context.Context
 	genCancel        context.CancelFunc
 	generating       bool
+	metadataCtx      context.Context
+	metadataCancel   context.CancelFunc
+	metadataWG       *sync.WaitGroup
 	metadataInFlight bool // tracked between enrichMetadataCmd dispatch and metadataDoneMsg
 	statusText       string
 	errText          string
@@ -513,6 +517,8 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 	km.Reload = key.Binding{}       // Let svgpad handle 'r'
 	km.ToggleRender = key.Binding{} // Let svgpad handle 'g'
 
+	metaCtx, metaCancel := context.WithCancel(context.Background())
+
 	return model{
 		lib:            lib,
 		engOpts:        engOpts,
@@ -542,6 +548,9 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 		panelFocus:     focusThinking,
 		entries:        existing,
 		entryIndex:     entryIdx,
+		metadataCtx:    metaCtx,
+		metadataCancel: metaCancel,
+		metadataWG:     &sync.WaitGroup{},
 	}
 }
 
@@ -1420,8 +1429,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// conversation isn't polluted.
 				m.statusText += " · enriching"
 				m.metadataInFlight = true
+				if m.metadataCancel != nil {
+					m.metadataCancel()
+				}
+				m.metadataCtx, m.metadataCancel = context.WithCancel(context.Background())
 				cmds = append(cmds, enrichMetadataCmd(
-					m.engine, filepath.Base(m.modelPath), path, currentPrompt, svgData, m.genTime(), m.toolCalls, m.thinkText))
+					m.metadataCtx, m.metadataWG, m.engine, filepath.Base(m.modelPath), path, currentPrompt, svgData, m.genTime(), m.toolCalls, m.thinkText))
 			}
 		}
 
@@ -1571,6 +1584,9 @@ The SVG must include xmlns="http://www.w3.org/2000/svg" and be self-contained.
 
 Tips for successful generation:
 - The SVG will be rendered by a static pure-Go parser (no Javascript engine, no HTML5 canvas support, no CSS animations, no external resource loading). You MUST construct the drawing using static SVG elements (like <rect>, <path>, <circle>, <g>, etc.). Do NOT use <script> tags or attempt to draw via Javascript.
+- Do NOT use <style> tags containing CSS comments or @import directives (e.g., loading external fonts), as this will cause parser errors in the primitive Go SVG parser. Use standard font-families like "Georgia, serif" or "Impact, sans-serif" directly on elements.
+- XML comments (e.g., <!-- comment -->) are welcome, but they should be used sparingly (limitedly), kept concise/non-verbose, always properly closed/terminated, and only included when helpful for context.
+- Do NOT use rgba(r, g, b, a) color strings in fill or stroke attributes, as this format is unsupported by the Go color parser. Use hex values or standard rgb(r, g, b) instead, and specify opacity using fill-opacity or stroke-opacity attributes (e.g., fill="rgb(255,200,100)" fill-opacity="0.15").
 - Keep your thoughts inside the <think>...</think> block concise, focusing primarily on the visual design, coordinate mapping, and SVG structures. Do NOT output long mathematical derivations or conversational explanations outside the tool calls.
 - Always output tool calls using the exact XML syntax: <｜DSML｜invoke name="tool_name"> and </｜DSML｜invoke>. Do not make typos in the tag names (e.g., do not write DSLI, DSigname, or DSML incorrectly).`
 	if m.yoloMode {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -368,8 +369,17 @@ func spliceMetadataIntoSVG(svg, block string) string {
 	return svg[:closeTag+1] + "\n" + block + "\n" + svg[closeTag+1:]
 }
 
-func enrichMetadataCmd(eng *ds4.Engine, modelName, filename, prompt string, svgData []byte, genTime time.Duration, toolCalls []toolCallEntry, think string) tea.Cmd {
+func enrichMetadataCmd(ctx context.Context, wg *sync.WaitGroup, eng *ds4.Engine, modelName, filename, prompt string, svgData []byte, genTime time.Duration, toolCalls []toolCallEntry, think string) tea.Cmd {
+	if wg != nil {
+		wg.Add(1)
+	}
 	return func() tea.Msg {
+		if wg != nil {
+			defer wg.Done()
+		}
+		if ctx != nil && ctx.Err() != nil {
+			return metadataDoneMsg{filename: filename, err: ctx.Err()}
+		}
 		sess, err := eng.NewSession(metadataSessionCtx)
 		if err != nil {
 			return metadataDoneMsg{filename: filename, err: fmt.Errorf("metadata session: %w", err)}
@@ -391,16 +401,23 @@ func enrichMetadataCmd(eng *ds4.Engine, modelName, filename, prompt string, svgD
 			func() error { return eng.ChatAppendMessage(tokens, "user", userMsg) },
 			func() error { return eng.ChatAppendAssistantPrefix(tokens, ds4.ThinkNone) },
 		} {
+			if ctx != nil && ctx.Err() != nil {
+				return metadataDoneMsg{filename: filename, err: ctx.Err()}
+			}
 			if err := step(); err != nil {
 				return metadataDoneMsg{filename: filename, err: err}
 			}
 		}
 
 		var buf []byte
+		genCtx := context.Background()
+		if ctx != nil {
+			genCtx = ctx
+		}
 		opts := ds4.GenerateOptions{
 			MaxTokens: metadataMaxTokens,
 			StopOnEOS: true,
-			Context:   context.Background(),
+			Context:   genCtx,
 		}
 		opts.OnToken = func(token int) {
 			if text, err := eng.TokenText(token); err == nil {

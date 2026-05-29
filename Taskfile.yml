@@ -29,6 +29,7 @@ tasks:
       - task: build:glyphpad
       - task: build:steering
       - task: build:svgpad
+      - task: build:cadpad
 
   build:glyphpad:
     desc: Build glyphpad binary
@@ -90,10 +91,29 @@ tasks:
         if [ -n "{{.POWER}}" ]; then args="$args --power {{.POWER}}"; fi
         ./bin/ds4go-svgpad $args
 
-  log:
-    desc: Tail glyphpad.log and svgpad.log in real time
+  build:cadpad:
+    desc: Build cadpad binary
+    deps: [tidy]
     cmds:
-      - touch glyphpad.log svgpad.log && tail -F glyphpad.log svgpad.log
+      - go build -o ./bin/ds4go-cadpad ./cmd/cadpad
+
+  run:cadpad:
+    desc: Run the cadpad TUI (add NO_ENGINE=1 for pure geometry mode)
+    deps: [build:cadpad]
+    cmds:
+      - |
+        args="--backend {{.BACKEND}} --ctx {{.CTX}}"
+        if [ -n "{{.MODEL}}" ]; then args="$args --model {{.MODEL}}"; fi
+        if [ -n "{{.LIB}}" ]; then args="$args --lib {{.LIB}}"; fi
+        if [ -n "{{.DEBUG}}" ]; then args="$args --debug"; fi
+        if [ -n "{{.POWER}}" ]; then args="$args --power {{.POWER}}"; fi
+        if [ -n "{{.NO_ENGINE}}" ]; then args="$args --no-engine"; fi
+        ./bin/ds4go-cadpad $args
+
+  log:
+    desc: Tail glyphpad.log, svgpad.log and cadpad.log in real time
+    cmds:
+      - touch glyphpad.log svgpad.log cadpad.log && tail -F glyphpad.log svgpad.log cadpad.log
 
   vet:
     desc: Run go vet

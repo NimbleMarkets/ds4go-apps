@@ -115,6 +115,12 @@ func main() {
 	// The model owns the engine/session once Init's goroutine fires; on
 	// exit we recover them from the final model state and close in order.
 	if fm, ok := final.(model); ok {
+		if fm.metadataCancel != nil {
+			fm.metadataCancel()
+		}
+		if fm.metadataWG != nil {
+			fm.metadataWG.Wait()
+		}
 		if fm.session != nil {
 			fm.session.Close()
 		}

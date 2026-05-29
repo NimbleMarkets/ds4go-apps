@@ -6,6 +6,8 @@ package engineinit
 
 import (
 	"charm.land/lipgloss/v2"
+	"fmt"
+
 	ds4 "github.com/NimbleMarkets/ds4go"
 )
 
@@ -78,6 +80,9 @@ type Result struct {
 // Close()d at program exit; on failure both are nil and Err carries the
 // (enriched) error.
 func Open(lib *ds4.Library, opts ds4.EngineOptions, ctxSize int) Result {
+	if lib == nil {
+		return Result{Err: fmt.Errorf("ds4go: no library provided (running with --no-engine or pure geometry mode)")}
+	}
 	eng, err := lib.NewEngine(opts)
 	if err != nil {
 		return Result{Err: ds4.EnrichEngineOpenError(err)}
