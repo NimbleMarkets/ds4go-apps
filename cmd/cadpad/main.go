@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -125,6 +126,9 @@ func main() {
 		}
 		if fm.engine != nil {
 			fm.engine.Close()
+		}
+		if fm.luaDiag != nil {
+			fm.luaDiag.Close(context.Background())
 		}
 		// Best-effort autosave of current world for recovery.
 		if len(fm.w.Names()) > 0 {
