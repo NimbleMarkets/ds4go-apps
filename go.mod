@@ -4,14 +4,16 @@ go 1.26.3
 
 replace github.com/NimbleMarkets/ntdiff => ../ntdiff
 
+replace github.com/NimbleMarkets/ds4go => ../ds4-go
+
 require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.6
 	charm.land/lipgloss/v2 v2.0.3
 	github.com/76creates/stickers v1.5.0
 	github.com/NimbleMarkets/ds4go v0.4.0
-	github.com/NimbleMarkets/ntcharts-svg v0.2.2-0.20260528151224-0f1ec038c9d1
-	github.com/NimbleMarkets/ntcharts/v2 v2.0.4-0.20260515012450-ff02dc6e2e04
+	github.com/NimbleMarkets/ntcharts-svg v0.2.2
+	github.com/NimbleMarkets/ntcharts/v2 v2.2.0
 	github.com/NimbleMarkets/ntdiff v0.0.0-00010101000000-000000000000
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/chewxy/math32 v1.11.1
@@ -24,12 +26,12 @@ require (
 
 require (
 	github.com/NimbleMarkets/oksvg v0.0.0-20260525184950-fdc0be96c4cc // indirect
-	github.com/NimbleMarkets/pixterm v0.0.0-20260429102514-4e8bc7f0c8ee // indirect
+	github.com/NimbleMarkets/pixterm v0.0.0-20260501211346-dc18ac6c1a0f // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/lipgloss v0.13.0 // indirect
-	github.com/charmbracelet/ultraviolet v0.0.0-20260428153724-66037269d7be // indirect
+	github.com/charmbracelet/ultraviolet v0.0.0-20260525132238-948f4557a654 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
 	github.com/charmbracelet/x/termios v0.1.1 // indirect
 	github.com/charmbracelet/x/windows v0.2.2 // indirect
