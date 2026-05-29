@@ -11,8 +11,10 @@
 package lua
 
 import (
-	lua "github.com/yuin/gopher-lua"
+	"sort"
+
 	"github.com/soypat/gsdf/gsdfaux/simplesdf"
+	lua "github.com/yuin/gopher-lua"
 
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/render"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/world"
@@ -30,6 +32,36 @@ import (
 //   local u = s:union(b):translate(0, 0, 1.5)
 //
 //   sdf.register("my_part", u)
+
+// sdfConstructors are the module-level constructor functions exposed as
+// sdf.<name>. "register" is added per-state in RegisterSDF because it closes
+// over the World/Renderer. Keep names in sync with luals/sdf.lua (drift test).
+var sdfConstructors = map[string]lua.LGFunction{
+	"sphere":   lSphere,
+	"box":      lBox,
+	"cylinder": lCylinder,
+	"torus":    lTorus,
+	"hexprism": lHexPrism,
+	"triprism": lTriPrism,
+	"boxframe": lBoxFrame,
+}
+
+// BindingNames returns every name exposed on the sdf module (constructors plus
+// "register") and every SDF3 method, sorted. It is the source of truth for the
+// luals/sdf.lua drift test.
+func BindingNames() []string {
+	names := make([]string, 0, len(sdfConstructors)+1+len(sdf3Methods))
+	for k := range sdfConstructors {
+		names = append(names, k)
+	}
+	names = append(names, "register")
+	for k := range sdf3Methods {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func RegisterSDF(L *lua.LState, w *world.World, r *render.Renderer) {
 	// Per-state metatable setup is required. gopher-lua keeps type
 	// metatables in the per-LState registry, so we must ensure the
@@ -38,19 +70,12 @@ func RegisterSDF(L *lua.LState, w *world.World, r *render.Renderer) {
 	mt := L.NewTypeMetatable("sdf3")
 	L.SetField(mt, "__index", L.SetFuncs(L.NewTable(), sdf3Methods))
 
-	mod := L.SetFuncs(L.NewTable(), map[string]lua.LGFunction{
-		// Low-level primitives (direct mapping to simplesdf)
-		"sphere":     lSphere,
-		"box":        lBox,
-		"cylinder":   lCylinder,
-		"torus":      lTorus,
-		"hexprism":   lHexPrism,
-		"triprism":   lTriPrism,
-		"boxframe":   lBoxFrame,
-
-		// Registration into the cadpad World
-		"register":   lRegister(w),
-	})
+	funcs := make(map[string]lua.LGFunction, len(sdfConstructors)+1)
+	for k, v := range sdfConstructors {
+		funcs[k] = v
+	}
+	funcs["register"] = lRegister(w, r)
+	mod := L.SetFuncs(L.NewTable(), funcs)
 
 	// Make it available both ways:
 	// 1. Global (convenient for tiny one-liners)
@@ -287,7 +312,7 @@ func checkSDF3(L *lua.LState, n int) simplesdf.SDF3 {
 }
 
 // lRegister allows Lua to publish a named object into the cadpad World.
-func lRegister(w *world.World) lua.LGFunction {
+func lRegister(w *world.World, r *render.Renderer) lua.LGFunction {
 	return func(L *lua.LState) int {
 		name := L.CheckString(1)
 		ud := L.CheckUserData(2)
@@ -300,6 +325,9 @@ func lRegister(w *world.World) lua.LGFunction {
 		// which only supports a few shapes). This is intentional for the
 		// "build your own library" approach.
 		w.CreateFromSDF(name, s) // method added below
+		if r != nil {
+			r.Invalidate(name)
+		}
 		return 0
 	}
 }
