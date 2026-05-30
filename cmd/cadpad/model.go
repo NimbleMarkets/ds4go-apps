@@ -214,19 +214,22 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 	workspace := filepath.Join(mustUserHome(), ".cadpad", "lua-workspace")
 
 	// Best-effort lua-language-server diagnostics for generated scripts.
+	// If the sdf stub cannot be written the server would flag every sdf.* call
+	// as an undefined global — worse than no diagnostics — so skip it entirely.
 	defsDir := filepath.Join(mustUserHome(), ".cadpad", "lua-defs")
 	if err := luals.WriteDefs(defsDir); err != nil {
-		logger.Printf("lua diagnostics: write defs: %v", err)
-	}
-	diag, err := luals.New(context.Background(), workspace, defsDir, luals.DefaultTimeout)
-	switch {
-	case err != nil:
-		logger.Printf("lua diagnostics disabled: %v", err)
-	case diag == nil:
-		logger.Printf("lua diagnostics disabled: lua-language-server not on PATH")
-	default:
-		m.luaDiag = diag
-		go diag.Warmup(context.Background())
+		logger.Printf("lua diagnostics disabled: write defs: %v", err)
+	} else {
+		diag, err := luals.New(context.Background(), workspace, defsDir, luals.DefaultTimeout)
+		switch {
+		case err != nil:
+			logger.Printf("lua diagnostics disabled: %v", err)
+		case diag == nil:
+			logger.Printf("lua diagnostics disabled: lua-language-server not on PATH")
+		default:
+			m.luaDiag = diag
+			go diag.Warmup(context.Background())
+		}
 	}
 
 	lft := tools.LuaFileTools{

@@ -13,10 +13,15 @@ import (
 func TestStubCoversAllBindings(t *testing.T) {
 	stub := luals.Defs()
 	for _, name := range lua.BindingNames() {
-		// Each binding appears as `sdf.<name>` (constructor/register) or
-		// `SDF3:<name>` (method) in the stub.
-		if !strings.Contains(stub, "sdf."+name) && !strings.Contains(stub, ":"+name) {
-			t.Errorf("sdf.lua stub is missing binding %q (add it; see bind.go)", name)
+		// Each binding must appear as an actual declaration: `function
+		// sdf.<name>(` (constructor/register) or `function SDF3:<name>(`
+		// (method). Matching the declaration — not a loose substring — means a
+		// name that is merely a prefix of another (rotate vs rotate_x) cannot
+		// pass on the longer one's text.
+		ctor := "function sdf." + name + "("
+		method := "function SDF3:" + name + "("
+		if !strings.Contains(stub, ctor) && !strings.Contains(stub, method) {
+			t.Errorf("sdf.lua stub is missing a declaration for binding %q (add it; see bind.go)", name)
 		}
 	}
 }

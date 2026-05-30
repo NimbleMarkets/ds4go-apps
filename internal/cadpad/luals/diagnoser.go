@@ -2,6 +2,7 @@ package luals
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"sync"
 	"time"
@@ -62,7 +63,9 @@ func New(ctx context.Context, workspace, defsDir string, timeout time.Duration) 
 }
 
 // Check syncs content for the workspace-relative path and returns formatted
-// diagnostics ("" when clean or when the Diagnoser is nil/disabled).
+// diagnostics ("" when clean or when the Diagnoser is nil/disabled). On a wait
+// timeout with no diagnostics it returns an advisory string rather than "" so a
+// slow server is not reported to the caller as a confident clean bill.
 func (d *Diagnoser) Check(ctx context.Context, relpath, content string) string {
 	if d == nil || d.client == nil {
 		return ""
@@ -83,8 +86,16 @@ func (d *Diagnoser) Check(ctx context.Context, relpath, content string) string {
 	if err != nil {
 		return ""
 	}
-	diags, _ := d.client.WaitForDiagnostics(ctx, uri, d.timeout)
-	return formatDiags(relpath, diags)
+	diags, werr := d.client.WaitForDiagnostics(ctx, uri, d.timeout)
+	if report := formatDiags(relpath, diags); report != "" {
+		return report
+	}
+	// No diagnostics: distinguish "server confirmed clean" from "we gave up
+	// waiting" — a false clean is the one outcome that misleads the model.
+	if errors.Is(werr, lsp.ErrDiagnosticsTimeout) {
+		return "(diagnostics check timed out before the language server responded)"
+	}
+	return ""
 }
 
 // Warmup opens a throwaway document so lua-language-server finishes its slow
