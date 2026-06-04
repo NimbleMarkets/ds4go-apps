@@ -1,5 +1,5 @@
 // Package ds4log captures libds4 diagnostic output for in-app display and
-// optional file teeing. A Buffer plugs straight into ds4.SetLogOutput
+// optional file teeing. A Buffer plugs straight into ds4.CaptureStderr
 // because it satisfies io.Writer; both the glyphpad and svgpad TUIs use it
 // to power the ctrl+n log overlay, optionally teeing to a debug file.
 package ds4log
@@ -93,5 +93,5 @@ func (b *Buffer) Len() int {
 }
 
 // Compile-time check: Buffer is an io.Writer, so it plugs straight into
-// ds4.SetLogOutput.
+// ds4.CaptureStderr.
 var _ io.Writer = (*Buffer)(nil)

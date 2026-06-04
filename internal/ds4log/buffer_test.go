@@ -66,9 +66,9 @@ func TestBufferTeeReceivesRawBytes(t *testing.T) {
 }
 
 func TestBufferIgnoresTrailingPartialLine(t *testing.T) {
-	// libds4's go-side SetLogOutput delivers one full message per Write,
-	// but defensively support partials: a write without a trailing newline
-	// is buffered and joined to the next chunk.
+	// ds4.CaptureStderr pumps the redirected stream through io.Copy, so a Write
+	// may carry a partial line: a write without a trailing newline is buffered
+	// and joined to the next chunk.
 	b := NewBuffer(10)
 	b.Write([]byte("partial"))
 	if n := b.Len(); n != 0 {

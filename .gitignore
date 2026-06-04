@@ -1,12 +1,18 @@
 # .gitignore
+old/*.svg
+scratch
+logs
+docs
 
 # Build output
 /bin/
 
 # Stray binaries built into the repo root
+/ds4go-toy-cadpad
 /ds4go-toy-glyphpad
 /ds4go-toy-svgpad
 /ds4go-playground
+/cadpad
 /glyphpad
 /svgpad
 

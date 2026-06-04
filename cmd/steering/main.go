@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 
 	ds4 "github.com/NimbleMarkets/ds4go"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cliopts"
@@ -95,9 +94,11 @@ func runSteer(cfg *cliopts.CLIConfig, dirSteering, scaleFlag string, attnScale f
 	}
 	defer logBuf.Close()
 
-	if err := ds4.SetLogFunc(logBuf.WriteLog); err != nil {
-		return fmt.Errorf("failed to set log callback: %w", err)
+	logCap, err := ds4.CaptureStderr(logBuf)
+	if err != nil {
+		return fmt.Errorf("failed to capture libds4 diagnostics: %w", err)
 	}
+	defer logCap.Close()
 
 	reg, err := steerinspect.LoadRegistry(dirSteering)
 	if err != nil {
@@ -147,17 +148,7 @@ func runSteer(cfg *cliopts.CLIConfig, dirSteering, scaleFlag string, attnScale f
 	}
 
 	// Redirect fd 2 (stderr) to /dev/null to prevent stray FFI library prints (like "done") from polluting the TUI.
-	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
-	if err == nil {
-		if origFd, dupErr := syscall.Dup(2); dupErr == nil {
-			syscall.Dup2(int(devNull.Fd()), 2)
-			defer func() {
-				syscall.Dup2(origFd, 2)
-				syscall.Close(origFd)
-			}()
-		}
-		devNull.Close()
-	}
+	// (Redundant since recent ds4-stderr updates, removed)
 
 	engineOpts := cfg.EngineOptions()
 
@@ -214,6 +205,8 @@ func runSteer(cfg *cliopts.CLIConfig, dirSteering, scaleFlag string, attnScale f
 	}
 	m := steertui.NewModel(runner, cfg.Model, promptText, logBuf, promptConfig)
 	m.MaxTokens = maxTokens
+
+	logBuf.SetTeeToConsole(false)
 
 	p := tea.NewProgram(m)
 	if _, err := p.Run(); err != nil {

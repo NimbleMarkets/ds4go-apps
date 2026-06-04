@@ -21,6 +21,11 @@ This repository contains a family of Bubble Tea TUI tools that run DeepSeek-fami
 
 These apps require `ds4go` to be installed, with a `ds4` dynamic library and associated model downloaded.  `ds4` requires 128G or more of GPU memory.
 
+On Ubuntu, **cadpad** requires the OpenGL development library to be installed:
+```bash
+sudo apt install --no-install-recommends libgl1-mesa-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev
+```
+
 ---
 
 ## Build

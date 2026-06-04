@@ -12,10 +12,11 @@ import (
 // LogBuffer is a thread-safe log accumulator that writes logs to a file
 // and keeps the last N lines in memory for an internal viewer.
 type LogBuffer struct {
-	mu     sync.Mutex
-	file   *os.File
-	lines  []string
-	maxLen int
+	mu           sync.Mutex
+	file         *os.File
+	lines        []string
+	maxLen       int
+	teeToConsole bool
 }
 
 // NewLogBuffer initializes a LogBuffer. If filePath is empty, file logging is disabled.
@@ -32,10 +33,18 @@ func NewLogBuffer(filePath string, maxLen int) (*LogBuffer, error) {
 		maxLen = 500
 	}
 	return &LogBuffer{
-		file:   f,
-		lines:  make([]string, 0, maxLen),
-		maxLen: maxLen,
+		file:         f,
+		lines:        make([]string, 0, maxLen),
+		maxLen:       maxLen,
+		teeToConsole: true,
 	}, nil
+}
+
+// SetTeeToConsole enables or disables writing log messages directly to os.Stderr.
+func (l *LogBuffer) SetTeeToConsole(tee bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.teeToConsole = tee
 }
 
 // WriteLog writes a log message to the log file and appends it to the in-memory line buffer.
@@ -45,6 +54,9 @@ func (l *LogBuffer) WriteLog(typ ds4api.LogType, msg string) {
 
 	if l.file != nil {
 		_, _ = l.file.WriteString(msg)
+	}
+	if l.teeToConsole {
+		_, _ = os.Stderr.WriteString(msg)
 	}
 
 	trimmed := strings.TrimRight(msg, "\r\n")
@@ -58,6 +70,15 @@ func (l *LogBuffer) WriteLog(typ ds4api.LogType, msg string) {
 	if len(l.lines) > l.maxLen {
 		l.lines = l.lines[len(l.lines)-l.maxLen:]
 	}
+}
+
+// Write satisfies io.Writer so the buffer can receive libds4's redirected
+// diagnostic stream via ds4.CaptureStderr. libds4 no longer surfaces a level,
+// so captured bytes are recorded at the default style; WriteLog already handles
+// line splitting and the file tee.
+func (l *LogBuffer) Write(p []byte) (int, error) {
+	l.WriteLog(ds4api.LogDefault, string(p))
+	return len(p), nil
 }
 
 // GetLines returns a copy of the accumulated log lines.
