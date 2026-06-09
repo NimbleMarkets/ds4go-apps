@@ -14,6 +14,7 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	ds4 "github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
 	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/harness"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/luals"
@@ -165,7 +166,16 @@ type luaEntry struct {
 	modTime  time.Time
 }
 
-func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPath, backend string, logger *log.Logger, logBuf *ds4log.Buffer, debug bool) model {
+func newModel(app *appinit.App) model {
+	// Local aliases so the body below is unchanged from the pre-appinit form.
+	lib := app.Lib
+	engOpts := app.EngineOpts
+	ctxSize := app.Flags.Ctx
+	modelPath := app.EngineOpts.ModelPath
+	backend := app.Flags.Backend
+	logger := app.Logger
+	logBuf := app.LogBuf
+	debug := app.Flags.Debug
 	w := world.NewWorld()
 	rend, _ := render.NewRenderer(render.DefaultPreviewConfig)
 

@@ -1,0 +1,9 @@
+[
+  {"kind":"create","ts":"2026-05-27T12:00:00Z","args":{"name":"base","shape":"box","params":{"x":10,"y":8,"z":2}}},
+  {"kind":"create","ts":"2026-05-27T12:00:01Z","args":{"name":"post","shape":"cylinder","params":{"r":1,"h":6}}},
+  {"kind":"transform","ts":"2026-05-27T12:00:02Z","args":{"name":"post","op":"translate","args":{"x":0,"y":0,"z":4}}},
+  {"kind":"boolean","ts":"2026-05-27T12:00:03Z","args":{"op":"union","target":"base","source":"post","blend_radius":0.3}},
+  {"kind":"create","ts":"2026-05-27T12:00:04Z","args":{"name":"hole","shape":"cylinder","params":{"r":0.6,"h":4}}},
+  {"kind":"transform","ts":"2026-05-27T12:00:05Z","args":{"name":"hole","op":"translate","args":{"x":3,"y":0,"z":0}}},
+  {"kind":"boolean","ts":"2026-05-27T12:00:06Z","args":{"op":"diff","target":"base","source":"hole","blend_radius":0}}
+]

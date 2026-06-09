@@ -23,6 +23,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	ds4 "github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
 	"github.com/NimbleMarkets/ds4go-apps/internal/editmode"
 	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
@@ -347,7 +348,17 @@ func scanExistingSVGs(dir string, logger *log.Logger) []svgEntry {
 	return result
 }
 
-func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPath, mtpPath, backend string, logger *log.Logger, logBuf *ds4log.Buffer, debug bool) model {
+func newModel(app *appinit.App) model {
+	// Local aliases so the body below is unchanged from the pre-appinit form.
+	lib := app.Lib
+	engOpts := app.EngineOpts
+	ctxSize := app.Flags.Ctx
+	modelPath := app.EngineOpts.ModelPath
+	mtpPath := app.EngineOpts.MTPPath
+	backend := app.Flags.Backend
+	logger := app.Logger
+	logBuf := app.LogBuf
+	debug := app.Flags.Debug
 	wd, _ := os.Getwd()
 	existing := scanExistingSVGs(wd, logger)
 

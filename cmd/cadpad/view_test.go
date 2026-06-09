@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
-	ds4 "github.com/NimbleMarkets/ds4go"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/render"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/world"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
@@ -38,7 +37,7 @@ func TestSanitizeForDisplay(t *testing.T) {
 // carriage returns, or tabs into the composed frame — the cause of the box
 // "spilling past its borders" and corrupting compositing.
 func TestThinkingBoxNeutralizesControlChars(t *testing.T) {
-	m := newModel(nil, ds4.EngineOptions{}, 4096, "", "cpu", log.New(io.Discard, "", 0), ds4log.NewBuffer(10), false)
+	m := newModel(testApp(log.New(io.Discard, "", 0), ds4log.NewBuffer(10)))
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	m = m2.(model)
 
@@ -62,7 +61,7 @@ func TestViewportRender(t *testing.T) {
 	logBuf := ds4log.NewBuffer(10)
 	logger := log.New(io.Discard, "", 0)
 
-	m := newModel(nil, ds4.EngineOptions{}, 4096, "", "cpu", logger, logBuf, false)
+	m := newModel(testApp(logger, logBuf))
 
 	// Simulate window size so the model knows its dimensions.
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
@@ -134,7 +133,7 @@ func TestViewportRenderDirect(t *testing.T) {
 	}
 
 	// Feed directly to picture widget.
-	m := newModel(nil, ds4.EngineOptions{}, 4096, "", "cpu", log.New(io.Discard, "", 0), ds4log.NewBuffer(10), false)
+	m := newModel(testApp(log.New(io.Discard, "", 0), ds4log.NewBuffer(10)))
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	m = m2.(model)
 
@@ -157,7 +156,7 @@ func TestMouseNavigation(t *testing.T) {
 	logBuf := ds4log.NewBuffer(10)
 	logger := log.New(io.Discard, "", 0)
 
-	m := newModel(nil, ds4.EngineOptions{}, 4096, "", "cpu", logger, logBuf, false)
+	m := newModel(testApp(logger, logBuf))
 	m.proj = render.ProjAngle // Ensure we are in 3D projection mode
 
 	m.w.Create("box1", "box", map[string]float64{"x": 4, "y": 3, "z": 2})

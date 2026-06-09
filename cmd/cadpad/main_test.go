@@ -5,12 +5,23 @@ import (
 	"log"
 	"testing"
 
-	ds4 "github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/render"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/world"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
 	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
 )
+
+// testApp builds the appinit.App bundle newModel needs, without Bootstrap's
+// side effects (no log file, no stderr capture, no library load).
+func testApp(logger *log.Logger, logBuf *ds4log.Buffer) *appinit.App {
+	return &appinit.App{
+		Name:   "cadpad",
+		Flags:  &appinit.Flags{Ctx: 4096, Backend: "cpu"},
+		Logger: logger,
+		LogBuf: logBuf,
+	}
+}
 
 // TestNoEngineInit verifies that constructing and initializing the model
 // with a nil library (the --no-engine / pure-geometry path) does not panic
@@ -19,7 +30,7 @@ func TestNoEngineInit(t *testing.T) {
 	logBuf := ds4log.NewBuffer(10)
 	logger := log.New(io.Discard, "", 0)
 
-	m := newModel(nil, ds4.EngineOptions{}, 4096, "", "cpu", logger, logBuf, false)
+	m := newModel(testApp(logger, logBuf))
 
 	// Should have started with Dormant status.
 	if m.lifecycle.status != engineinit.StatusDormant {
@@ -71,14 +82,12 @@ func TestNoEngineInit(t *testing.T) {
 // TestEngineInitPathStillWorks is a compile-time + basic smoke that the
 // normal (lib != nil) path still type-checks. We don't open a real engine here.
 func TestEngineInitPathStillWorks(t *testing.T) {
-	// Just ensure newModel accepts a non-nil lib value without exploding at construction.
 	logBuf := ds4log.NewBuffer(10)
 	logger := log.New(io.Discard, "", 0)
 
-	// We intentionally pass a nil *ds4.Library value but with non-nil interface
-	// expectation exercised at compile time. Real engine work is tested in the
-	// broader integration with ds4go.
-	m := newModel((*ds4.Library)(nil), ds4.EngineOptions{}, 4096, "", "cpu", logger, logBuf, false)
+	// Just ensure the migrated newModel(app) call compiles and doesn't
+	// panic at construction; behavioural assertions are in TestNoEngineInit.
+	m := newModel(testApp(logger, logBuf))
 	_ = m.Init()
 
 	// The important behavioral test is in TestNoEngineInit above.
