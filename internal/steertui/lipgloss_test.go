@@ -59,17 +59,18 @@ func TestGetLayoutDimensionsLogsOn(t *testing.T) {
 
 	wT, hT, wA, hA, wL, hL, wM, hM, wLogs, hLogs := GetLayoutDimensions(width, height, statusView, true)
 
+	// Logs container spans full width
 	if wLogs != width {
 		t.Errorf("expected logs width=%d, got %d", width, wLogs)
 	}
 	if hLogs <= 0 {
 		t.Errorf("expected hLogs > 0, got %d", hLogs)
 	}
-	// hLogs should be smaller than hTranscript (25% vs 45%).
+	// hLogs should be smaller than hTranscript (20% vs 35%).
 	if hLogs >= hT {
 		t.Errorf("expected hLogs (%d) < hTranscript (%d)", hLogs, hT)
 	}
-	// Bottom row should also be smaller than transcript (30% vs 45%).
+	// Bottom left row (alternatives/lanes) should be taller than transcript (45% vs 35%).
 	bottomH := hA
 	if hL > bottomH {
 		bottomH = hL
@@ -77,10 +78,10 @@ func TestGetLayoutDimensionsLogsOn(t *testing.T) {
 	if hM > bottomH {
 		bottomH = hM
 	}
-	if bottomH >= hT {
-		t.Errorf("expected bottom row height (%d) < hTranscript (%d)", bottomH, hT)
+	if bottomH <= hT {
+		t.Errorf("expected bottom row height (%d) > hTranscript (%d)", bottomH, hT)
 	}
-	// Rows should approximately sum to gridHeight (within flexbox rounding, ±3).
+	// Rows should approximately sum to gridHeight (within rounding, ±3).
 	statusHeight := 2
 	promptHeight := height * 15 / 100
 	if promptHeight < 5 {

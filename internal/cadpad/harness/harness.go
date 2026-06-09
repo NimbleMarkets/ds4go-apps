@@ -44,6 +44,35 @@ func RegisterAll(reg *ds4.ToolRegistry, w *world.World, r *render.Renderer) erro
 	return nil
 }
 
+// RegisterSelected registers only the named tools from the full cadpad set.
+func RegisterSelected(reg *ds4.ToolRegistry, w *world.World, r *render.Renderer, names ...string) error {
+	if reg == nil || w == nil || r == nil {
+		return fmt.Errorf("harness: nil reg/world/renderer")
+	}
+	handlers := tools.Registry()
+	schemas := tools.Schemas()
+	want := make(map[string]bool, len(names))
+	for _, n := range names {
+		want[n] = true
+	}
+	for _, sch := range schemas {
+		if !want[sch.Name] {
+			continue
+		}
+		fn := handlers[sch.Name]
+		if fn == nil {
+			return fmt.Errorf("harness: no handler for schema %s", sch.Name)
+		}
+		wrapped := func(ctx context.Context, raw json.RawMessage) (string, error) {
+			return fn(ctx, w, r, raw)
+		}
+		if err := reg.RegisterFunc(sch, wrapped); err != nil {
+			return fmt.Errorf("register %s: %w", sch.Name, err)
+		}
+	}
+	return nil
+}
+
 // MustRegisterAll is RegisterAll that panics on error (convenience for mains).
 func MustRegisterAll(reg *ds4.ToolRegistry, w *world.World, r *render.Renderer) {
 	if err := RegisterAll(reg, w, r); err != nil {

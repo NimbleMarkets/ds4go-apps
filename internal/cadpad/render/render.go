@@ -24,9 +24,10 @@ import (
 type Projection string
 
 const (
-	ProjXY Projection = "xy"
-	ProjXZ Projection = "xz"
-	ProjYZ Projection = "yz"
+	ProjXY    Projection = "xy"
+	ProjXZ    Projection = "xz"
+	ProjYZ    Projection = "yz"
+	ProjAngle Projection = "angle"
 )
 
 // PreviewConfig tunes raster quality vs speed.
@@ -41,8 +42,9 @@ type PreviewConfig struct {
 }
 
 var DefaultPreviewConfig = PreviewConfig{
-	MaxEdge:    192,
+	MaxEdge:    768,
 	EvalBuffer: 8192,
+	ColorConv:  NiceColorConv,
 }
 
 // cachedSDF2 holds a CPU-wrapped 2D projection + its bounds for fast re-render.
@@ -66,33 +68,35 @@ func projectSDF3ToSDF2(s3 simplesdf.SDF3, p Projection) (gleval.SDF2, ms2.Box, e
 	bb3 := s3cpu.Bounds()
 	center := bb3.Center()
 
-	var slice2d gleval.SDF2
 	var bb2 ms2.Box
 
 	switch p {
 	case ProjXY:
-		// XY plane at Z = center.Z (top-down view)
-		slice2d = &axisSlice{s3: s3cpu, fixAxis: 2, fixVal: center.Z, bb3: bb3}
-		bb2 = ms2.Box{
-			Min: ms2.Vec{X: bb3.Min.X, Y: bb3.Min.Y},
-			Max: ms2.Vec{X: bb3.Max.X, Y: bb3.Max.Y},
-		}
+		bb2 = ms2.Box{Min: ms2.Vec{X: bb3.Min.X, Y: bb3.Min.Y}, Max: ms2.Vec{X: bb3.Max.X, Y: bb3.Max.Y}}
 	case ProjXZ:
-		// XZ plane at Y = center.Y
-		slice2d = &axisSlice{s3: s3cpu, fixAxis: 1, fixVal: center.Y, bb3: bb3}
-		bb2 = ms2.Box{
-			Min: ms2.Vec{X: bb3.Min.X, Y: bb3.Min.Z},
-			Max: ms2.Vec{X: bb3.Max.X, Y: bb3.Max.Z},
-		}
+		bb2 = ms2.Box{Min: ms2.Vec{X: bb3.Min.X, Y: bb3.Min.Z}, Max: ms2.Vec{X: bb3.Max.X, Y: bb3.Max.Z}}
 	case ProjYZ:
-		// YZ plane at X = center.X
-		slice2d = &axisSlice{s3: s3cpu, fixAxis: 0, fixVal: center.X, bb3: bb3}
-		bb2 = ms2.Box{
-			Min: ms2.Vec{X: bb3.Min.Y, Y: bb3.Min.Z},
-			Max: ms2.Vec{X: bb3.Max.Y, Y: bb3.Max.Z},
-		}
+		bb2 = ms2.Box{Min: ms2.Vec{X: bb3.Min.Y, Y: bb3.Min.Z}, Max: ms2.Vec{X: bb3.Max.Y, Y: bb3.Max.Z}}
 	default:
 		return nil, ms2.Box{}, fmt.Errorf("unknown projection %q", p)
+	}
+
+	// Pad the 2D bounds so the rendered image shows margin around the object.
+	padX := (bb2.Max.X - bb2.Min.X) * 0.15
+	padY := (bb2.Max.Y - bb2.Min.Y) * 0.15
+	bb2.Min.X -= padX
+	bb2.Min.Y -= padY
+	bb2.Max.X += padX
+	bb2.Max.Y += padY
+
+	var slice2d gleval.SDF2
+	switch p {
+	case ProjXY:
+		slice2d = &axisSlice{s3: s3cpu, fixAxis: 2, fixVal: center.Z, bb2: bb2}
+	case ProjXZ:
+		slice2d = &axisSlice{s3: s3cpu, fixAxis: 1, fixVal: center.Y, bb2: bb2}
+	case ProjYZ:
+		slice2d = &axisSlice{s3: s3cpu, fixAxis: 0, fixVal: center.X, bb2: bb2}
 	}
 	return slice2d, bb2, nil
 }
@@ -103,18 +107,11 @@ type axisSlice struct {
 	s3      *gleval.SDF3CPU
 	fixAxis int     // 0=X, 1=Y, 2=Z
 	fixVal  float32
-	bb3     ms3.Box
+	bb2     ms2.Box // padded 2D bounds for rendering
 }
 
 func (a *axisSlice) Bounds() ms2.Box {
-	switch a.fixAxis {
-	case 0: // YZ
-		return ms2.Box{Min: ms2.Vec{X: a.bb3.Min.Y, Y: a.bb3.Min.Z}, Max: ms2.Vec{X: a.bb3.Max.Y, Y: a.bb3.Max.Z}}
-	case 1: // XZ
-		return ms2.Box{Min: ms2.Vec{X: a.bb3.Min.X, Y: a.bb3.Min.Z}, Max: ms2.Vec{X: a.bb3.Max.X, Y: a.bb3.Max.Z}}
-	default: // XY
-		return ms2.Box{Min: ms2.Vec{X: a.bb3.Min.X, Y: a.bb3.Min.Y}, Max: ms2.Vec{X: a.bb3.Max.X, Y: a.bb3.Max.Y}}
-	}
+	return a.bb2
 }
 
 func (a *axisSlice) Evaluate(pos []ms2.Vec, dist []float32, userData any) error {
@@ -270,6 +267,28 @@ func (r *Renderer) ClearCache() {
 	r.mu.Unlock()
 }
 
+// SetMaxEdge updates the resolution cap and drops size cache.
+func (r *Renderer) SetMaxEdge(edge int) {
+	if edge < 64 {
+		edge = 64
+	}
+	r.mu.Lock()
+	r.cfg.MaxEdge = edge
+	r.lastSz = make(map[string]image.Rectangle)
+	r.mu.Unlock()
+}
+
+// Invalidate drops all cached projections for the given object name.
+func (r *Renderer) Invalidate(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, proj := range []Projection{ProjXY, ProjXZ, ProjYZ} {
+		key := name + ":" + string(proj)
+		delete(r.cache, key)
+		delete(r.lastSz, key)
+	}
+}
+
 // DefaultColorConv returns a simple high-contrast scheme (black=inside).
 // Matches the default inside glrender when nil conv is passed.
 func DefaultColorConv(d float32) color.Color {
@@ -283,18 +302,44 @@ func DefaultColorConv(d float32) color.Color {
 	}
 }
 
-// NiceColorConv is a more CAD-like scheme with teal inside, warm outside.
+// NiceColorConv is a CAD-like scheme with teal inside, warm outside,
+// and a bright white edge highlight so boundaries are crisp.
 func NiceColorConv(d float32) color.Color {
 	if math32.IsNaN(d) || math32.IsInf(d, 0) {
 		return color.RGBA{R: 255, A: 255}
 	}
-	// Simple two-tone with slight shading by distance magnitude.
-	if d <= 0 {
-		// inside: dark teal
-		v := uint8(40 + uint8(math32.Min(80, -d*12)))
-		return color.RGBA{R: 20, G: 120 + v/3, B: 140, A: 255}
+	var c ms3.Vec
+	if d > 0 {
+		c = ms3.Vec{X: 0.90, Y: 0.60, Z: 0.30} // outside: warm amber
+	} else {
+		c = ms3.Vec{X: 0.25, Y: 0.70, Z: 0.80} // inside: teal
 	}
-	// outside: warm gray/orange tint
-	v := uint8(math32.Min(200, d*25))
-	return color.RGBA{R: 180 + v/4, G: 160 + v/5, B: 140, A: 255}
+	// Distance-based falloff (darker farther from surface).
+	c = ms3.Scale(1-math32.Exp(-6*math32.Abs(d)), c)
+	// Subtle cosine bands for texture.
+	c = ms3.Scale(0.8+0.2*math32.Cos(150*d), c)
+	// White edge highlight at the zero-crossing.
+	edge := 1 - smoothstep(0, 0.02, math32.Abs(d))
+	c = ms3.InterpElem(c, ms3.Vec{X: 1, Y: 1, Z: 1}, ms3.Vec{X: edge, Y: edge, Z: edge})
+	return color.RGBA{
+		R: uint8(clamp01(c.X) * 255),
+		G: uint8(clamp01(c.Y) * 255),
+		B: uint8(clamp01(c.Z) * 255),
+		A: 255,
+	}
+}
+
+func clamp01(v float32) float32 {
+	if v < 0 {
+		return 0
+	}
+	if v > 1 {
+		return 1
+	}
+	return v
+}
+
+func smoothstep(edge0, edge1, x float32) float32 {
+	t := clamp01((x - edge0) / (edge1 - edge0))
+	return t * t * (3 - 2*t)
 }

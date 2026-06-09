@@ -2,17 +2,15 @@ module github.com/NimbleMarkets/ds4go-apps
 
 go 1.26.3
 
-replace github.com/NimbleMarkets/ntdiff => ../ntdiff
-
 require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.7
 	charm.land/lipgloss/v2 v2.0.3
 	github.com/76creates/stickers v1.5.0
-	github.com/NimbleMarkets/ds4go v0.4.1-0.20260604202138-c211e67f9fde
+	github.com/NimbleMarkets/ds4go v0.5.0
 	github.com/NimbleMarkets/ntcharts-svg v0.2.2
 	github.com/NimbleMarkets/ntcharts/v2 v2.2.0
-	github.com/NimbleMarkets/ntdiff v0.0.0-00010101000000-000000000000
+	github.com/NimbleMarkets/ntdiff v0.0.1
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/chewxy/math32 v1.11.1
 	github.com/soypat/geometry v0.0.0-20251107203642-291c5648d529
@@ -28,7 +26,7 @@ require (
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
-	github.com/charmbracelet/lipgloss v1.0.0 // indirect
+	github.com/charmbracelet/lipgloss v0.13.0 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260601155805-6cf7526a1b3f // indirect
 	github.com/charmbracelet/x/powernap v0.1.6 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
@@ -37,7 +35,7 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/disintegration/imaging v1.6.2 // indirect
-	github.com/ebitengine/purego v0.10.0 // indirect
+	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/go-gl/gl v0.0.0-20231021071112-07e5d0ea2e71 // indirect
 	github.com/go-gl/glfw v0.0.0-20250301202403-da16c1255728 // indirect
 	github.com/go-gl/glfw/v3.3/glfw v0.0.0-20250301202403-da16c1255728 // indirect

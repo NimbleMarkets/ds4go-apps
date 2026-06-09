@@ -592,35 +592,47 @@ func (w *World) Load(filename string) error {
 		switch r.Kind {
 		case OpCreate:
 			var a CreateArgs
-			json.Unmarshal(r.Args, &a)
+			if err := json.Unmarshal(r.Args, &a); err != nil {
+				return fmt.Errorf("replay create: bad args: %w", err)
+			}
 			if _, err := w.Create(a.Name, a.Shape, a.Params); err != nil {
 				return fmt.Errorf("replay create %s: %w", a.Name, err)
 			}
 		case OpBoolean:
 			var a BooleanArgs
-			json.Unmarshal(r.Args, &a)
+			if err := json.Unmarshal(r.Args, &a); err != nil {
+				return fmt.Errorf("replay boolean: bad args: %w", err)
+			}
 			if err := w.Boolean(a.Op, a.Target, a.Source, a.BlendRadius); err != nil {
 				return fmt.Errorf("replay boolean: %w", err)
 			}
 		case OpTransform:
 			var a TransformArgs
-			json.Unmarshal(r.Args, &a)
+			if err := json.Unmarshal(r.Args, &a); err != nil {
+				return fmt.Errorf("replay transform: bad args: %w", err)
+			}
 			if err := w.Transform(a.Name, a.Op, a.Args); err != nil {
 				return fmt.Errorf("replay transform %s: %w", a.Name, err)
 			}
 		case OpGroup:
 			var a GroupArgs
-			json.Unmarshal(r.Args, &a)
+			if err := json.Unmarshal(r.Args, &a); err != nil {
+				return fmt.Errorf("replay group: bad args: %w", err)
+			}
 			if err := w.Group(a.Name, a.Items); err != nil {
 				return fmt.Errorf("replay group %s: %w", a.Name, err)
 			}
 		case OpSetCurrent:
 			var m map[string]string
-			json.Unmarshal(r.Args, &m)
+			if err := json.Unmarshal(r.Args, &m); err != nil {
+				return fmt.Errorf("replay set_current: bad args: %w", err)
+			}
 			w.SetCurrent(m["name"])
 		case OpDelete:
 			var m map[string]string
-			json.Unmarshal(r.Args, &m)
+			if err := json.Unmarshal(r.Args, &m); err != nil {
+				return fmt.Errorf("replay delete: bad args: %w", err)
+			}
 			w.Delete(m["name"])
 		}
 	}

@@ -145,6 +145,18 @@ type model struct {
 
 	generationLog []string
 	genRound      int // current round number during generation
+
+	// Mouse tracking
+	mouseDragging bool
+	lastMouseX    int
+	lastMouseY    int
+
+	// Preview render throttling/coalescing
+	renderingPreview bool
+	previewDirty     bool
+
+	// View cache for high-frequency input events
+	cachedView *string
 }
 
 type luaEntry struct {
@@ -196,6 +208,7 @@ func newModel(lib *ds4.Library, engOpts ds4.EngineOptions, ctxSize int, modelPat
 		camPanY:      0,
 		currentLuaFile: new(string),
 		focus:          focusViewport,
+		cachedView:     new(string),
 	}
 
 	if lib == nil {

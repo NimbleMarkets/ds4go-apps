@@ -60,22 +60,64 @@ func GetLayoutDimensions(width, height int, statusView string, showLogs bool) (w
 		gridHeight = 5
 	}
 
+	var hTranscriptVal, hLogsVal, hBottomVal int
+
+	if showLogs {
+		// Calculate bottom height with a minimum of 14, cap if gridHeight is small
+		hBottomVal = gridHeight * 45 / 100
+		if hBottomVal < 14 {
+			hBottomVal = 14
+		}
+		if hBottomVal > gridHeight-6 {
+			hBottomVal = gridHeight - 6
+			if hBottomVal < 1 {
+				hBottomVal = 1
+			}
+		}
+
+		remainingHeight := gridHeight - hBottomVal
+		hLogsVal = remainingHeight * 36 / 100
+		if hLogsVal < 2 {
+			hLogsVal = 2
+		}
+		hTranscriptVal = remainingHeight - hLogsVal
+		if hTranscriptVal < 2 {
+			hTranscriptVal = 2
+		}
+	} else {
+		// Calculate bottom height with a minimum of 14, cap if gridHeight is small
+		hBottomVal = gridHeight * 60 / 100
+		if hBottomVal < 14 {
+			hBottomVal = 14
+		}
+		if hBottomVal > gridHeight-4 {
+			hBottomVal = gridHeight - 4
+			if hBottomVal < 1 {
+				hBottomVal = 1
+			}
+		}
+		hTranscriptVal = gridHeight - hBottomVal
+		if hTranscriptVal < 2 {
+			hTranscriptVal = 2
+		}
+		hLogsVal = 0
+	}
+
 	flex := flexbox.New(width, gridHeight)
 
 	if showLogs {
-		// 3-row layout: transcript 45 / logs 25 / bottom 30.
 		row1 := flex.NewRow()
-		cellTranscript := flexbox.NewCell(100, 45).SetID("transcript")
+		cellTranscript := flexbox.NewCell(100, hTranscriptVal).SetID("transcript")
 		row1.AddCells(cellTranscript)
 
 		rowLogs := flex.NewRow()
-		cellLogs := flexbox.NewCell(100, 25).SetID("logs")
+		cellLogs := flexbox.NewCell(100, hLogsVal).SetID("logs")
 		rowLogs.AddCells(cellLogs)
 
 		row2 := flex.NewRow()
-		cellAlts := flexbox.NewCell(50, 30).SetID("alternatives")
-		cellLanes := flexbox.NewCell(15, 30).SetID("lanes")
-		cellMetrics := flexbox.NewCell(35, 30).SetID("metrics")
+		cellAlts := flexbox.NewCell(50, hBottomVal).SetID("alternatives")
+		cellLanes := flexbox.NewCell(15, hBottomVal).SetID("lanes")
+		cellMetrics := flexbox.NewCell(35, hBottomVal).SetID("metrics")
 		row2.AddCells(cellAlts, cellLanes, cellMetrics)
 
 		flex.AddRows([]*flexbox.Row{row1, rowLogs, row2})
@@ -95,15 +137,15 @@ func GetLayoutDimensions(width, height int, statusView string, showLogs bool) (w
 			cellLogs.GetWidth(), cellLogs.GetHeight()
 	}
 
-	// 2-row layout (unchanged).
+	// 2-row layout.
 	row1 := flex.NewRow()
-	cellTranscript := flexbox.NewCell(100, 3).SetID("transcript")
+	cellTranscript := flexbox.NewCell(100, hTranscriptVal).SetID("transcript")
 	row1.AddCells(cellTranscript)
 
 	row2 := flex.NewRow()
-	cellAlts := flexbox.NewCell(50, 2).SetID("alternatives")
-	cellLanes := flexbox.NewCell(15, 2).SetID("lanes")
-	cellMetrics := flexbox.NewCell(35, 2).SetID("metrics")
+	cellAlts := flexbox.NewCell(50, hBottomVal).SetID("alternatives")
+	cellLanes := flexbox.NewCell(15, hBottomVal).SetID("lanes")
+	cellMetrics := flexbox.NewCell(35, hBottomVal).SetID("metrics")
 	row2.AddCells(cellAlts, cellLanes, cellMetrics)
 
 	flex.AddRows([]*flexbox.Row{row1, row2})
@@ -153,6 +195,8 @@ func RenderLayout(width, height int, focus FocusArea, lanesView, transcriptView,
 		styleLogs = BorderFocus
 	}
 
+	_, hTranscript, _, hAlts, _, _, _, _, _, hLogs := GetLayoutDimensions(width, height, statusView, showLogs)
+
 	flex := flexbox.New(width, gridHeight)
 
 	var (
@@ -161,29 +205,29 @@ func RenderLayout(width, height int, focus FocusArea, lanesView, transcriptView,
 
 	if showLogs {
 		row1 := flex.NewRow()
-		cellTranscript = flexbox.NewCell(100, 45).SetID("transcript")
+		cellTranscript = flexbox.NewCell(100, hTranscript).SetID("transcript")
 		row1.AddCells(cellTranscript)
 
 		rowLogs := flex.NewRow()
-		cellLogs = flexbox.NewCell(100, 25).SetID("logs")
+		cellLogs = flexbox.NewCell(100, hLogs).SetID("logs")
 		rowLogs.AddCells(cellLogs)
 
 		row2 := flex.NewRow()
-		cellAlts = flexbox.NewCell(50, 30).SetID("alternatives")
-		cellLanes = flexbox.NewCell(15, 30).SetID("lanes")
-		cellMetrics = flexbox.NewCell(35, 30).SetID("metrics")
+		cellAlts = flexbox.NewCell(50, hAlts).SetID("alternatives")
+		cellLanes = flexbox.NewCell(15, hAlts).SetID("lanes")
+		cellMetrics = flexbox.NewCell(35, hAlts).SetID("metrics")
 		row2.AddCells(cellAlts, cellLanes, cellMetrics)
 
 		flex.AddRows([]*flexbox.Row{row1, rowLogs, row2})
 	} else {
 		row1 := flex.NewRow()
-		cellTranscript = flexbox.NewCell(100, 3).SetID("transcript")
+		cellTranscript = flexbox.NewCell(100, hTranscript).SetID("transcript")
 		row1.AddCells(cellTranscript)
 
 		row2 := flex.NewRow()
-		cellAlts = flexbox.NewCell(50, 2).SetID("alternatives")
-		cellLanes = flexbox.NewCell(15, 2).SetID("lanes")
-		cellMetrics = flexbox.NewCell(35, 2).SetID("metrics")
+		cellAlts = flexbox.NewCell(50, hAlts).SetID("alternatives")
+		cellLanes = flexbox.NewCell(15, hAlts).SetID("lanes")
+		cellMetrics = flexbox.NewCell(35, hAlts).SetID("metrics")
 		row2.AddCells(cellAlts, cellLanes, cellMetrics)
 
 		flex.AddRows([]*flexbox.Row{row1, row2})

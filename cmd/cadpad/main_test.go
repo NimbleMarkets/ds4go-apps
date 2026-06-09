@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	ds4 "github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/render"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/world"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
 	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
@@ -36,19 +37,17 @@ func TestNoEngineInit(t *testing.T) {
 		t.Fatal("Init returned nil batch")
 	}
 
-	// Current design: cadpad starts empty (Lua files are the way to create geometry).
-	// No demo seeding.
-	if len(m.w.Names()) != 0 {
-		t.Error("expected empty world in no-engine mode (Lua-driven only)")
+	// cadpad now seeds a debug object on start so the preview pane is never empty.
+	if len(m.w.Names()) != 1 {
+		t.Errorf("expected 1 seeded object, got %d", len(m.w.Names()))
 	}
 
-	// Exercise the world + renderer path with a minimal object we create here.
-	m.w.Create("test_box", "box", map[string]float64{"x": 2, "y": 2, "z": 2})
-	s, _, ok := m.w.Get("test_box")
+	// Exercise the world + renderer path with the seeded object.
+	s, _, ok := m.w.Get("debug_box")
 	if !ok {
-		t.Fatal("test object missing after Create")
+		t.Fatal("seeded debug_box missing")
 	}
-	img, rect, err := m.renderer.Render(s, "test_box", m.proj, 40, 30)
+	img, rect, err := m.renderer.Render(s, "test_box", render.ProjXY, 40, 30)
 	if err != nil {
 		t.Fatalf("preview render failed in no-engine mode: %v", err)
 	}

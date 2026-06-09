@@ -185,6 +185,9 @@ func CreatePrimitive(ctx context.Context, w *world.World, r *render.Renderer, ra
 	if err != nil {
 		return "", err
 	}
+	if r != nil {
+		r.Invalidate(a.Name)
+	}
 	bb, _ := w.Bounds(a.Name)
 	_ = s // keep for future use if needed
 	return fmt.Sprintf("created %s (%s) bounds=[%.3f,%.3f]x[%.3f,%.3f]x[%.3f,%.3f]", a.Name, a.Shape, bb.Min.X, bb.Max.X, bb.Min.Y, bb.Max.Y, bb.Min.Z, bb.Max.Z), nil
@@ -205,6 +208,9 @@ func BooleanOp(ctx context.Context, w *world.World, r *render.Renderer, raw json
 	}
 	if err := w.Boolean(a.Op, a.Target, a.Source, a.BlendRadius); err != nil {
 		return "", err
+	}
+	if r != nil {
+		r.Invalidate(a.Target)
 	}
 	return fmt.Sprintf("boolean %s %s %s (blend=%.3f) OK", a.Op, a.Target, a.Source, a.BlendRadius), nil
 }
@@ -227,6 +233,9 @@ func Transform(ctx context.Context, w *world.World, r *render.Renderer, raw json
 	if err := w.Transform(a.Name, a.Op, a.Args); err != nil {
 		return "", err
 	}
+	if r != nil {
+		r.Invalidate(a.Name)
+	}
 	return fmt.Sprintf("transform %s %s OK", a.Name, a.Op), nil
 }
 
@@ -243,6 +252,9 @@ func Group(ctx context.Context, w *world.World, r *render.Renderer, raw json.Raw
 	}
 	if err := w.Group(a.Name, a.Items); err != nil {
 		return "", err
+	}
+	if r != nil {
+		r.Invalidate(a.Name)
 	}
 	return fmt.Sprintf("grouped %s from %v OK", a.Name, a.Items), nil
 }
@@ -368,6 +380,9 @@ func LoadWorld(ctx context.Context, w *world.World, r *render.Renderer, raw json
 	}
 	if err := w.Load(a.Filename); err != nil {
 		return "", err
+	}
+	if r != nil {
+		r.ClearCache()
 	}
 	return fmt.Sprintf("loaded %s (%d objects now)", a.Filename, len(w.Names())), nil
 }

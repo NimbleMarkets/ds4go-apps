@@ -11,7 +11,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"syscall"
 
 	tea "charm.land/bubbletea/v2"
 	ds4 "github.com/NimbleMarkets/ds4go"
@@ -29,11 +28,13 @@ func main() {
 		debug     bool
 		power     int
 		noEngine  bool // run without LLM for pure geometry / headless tool use
+		mtpPath   string
 	)
 	pflag.StringVarP(&modelPath, "model", "m", "", "path to GGUF model (default $DS4_DIR/models/ds4flash.gguf)")
 	pflag.StringVar(&libPath, "lib", "", "path to libds4 (optional)")
 	pflag.IntVar(&ctxSize, "ctx", 16384, "context size (smaller is fine for tool use)")
-	pflag.StringVar(&backend, "backend", "metal", "metal|cuda|cpu")
+	pflag.StringVar(&backend, "backend", "", "metal|cuda|cpu (default: auto)")
+	pflag.StringVar(&mtpPath, "mtp", "none", "path to MTP companion GGUF model (default: none, empty or non-existent falls back to auto)")
 	pflag.BoolVarP(&debug, "debug", "d", false, "tee engine logs to cadpad.log")
 	pflag.IntVar(&power, "power", 80, "GPU power % (1-100)")
 	pflag.BoolVar(&noEngine, "no-engine", false, "start without LLM engine (pure geometry mode or harness embedding)")
@@ -62,8 +63,10 @@ func main() {
 		be = ds4.BackendCUDA
 	case "cpu":
 		be = ds4.BackendCPU
-	default:
+	case "metal":
 		be = ds4.BackendMetal
+	default:
+		be = ds4.DetectDefaultBackend(libPath)
 	}
 
 	logf, err := os.OpenFile("cadpad.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -73,14 +76,6 @@ func main() {
 	}
 	defer logf.Close()
 	logger := log.New(logf, "", log.Ldate|log.Ltime|log.Lmicroseconds)
-
-	logBuf := ds4log.NewBuffer(400)
-	if debug {
-		logBuf.SetTee(logf)
-	}
-	if err := ds4.SetLogOutput(logBuf); err != nil {
-		logger.Printf("warn SetLogOutput: %v", err)
-	}
 
 	var lib *ds4.Library
 	if needEngine || libPath != "" {
@@ -92,33 +87,47 @@ func main() {
 		ds4.SetDefaultLibrary(lib)
 	}
 
-	engOpts := ds4.EngineOptions{ModelPath: modelPath, Backend: be, WarmWeights: true, PowerPercent: power}
-	ds4.ApplyMTPDefaults(&engOpts)
+	// Capture libds4's diagnostic stream into the in-memory ring (viewable via
+	// ctrl+n; teed to cadpad.log with --debug). CaptureStderr bridges libds4's
+	// fd redirect to the io.Writer ring; its own Metal/CUDA banners flow here too.
+	logBuf := ds4log.NewBuffer(400)
+	if debug {
+		logBuf.SetTee(logf)
+	}
+	logCap, err := ds4.CaptureStderr(logBuf)
+	if err != nil {
+		logger.Printf("warn CaptureStderr: %v", err)
+	}
+
+	var mtpPathResolved string
+	if mtpPath != "none" {
+		if mtpPath == "" {
+			mtpPathResolved = ds4.DefaultMTPPath()
+		} else if st, err := os.Stat(mtpPath); err == nil && !st.IsDir() && st.Size() > 0 {
+			mtpPathResolved = mtpPath
+		} else {
+			mtpPathResolved = ds4.DefaultMTPPath()
+		}
+	}
+
+	engOpts := ds4.EngineOptions{
+		ModelPath:    modelPath,
+		MTPPath:      mtpPathResolved,
+		Backend:      be,
+		WarmWeights:  true,
+		PowerPercent: power,
+	}
+	if mtpPathResolved != "" {
+		ds4.ApplyMTPDefaults(&engOpts)
+	}
 
 	logger.Printf("=== cadpad start backend=%s no-engine=%v ===", backend, noEngine)
-
-	// Squeltch C spam like other apps.
-	var originalStderrFd int
-	var dupErr error
-	if devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
-		originalStderrFd, dupErr = syscall.Dup(2)
-		if dupErr == nil {
-			_ = syscall.Dup2(int(devNull.Fd()), 2)
-		}
-		devNull.Close()
-	}
 
 	// In pure no-engine mode lib remains nil. newModel + Init() deliberately
 	// skip all engine open work so we never touch a nil library.
 	m := newModel(lib, engOpts, ctxSize, modelPath, backend, logger, logBuf, debug)
 	p := tea.NewProgram(m)
 	final, runErr := p.Run()
-
-	// Restore stderr
-	if dupErr == nil {
-		_ = syscall.Dup2(originalStderrFd, 2)
-		_ = syscall.Close(originalStderrFd)
-	}
 
 	if fm, ok := final.(model); ok {
 		if fm.session != nil {
@@ -134,6 +143,11 @@ func main() {
 		if len(fm.w.Names()) > 0 {
 			_ = fm.w.Save(filepath.Join(os.TempDir(), "cadpad-last.cad.json"))
 		}
+	}
+
+	// Stop capturing and drain any final libds4 diagnostics into the ring/tee.
+	if logCap != nil {
+		_ = logCap.Close()
 	}
 
 	logger.Printf("=== cadpad end ===")
