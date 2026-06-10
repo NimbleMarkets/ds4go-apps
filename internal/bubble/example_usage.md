@@ -1,4 +1,4 @@
-# Using internal/bubble (early sketch)
+# Using internal/bubble
 
 This package is intended to reduce duplication across svgpad, glyphpad, and cadpad for the "run ds4go generation from a Bubble Tea UI with good observability" problem.
 
@@ -19,13 +19,15 @@ func (m model) generate(ctx context.Context, ch chan<- tea.Msg) {
 		if text, err := m.engine.TokenText(tok); err == nil {
 			select {
 			case ch <- bubble.TokenMsg(text):
-			default: // drop when UI falls behind; Continue checks ctx
+			default: // GenerateTokens stops via opts.Context; drop tokens when UI lags
 			}
 		}
 	}}
 	_, err := (ds4.Generator{Engine: m.engine, Session: m.session}).GenerateTokens(prompt, opts)
 	ch <- bubble.DoneMsg{Err: err, CtxPos: m.session.Pos()}
 }
+
+Note: the DoneMsg send is intentionally blocking. The model's Update loop must keep re-arming `m.gen.Wait()` after every received message until DoneMsg arrives — that constant draining is what guarantees the send completes. Do not drop DoneMsg with a select/default: the app would stay in its generating state forever.
 
 // On token: cmds = append(cmds, m.gen.Wait())
 // On esc:   m.gen.Cancel()

@@ -44,6 +44,10 @@ func TestStartDeliversMessagesInOrder(t *testing.T) {
 	if !ok || done.CtxPos != 7 || done.Err != nil {
 		t.Errorf("msg 3 = %#v, want DoneMsg{CtxPos: 7}", done)
 	}
+	// After fn closes the channel, Wait fires a nil msg (bubbletea drops nils).
+	if cmd := g.Wait(); cmd == nil || cmd() != nil {
+		t.Error("expected non-nil cmd firing nil msg from closed channel")
+	}
 }
 
 func TestCancelReachesFn(t *testing.T) {

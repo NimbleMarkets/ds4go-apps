@@ -19,7 +19,8 @@ type Generation struct {
 // the initial wait Cmd to return from Update. fn sends TokenMsg/DoneMsg/etc.
 // on ch and must honor ctx; it may close ch when finished — the handle never
 // closes it. The channel is buffered so token senders can drop
-// non-blockingly when the UI falls behind.
+// non-blockingly when the UI falls behind. Callers must keep re-arming Wait until
+// they receive the terminal message (e.g. DoneMsg), which keeps the channel draining.
 func Start(fn func(ctx context.Context, ch chan<- tea.Msg)) (*Generation, tea.Cmd) {
 	ch := make(chan tea.Msg, 64)
 	ctx, cancel := context.WithCancel(context.Background())
