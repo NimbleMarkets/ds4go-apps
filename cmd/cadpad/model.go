@@ -42,10 +42,6 @@ type toolDoneMsg struct {
 	reasoning string
 }
 
-type spinnerTickMsg struct{}
-
-type inferencingStartMsg struct{}
-
 type statusMsg string
 
 type driverEventMsg struct {

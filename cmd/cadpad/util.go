@@ -1,10 +1,9 @@
 package main
 
 import (
-	"time"
-
 	tea "charm.land/bubbletea/v2"
 	ds4 "github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
 )
 
 func max(a, b int) int {
@@ -22,9 +21,7 @@ func min(a, b int) int {
 }
 
 func spinnerTick() tea.Cmd {
-	return tea.Tick(180*time.Millisecond, func(time.Time) tea.Msg {
-		return spinnerTickMsg{}
-	})
+	return bubble.SpinnerTick(bubble.DefaultSpinnerInterval) // 180ms, same cadence
 }
 
 func thinkModeLabel(mode ds4.ThinkMode) string {

@@ -131,13 +131,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statusMsg:
 		m.status = string(msg)
 
-	case spinnerTickMsg:
+	case bubble.SpinnerTickMsg:
 		if m.inferencing {
 			m.spinnerFrame++
 			cmds = append(cmds, spinnerTick())
 		}
 
-	case inferencingStartMsg:
+	case bubble.InferencingStartMsg:
 		m.inferencing = true
 		m.spinnerFrame = 0
 		cmds = append(cmds, spinnerTick())

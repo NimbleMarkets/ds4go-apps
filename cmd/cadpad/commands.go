@@ -124,7 +124,7 @@ func (m model) submitInputCmd() tea.Cmd {
 	}
 
 	return tea.Batch(
-		func() tea.Msg { return inferencingStartMsg{} },
+		func() tea.Msg { return bubble.InferencingStartMsg{} },
 		func() tea.Msg {
 			ch := make(chan tea.Msg, 128)
 
