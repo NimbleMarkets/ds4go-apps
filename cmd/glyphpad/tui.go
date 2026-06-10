@@ -17,6 +17,7 @@ import (
 	"charm.land/lipgloss/v2"
 	ds4 "github.com/NimbleMarkets/ds4go"
 	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
+	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
 	"github.com/NimbleMarkets/ds4go-apps/internal/editmode"
 	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
@@ -42,13 +43,8 @@ type chatMsg struct {
 	content string
 }
 
-type tokenMsg string
 type submitMsg struct{ text string }
 type stepTickMsg struct{}
-type doneMsg struct {
-	err    error
-	ctxPos int // session token position, snapshotted in the generate goroutine
-}
 
 // engineReadyMsg is delivered from the goroutine that opens the ds4 engine
 // and session. The model holds nil engine/session until this lands.
@@ -79,9 +75,7 @@ type model struct {
 
 	history    []chatMsg
 	rawBuf     []byte // raw LLM response for the current turn
-	tokenCh    chan tea.Msg
-	genCtx     context.Context
-	genCancel  context.CancelFunc
+	gen        *bubble.Generation // in-flight generation; nil when idle
 	generating bool
 	statusText string
 	errText    string
@@ -220,8 +214,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "esc":
 			// Generating → abort. Else if targeted → escape to command
 			// mode. In command mode esc is a no-op.
-			if m.generating && m.genCancel != nil {
-				m.genCancel()
+			if m.generating && m.gen != nil {
+				m.gen.Cancel()
 				m.statusText = "Aborting..."
 				return m, nil
 			}
@@ -303,11 +297,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.firstTokenTime = time.Time{}
 				m.genEnd = time.Time{}
 				m.tokenCount = 0
-				m.genCtx, m.genCancel = context.WithCancel(context.Background())
-				ch := make(chan tea.Msg, 64)
-				m.tokenCh = ch
-				go m.generateContinue(ch)
-				cmds = append(cmds, waitMsg(ch))
+				var waitCmd tea.Cmd
+				m.gen, waitCmd = bubble.Start(m.generateContinue)
+				cmds = append(cmds, waitCmd)
 			}
 			return m, tea.Batch(cmds...)
 
@@ -478,13 +470,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tokenCount = 0
 		m.stepN = -1
 		m.running = false
-		m.genCtx, m.genCancel = context.WithCancel(context.Background())
-		ch := make(chan tea.Msg, 64)
-		m.tokenCh = ch
-		go m.generate(ch)
-		cmds = append(cmds, waitMsg(ch))
+		var waitCmd tea.Cmd
+		m.gen, waitCmd = bubble.Start(m.generate)
+		cmds = append(cmds, waitCmd)
 
-	case tokenMsg:
+	case bubble.TokenMsg:
 		text := string(msg)
 		if m.debug {
 			m.logger.Printf("[TOKEN] %s", strconv.Quote(text))
@@ -498,34 +488,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m, _ = m.redrawCanvas()
 		m.descText = m.parser.DescText()
 		m.thinkText = m.parser.ThinkText()
-		cmds = append(cmds, waitMsg(m.tokenCh))
+		cmds = append(cmds, m.gen.Wait())
 
-	case doneMsg:
+	case bubble.DoneMsg:
 		m.generating = false
-		m.lastErr = msg.err
-		if m.genCtx != nil && m.genCtx.Err() == context.Canceled {
+		m.lastErr = msg.Err
+		if m.gen.Canceled() {
 			m.statusText = "Aborted"
 		} else {
 			m.statusText = "Ready"
 		}
-		if m.genCancel != nil {
-			m.genCancel()
-			m.genCancel = nil
-		}
-		m.genCtx = nil
+		m.gen.Cancel() // release the context's resources
 		m.genEnd = time.Now()
-		m.ctxPos = msg.ctxPos
-		if msg.err != nil {
-			if errors.Is(msg.err, ds4.ErrContextFull) || msg.err.Error() == "ds4go: session context full" {
+		m.ctxPos = msg.CtxPos
+		if msg.Err != nil {
+			if errors.Is(msg.Err, ds4.ErrContextFull) || msg.Err.Error() == "ds4go: session context full" {
 				m.statusText = "Ready · Context full"
 				m.errText = "Session context capacity reached. Press 'c' to continue or 'n' for a new prompt."
 			} else {
-				m.errText = msg.err.Error()
+				m.errText = msg.Err.Error()
 				if m.statusText != "Aborted" {
 					m.statusText = "Error"
 				}
 			}
-			m.logger.Printf("[ERROR] %v", msg.err)
+			m.logger.Printf("[ERROR] %v", msg.Err)
 		} else {
 			// Store a clean assistant turn (canvas + description only). Never
 			// keep the raw <think> block — replaying it poisons later turns.
@@ -548,7 +534,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.ctxPos, m.ctxSize)
 			m.logger.Printf("[CANVAS] %s", strconv.Quote(string(m.parser.Canvas)))
 		}
-		m.tokenCh = nil
+		m.gen = nil
 
 	case stepTickMsg:
 		if m.running {
@@ -572,10 +558,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
-}
-
-func waitMsg(ch chan tea.Msg) tea.Cmd {
-	return func() tea.Msg { return <-ch }
 }
 
 func stepTick() tea.Cmd {
@@ -1415,13 +1397,13 @@ Example: {"canvas":"color cyan\nbox 1 0 16 7\ncolor yellow\nhtext 4 2 hello\ncol
 		w, w-1, h, h-1, w/2, h/2)
 }
 
-func (m model) generate(ch chan tea.Msg) {
+func (m model) generate(ctx context.Context, ch chan<- tea.Msg) {
 	defer close(ch)
 
 	// done sends the terminal message; ctxPos is read here (the generate
 	// goroutine owns the session), never from the render goroutine.
 	done := func(err error) {
-		ch <- doneMsg{err: err, ctxPos: m.session.Pos()}
+		ch <- bubble.DoneMsg{Err: err, CtxPos: m.session.Pos()}
 	}
 
 	tokens, err := m.engine.NewTokens(nil)
@@ -1459,13 +1441,13 @@ func (m model) generate(ch chan tea.Msg) {
 	opts.OnToken = func(token int) {
 		if text, err := m.engine.TokenText(token); err == nil {
 			select {
-			case ch <- tokenMsg(text):
+			case ch <- bubble.TokenMsg(text):
 			default:
 				// Channel full — drop token so Continue can check context.
 			}
 		}
 	}
-	opts.Context = m.genCtx
+	opts.Context = ctx
 
 	gen := ds4.Generator{Engine: m.engine, Session: m.session}
 	_, genErr := gen.GenerateTokens(tokens, opts)
@@ -1473,11 +1455,11 @@ func (m model) generate(ch chan tea.Msg) {
 	done(genErr)
 }
 
-func (m model) generateContinue(ch chan tea.Msg) {
+func (m model) generateContinue(ctx context.Context, ch chan<- tea.Msg) {
 	defer close(ch)
 
 	done := func(err error) {
-		ch <- doneMsg{err: err, ctxPos: m.session.Pos()}
+		ch <- bubble.DoneMsg{Err: err, CtxPos: m.session.Pos()}
 	}
 
 	opts := ds4.GenerateOptions{
@@ -1487,13 +1469,13 @@ func (m model) generateContinue(ch chan tea.Msg) {
 	opts.OnToken = func(token int) {
 		if text, err := m.engine.TokenText(token); err == nil {
 			select {
-			case ch <- tokenMsg(text):
+			case ch <- bubble.TokenMsg(text):
 			default:
 				// Channel full — drop token so Continue can check context.
 			}
 		}
 	}
-	opts.Context = m.genCtx
+	opts.Context = ctx
 
 	gen := ds4.Generator{Engine: m.engine, Session: m.session}
 	_, genErr := gen.Continue(opts)
