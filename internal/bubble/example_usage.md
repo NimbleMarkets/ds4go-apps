@@ -27,12 +27,12 @@ func (m model) generate(ctx context.Context, ch chan<- tea.Msg) {
 	ch <- bubble.DoneMsg{Err: err, CtxPos: m.session.Pos()}
 }
 
-Note: the DoneMsg send is intentionally blocking. The model's Update loop must keep re-arming `m.gen.Wait()` after every received message until DoneMsg arrives — that constant draining is what guarantees the send completes. Do not drop DoneMsg with a select/default: the app would stay in its generating state forever.
-
 // On token: cmds = append(cmds, m.gen.Wait())
 // On esc:   m.gen.Cancel()
 // On done:  if m.gen.Canceled() { status = "Aborted" }; m.gen = nil
 ```
+
+Note: the DoneMsg send is intentionally blocking. The model's Update loop must keep re-arming `m.gen.Wait()` after every received message until DoneMsg arrives — that constant draining is what guarantees the send completes. Do not drop DoneMsg with a select/default: the app would stay in its generating state forever.
 
 ## Current recommended pattern for cadpad-style apps (tool heavy + custom side effects)
 
