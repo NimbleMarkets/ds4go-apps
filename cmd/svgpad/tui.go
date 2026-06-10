@@ -24,6 +24,7 @@ import (
 	"charm.land/lipgloss/v2"
 	ds4 "github.com/NimbleMarkets/ds4go"
 	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
+	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
 	"github.com/NimbleMarkets/ds4go-apps/internal/editmode"
 	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
@@ -62,15 +63,8 @@ const placeholderSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400
 
 // ── message types ────────────────────────────────────────────────────────────
 
-type tokenMsg string
 type submitMsg struct{ text string }
-type doneMsg struct {
-	err    error
-	ctxPos int
-}
-type spinnerTickMsg struct{}
 type yoloSubmitMsg struct{ text string }
-type toolRoundMsg struct{}
 type loadEntryMsg struct{}
 
 // engineReadyMsg is delivered from the goroutine that opens the ds4 engine
@@ -165,9 +159,7 @@ type svgEntry struct {
 }
 
 func spinnerTick() tea.Cmd {
-	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
-		return spinnerTickMsg{}
-	})
+	return bubble.SpinnerTick(200 * time.Millisecond)
 }
 
 // openEngineCmd opens the ds4 engine on the goroutine bubbletea spawns
@@ -230,9 +222,7 @@ type model struct {
 
 	history          []ds4.ChatMessage
 	rawBuf           []byte // raw LLM response for the current turn
-	tokenCh          chan tea.Msg
-	genCtx           context.Context
-	genCancel        context.CancelFunc
+	gen              *bubble.Generation // in-flight generation; nil when idle
 	generating       bool
 	metadataCtx      context.Context
 	metadataCancel   context.CancelFunc
@@ -646,8 +636,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case "esc":
-			if m.generating && m.genCancel != nil {
-				m.genCancel()
+			if m.generating && m.gen != nil {
+				m.gen.Cancel()
 				m.statusText = "Aborting..."
 				return m, nil
 			}
@@ -904,12 +894,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.firstTokenTime = time.Time{}
 				m.genEnd = time.Time{}
 				m.tokenCount = 0
-				m.genCtx, m.genCancel = context.WithCancel(context.Background())
 				cmds = append(cmds, spinnerTick())
-				ch := make(chan tea.Msg, 64)
-				m.tokenCh = ch
-				go m.generateContinue(ch)
-				cmds = append(cmds, waitMsg(ch))
+				var waitCmd tea.Cmd
+				m.gen, waitCmd = bubble.Start(m.generateContinue)
+				cmds = append(cmds, waitCmd)
 			} else {
 				var svgData []byte
 				if m.entryIndex >= 0 && m.entryIndex < len(m.entries) {
@@ -937,12 +925,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.toolCalls = m.toolCalls[:0]
 					feedback := fmt.Sprintf("Your output was invalid: %s. Please output ONLY a corrected, complete SVG.", v)
 					m.history = append(m.history, ds4.ChatMessage{Role: "user", Content: feedback})
-					m.genCtx, m.genCancel = context.WithCancel(context.Background())
 					cmds = append(cmds, spinnerTick())
-					ch := make(chan tea.Msg, 64)
-					m.tokenCh = ch
-					go m.generate(ch)
-					cmds = append(cmds, waitMsg(ch))
+					var waitCmd tea.Cmd
+					m.gen, waitCmd = bubble.Start(m.generate)
+					cmds = append(cmds, waitCmd)
 				}
 			}
 			return m, tea.Batch(cmds...)
@@ -1204,14 +1190,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.genEnd = time.Time{}
 		m.tokenCount = 0
 		m.spinnerFrame = 0
-		m.genCtx, m.genCancel = context.WithCancel(context.Background())
 		cmds = append(cmds, spinnerTick())
-		ch := make(chan tea.Msg, 64)
-		m.tokenCh = ch
-		go m.generate(ch)
-		cmds = append(cmds, waitMsg(ch))
+		var waitCmd tea.Cmd
+		m.gen, waitCmd = bubble.Start(m.generate)
+		cmds = append(cmds, waitCmd)
 
-	case toolRoundMsg:
+	case bubble.ToolRoundMsg:
 		m.rawBuf = m.rawBuf[:0]
 		m.thinkText = ""
 		m.outputText = ""
@@ -1224,14 +1208,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.genEnd = time.Time{}
 		m.tokenCount = 0
 		m.spinnerFrame = 0
-		m.genCtx, m.genCancel = context.WithCancel(context.Background())
 		cmds = append(cmds, spinnerTick())
-		ch := make(chan tea.Msg, 64)
-		m.tokenCh = ch
-		go m.generate(ch)
-		cmds = append(cmds, waitMsg(ch))
+		var waitCmd tea.Cmd
+		m.gen, waitCmd = bubble.Start(m.generate)
+		cmds = append(cmds, waitCmd)
 
-	case tokenMsg:
+	case bubble.TokenMsg:
 		text := string(msg)
 		if m.firstTokenTime.IsZero() {
 			m.firstTokenTime = time.Now()
@@ -1247,9 +1229,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		cmds = append(cmds, waitMsg(m.tokenCh))
+		cmds = append(cmds, m.gen.Wait())
 
-	case spinnerTickMsg:
+	case bubble.SpinnerTickMsg:
 		if m.generating {
 			m.spinnerFrame++
 			if !m.genStart.IsZero() {
@@ -1277,27 +1259,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, func() tea.Msg { return submitMsg{msg.text} })
 		}
 
-	case doneMsg:
+	case bubble.DoneMsg:
 		m.generating = false
-		m.lastErr = msg.err
-		if m.genCtx != nil && m.genCtx.Err() == context.Canceled {
+		m.lastErr = msg.Err
+		if m.gen.Canceled() {
 			m.statusText = "Aborted"
 		} else {
 			m.statusText = "Ready"
 		}
-		if m.genCancel != nil {
-			m.genCancel()
-			m.genCancel = nil
-		}
-		m.genCtx = nil
+		m.gen.Cancel() // release the context's resources
+		m.gen = nil
 		m.genEnd = time.Now()
-		m.ctxPos = msg.ctxPos
-		if msg.err != nil && msg.err != context.Canceled {
-			if errors.Is(msg.err, ds4.ErrContextFull) || msg.err.Error() == "ds4go: session context full" {
+		m.ctxPos = msg.CtxPos
+		if msg.Err != nil && msg.Err != context.Canceled {
+			if errors.Is(msg.Err, ds4.ErrContextFull) || msg.Err.Error() == "ds4go: session context full" {
 				m.statusText = "Ready · Context full"
 				m.errText = "Session context capacity reached. Press 'c' to continue or 'n' for a new prompt."
 			} else {
-				m.errText = msg.err.Error()
+				m.errText = msg.Err.Error()
 				m.statusText = "Error"
 			}
 		}
@@ -1312,7 +1291,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			rawPreview = rawPreview[:300] + "..."
 		}
 		m.logger.Printf("[PARSE] tools=%d parseErr=%v think=%v raw=%q", len(assistant.ToolCalls), parseErr, m.thinkMode != ds4.ThinkNone, rawPreview)
-		if parseErr == nil && len(assistant.ToolCalls) > 0 && m.toolRounds < m.maxToolRounds && msg.err == nil {
+		if parseErr == nil && len(assistant.ToolCalls) > 0 && m.toolRounds < m.maxToolRounds && msg.Err == nil {
 			m.toolRounds++
 			var toolNames []string
 			for _, call := range assistant.ToolCalls {
@@ -1350,7 +1329,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.totalToolCalls += len(assistant.ToolCalls)
 				m.totalToolRounds++
-				cmds = append(cmds, func() tea.Msg { return toolRoundMsg{} })
+				cmds = append(cmds, func() tea.Msg { return bubble.ToolRoundMsg{} })
 				return m, tea.Batch(cmds...)
 			}
 		}
@@ -1391,7 +1370,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Auto-correction: if SVG is missing or invalid, feed back error and retry.
-		if m.autoCorrectCount < m.maxAutoCorrect && msg.err == nil {
+		if m.autoCorrectCount < m.maxAutoCorrect && msg.Err == nil {
 			var v string
 			if len(svgData) == 0 {
 				v = "no SVG markup found in the draft file or in your response"
@@ -1404,7 +1383,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.logger.Printf("[AUTOCORRECT] #%d error=%q", m.autoCorrectCount, v)
 				feedback := fmt.Sprintf("Your output was invalid: %s. Please correct this by using tools (svg_append, svg_replace) on the draft file, or by providing the corrected SVG.", v)
 				m.history = append(m.history, ds4.ChatMessage{Role: "user", Content: feedback})
-				cmds = append(cmds, func() tea.Msg { return toolRoundMsg{} })
+				cmds = append(cmds, func() tea.Msg { return bubble.ToolRoundMsg{} })
 				return m, tea.Batch(cmds...)
 			}
 		}
@@ -1415,7 +1394,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(svgData) > 0 {
 			cmds = append(cmds, m.svgWidget.SetSVGData("output.svg", svgData))
 			v := validateSVG(svgData)
-			if msg.err != nil && (errors.Is(msg.err, ds4.ErrContextFull) || msg.err.Error() == "ds4go: session context full") {
+			if msg.Err != nil && (errors.Is(msg.Err, ds4.ErrContextFull) || msg.Err.Error() == "ds4go: session context full") {
 				m.statusText = "Ready · Context full"
 			} else {
 				if v == "valid" {
@@ -1502,17 +1481,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func waitMsg(ch chan tea.Msg) tea.Cmd {
-	return func() tea.Msg { return <-ch }
-}
-
 // ── generation ───────────────────────────────────────────────────────────────
 
-func (m model) generate(ch chan tea.Msg) {
+func (m model) generate(ctx context.Context, ch chan<- tea.Msg) {
 	defer close(ch)
 
 	done := func(err error) {
-		ch <- doneMsg{err: err, ctxPos: m.session.Pos()}
+		ch <- bubble.DoneMsg{Err: err, CtxPos: m.session.Pos()}
 	}
 
 	prompt, err := m.tools.BuildPrompt(m.engine, m.systemPrompt(), m.history, m.thinkMode)
@@ -1533,24 +1508,24 @@ func (m model) generate(ch chan tea.Msg) {
 	opts.OnToken = func(token int) {
 		if text, err := m.engine.TokenText(token); err == nil {
 			select {
-			case ch <- tokenMsg(text):
+			case ch <- bubble.TokenMsg(text):
 			default:
 				// Channel full — drop token so Continue can check context.
 			}
 		}
 	}
-	opts.Context = m.genCtx
+	opts.Context = ctx
 
 	gen := ds4.Generator{Engine: m.engine, Session: m.session}
 	_, genErr := gen.GenerateTokens(prompt, opts)
 	done(genErr)
 }
 
-func (m model) generateContinue(ch chan tea.Msg) {
+func (m model) generateContinue(ctx context.Context, ch chan<- tea.Msg) {
 	defer close(ch)
 
 	done := func(err error) {
-		ch <- doneMsg{err: err, ctxPos: m.session.Pos()}
+		ch <- bubble.DoneMsg{Err: err, CtxPos: m.session.Pos()}
 	}
 
 	opts := ds4.GenerateOptions{
@@ -1560,13 +1535,13 @@ func (m model) generateContinue(ch chan tea.Msg) {
 	opts.OnToken = func(token int) {
 		if text, err := m.engine.TokenText(token); err == nil {
 			select {
-			case ch <- tokenMsg(text):
+			case ch <- bubble.TokenMsg(text):
 			default:
 				// Channel full — drop token so Continue can check context.
 			}
 		}
 	}
-	opts.Context = m.genCtx
+	opts.Context = ctx
 
 	gen := ds4.Generator{Engine: m.engine, Session: m.session}
 	_, genErr := gen.Continue(opts)
