@@ -2,6 +2,36 @@
 
 This package is intended to reduce duplication across svgpad, glyphpad, and cadpad for the "run ds4go generation from a Bubble Tea UI with good observability" problem.
 
+## Generation handle (Start, Wait, Cancel)
+
+The Generation handle provides the low-level plumbing to wire a cancellable context into a background goroutine:
+
+```go
+// In Update, on submit:
+var waitCmd tea.Cmd
+m.gen, waitCmd = bubble.Start(m.generate)
+cmds = append(cmds, waitCmd)
+
+// The generate function:
+func (m model) generate(ctx context.Context, ch chan<- tea.Msg) {
+	defer close(ch)
+	opts := ds4.GenerateOptions{Context: ctx, OnToken: func(tok int) {
+		if text, err := m.engine.TokenText(tok); err == nil {
+			select {
+			case ch <- bubble.TokenMsg(text):
+			default: // drop when UI falls behind; Continue checks ctx
+			}
+		}
+	}}
+	_, err := (ds4.Generator{Engine: m.engine, Session: m.session}).GenerateTokens(prompt, opts)
+	ch <- bubble.DoneMsg{Err: err, CtxPos: m.session.Pos()}
+}
+
+// On token: cmds = append(cmds, m.gen.Wait())
+// On esc:   m.gen.Cancel()
+// On done:  if m.gen.Canceled() { status = "Aborted" }; m.gen = nil
+```
+
 ## Current recommended pattern for cadpad-style apps (tool heavy + custom side effects)
 
 ```go

@@ -1,8 +1,8 @@
 // Package bubble provides reusable integration helpers for using
 // github.com/NimbleMarkets/ds4go together with charm.land/bubbletea/v2.
 //
-// This package captures patterns that are currently duplicated across
-// svgpad, glyphpad, and cadpad.
+// This package captures generation/TUI plumbing shared by svgpad,
+// glyphpad, and cadpad.
 package bubble
 
 // TokenMsg carries one token of generated text from the model.
@@ -26,6 +26,3 @@ type SpinnerTickMsg struct{}
 // InferencingStartMsg can be used to signal the beginning of an inference
 // session (useful for showing spinners or "thinking" UI).
 type InferencingStartMsg struct{}
-
-// InferencingDoneMsg signals the end of an inference session.
-type InferencingDoneMsg struct{}
