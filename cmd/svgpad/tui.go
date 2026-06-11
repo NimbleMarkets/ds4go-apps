@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -239,7 +238,6 @@ type model struct {
 	logTop        int            // absolute first-visible line; -1 = follow tail
 
 	history          []ds4.ChatMessage
-	rawBuf           []byte // raw LLM response for the current turn
 	gen              *bubble.Generation // in-flight generation; nil when idle
 	generating       bool
 	metadataCtx      context.Context
@@ -944,6 +942,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if isTruncated {
+				// The stream-driven turn cannot resume raw logits; rerun the
+				// turn after trimming the truncated assistant tail.
 				if len(m.history) > 0 && m.history[len(m.history)-1].Role == "assistant" {
 					m.history = m.history[:len(m.history)-1]
 				}
@@ -957,7 +957,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tokenCount = 0
 				cmds = append(cmds, spinnerTick())
 				var waitCmd tea.Cmd
-				m.gen, waitCmd = bubble.Start(m.generateContinue)
+				m.gen, waitCmd = bubble.Start(m.runTurn)
 				cmds = append(cmds, waitCmd)
 			} else {
 				var svgData []byte
@@ -980,15 +980,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.firstTokenTime = time.Time{}
 					m.genEnd = time.Time{}
 					m.tokenCount = 0
-					m.rawBuf = m.rawBuf[:0]
 					m.thinkText = ""
 					m.outputText = ""
 					m.toolCalls = m.toolCalls[:0]
+					m.liveCalls = nil
+					m.roundCallStart = 0
+					m.pendingCalls = nil
+					m.previewBase = ""
+					m.previewPending = nil
+					m.previewTick = 0
 					feedback := fmt.Sprintf("Your output was invalid: %s. Please output ONLY a corrected, complete SVG.", v)
 					m.history = append(m.history, ds4.ChatMessage{Role: "user", Content: feedback})
 					cmds = append(cmds, spinnerTick())
 					var waitCmd tea.Cmd
-					m.gen, waitCmd = bubble.Start(m.generate)
+					m.gen, waitCmd = bubble.Start(m.runTurn)
 					cmds = append(cmds, waitCmd)
 				}
 			}
@@ -1229,13 +1234,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.history = nil
 		}
 		m.history = append(m.history, ds4.ChatMessage{Role: "user", Content: msg.text})
-		m.rawBuf = m.rawBuf[:0]
 		m.thinkText = ""
 		m.outputText = ""
 		m.toolCalls = m.toolCalls[:0]
 		m.totalToolCalls = 0
 		m.totalToolRounds = 0
 		m.toolCallCounts = make(map[string]int)
+		m.liveCalls = nil
+		m.roundCallStart = 0
+		m.pendingCalls = nil
+		m.previewBase = ""
+		m.previewPending = nil
+		m.previewTick = 0
 		m.thinkScroll = 0
 		m.toolScroll = 0
 		m.thinkAutoScroll = true
@@ -1253,43 +1263,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinnerFrame = 0
 		cmds = append(cmds, spinnerTick())
 		var waitCmd tea.Cmd
-		m.gen, waitCmd = bubble.Start(m.generate)
-		cmds = append(cmds, waitCmd)
-
-	case bubble.ToolRoundMsg:
-		m.rawBuf = m.rawBuf[:0]
-		m.thinkText = ""
-		m.outputText = ""
-		m.generating = true
-		m.statusText = m.roundStatus()
-		m.errText = ""
-		m.thinkAutoScroll = true
-		m.genStart = time.Now() // per-round timer resets, jobStart does not
-		m.firstTokenTime = time.Time{}
-		m.genEnd = time.Time{}
-		m.tokenCount = 0
-		m.spinnerFrame = 0
-		cmds = append(cmds, spinnerTick())
-		var waitCmd tea.Cmd
-		m.gen, waitCmd = bubble.Start(m.generate)
+		m.gen, waitCmd = bubble.Start(m.runTurn)
 		cmds = append(cmds, waitCmd)
 
 	case bubble.TokenMsg:
-		text := string(msg)
+		// Metrics cadence only — the panels and preview are fed by
+		// StreamEventMsg.
 		if m.firstTokenTime.IsZero() {
 			m.firstTokenTime = time.Now()
 		}
 		m.tokenCount++
-		m.rawBuf = append(m.rawBuf, text...)
-		m.thinkText = extractThink(string(m.rawBuf), m.thinkMode != ds4.ThinkNone)
-		m.outputText = extractOutputText(string(m.rawBuf), m.thinkMode != ds4.ThinkNone)
-
-		if incSVG := extractIncrementalSVG(string(m.rawBuf)); incSVG != nil {
-			if strings.Contains(text, "\n") || m.tokenCount%15 == 0 {
-				cmds = append(cmds, m.svgWidget.SetSVGData("incremental.svg", incSVG))
-			}
-		}
-
 		cmds = append(cmds, m.gen.Wait())
 
 	case bubble.SpinnerTickMsg:
@@ -1402,9 +1385,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logger.Printf("[DSML] malformed tool call: %s", msg.reason)
 		cmds = append(cmds, m.gen.Wait())
 
-	case bubble.DoneMsg:
+	case turnDoneMsg:
 		m.generating = false
-		m.lastErr = msg.Err
+		m.lastErr = msg.err
 		if m.gen.Canceled() {
 			m.statusText = "Aborted"
 		} else {
@@ -1413,86 +1396,37 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.gen.Cancel() // release the context's resources
 		m.gen = nil
 		m.genEnd = time.Now()
-		m.ctxPos = msg.CtxPos
-		if msg.Err != nil && msg.Err != context.Canceled {
-			if errors.Is(msg.Err, ds4.ErrContextFull) || msg.Err.Error() == "ds4go: session context full" {
+		m.ctxPos = msg.ctxPos
+
+		genErr := msg.err
+		if errors.Is(genErr, bubble.ErrMaxRounds) {
+			// The round budget ran out with calls still pending; the draft
+			// may still be salvageable, so fall through to the validation
+			// gate like a completed turn.
+			m.statusText = "Ready · tool round limit reached"
+			genErr = nil
+		}
+		if genErr != nil && genErr != context.Canceled {
+			if errors.Is(genErr, ds4.ErrContextFull) || genErr.Error() == "ds4go: session context full" {
 				m.statusText = "Ready · Context full"
 				m.errText = "Session context capacity reached. Press 'c' to continue or 'n' for a new prompt."
 			} else {
-				m.errText = msg.Err.Error()
+				m.errText = genErr.Error()
 				m.statusText = "Error"
 			}
 		}
-		m.logger.Printf("[DONE] %d tok  %.1f tok/s  ttft=%s  gen=%s  ctx=%d/%d",
+		m.logger.Printf("[DONE] %d tok  %.1f tok/s  ttft=%s  gen=%s  ctx=%d/%d  rounds=%d err=%v",
 			m.tokenCount, m.decodeSpeed(), fmtDuration(m.ttft()), fmtDuration(m.genTime()),
-			m.ctxPos, m.ctxSize)
+			m.ctxPos, m.ctxSize, msg.result.ToolRounds, msg.err)
 
-		// Check for tool calls in the assistant response.
-		assistant, parseErr := m.tools.ParseAssistant(string(m.rawBuf), m.thinkMode != ds4.ThinkNone)
-		rawPreview := string(m.rawBuf)
-		if len(rawPreview) > 300 {
-			rawPreview = rawPreview[:300] + "..."
-		}
-		m.logger.Printf("[PARSE] tools=%d parseErr=%v think=%v raw=%q", len(assistant.ToolCalls), parseErr, m.thinkMode != ds4.ThinkNone, rawPreview)
-		if parseErr == nil && len(assistant.ToolCalls) > 0 && m.toolRounds < m.maxToolRounds && msg.Err == nil {
-			m.toolRounds++
-			var toolNames []string
-			for _, call := range assistant.ToolCalls {
-				toolNames = append(toolNames, call.Name)
-			}
-			m.statusText = fmt.Sprintf("Running %s...", strings.Join(toolNames, ", "))
-			m.logger.Printf("[TOOL] round=%d calls=%d", m.toolRounds, len(assistant.ToolCalls))
-			for _, call := range assistant.ToolCalls {
-				m.logger.Printf("[TOOL] arg %s=%q", call.Name, truncateString(call.Arguments, 500))
-			}
-			results, toolErr := m.tools.ExecuteToolCalls(context.Background(), assistant.ToolCalls)
-			if toolErr != nil {
-				m.statusText = "Tool error"
-				m.errText = toolErr.Error()
-				m.logger.Printf("[TOOL] error: %v", toolErr)
-			} else {
-				m.history = append(m.history, assistant)
-				m.history = append(m.history, results...)
-				for _, call := range assistant.ToolCalls {
-					var res string
-					for _, r := range results {
-						if r.ToolCallID == call.ID {
-							res = r.Content
-							break
-						}
-					}
-					m.toolCalls = append(m.toolCalls, toolCallEntry{
-						round:  m.toolRounds,
-						name:   call.Name,
-						args:   truncateJSON(call.Arguments, 120),
-						result: truncateString(res, 120),
-					})
-					m.toolCallCounts[call.Name]++
-					m.logger.Printf("[TOOL] result id=%s content=%q", call.ID, res)
-				}
-				m.totalToolCalls += len(assistant.ToolCalls)
-				m.totalToolRounds++
-				cmds = append(cmds, func() tea.Msg { return bubble.ToolRoundMsg{} })
-				return m, tea.Batch(cmds...)
-			}
+		// Adopt the driver's transcript (it already contains the assistant
+		// turns, tool results, and any syntax-error retries).
+		if len(msg.result.History) > 0 {
+			m.history = msg.result.History
 		}
 		m.toolRounds = 0
 
-		// Append assistant message to history (so follow-up rounds see context).
-		if parseErr == nil {
-			m.history = append(m.history, assistant)
-		} else {
-			m.history = append(m.history, ds4.ChatMessage{Role: "assistant", Content: string(m.rawBuf)})
-		}
-
-		// Extract final artifacts.
-		// Use parsed assistant content (DSML stripped) when available.
-		var content string
-		if parseErr == nil {
-			content = assistant.Content
-		} else {
-			content = string(m.rawBuf)
-		}
+		content := msg.result.Assistant.Content
 		var svgData []byte
 		var svgFromDraft bool
 		if draftData, err := os.ReadFile(filepath.Join(m.workDir, "draft.svg")); err == nil && len(draftData) > 0 {
@@ -1503,7 +1437,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		outputText := extractOutputText(content, m.thinkMode != ds4.ThinkNone)
 		nextPrompt := extractPrompt(content)
-		m.outputText = outputText
+		if outputText != "" {
+			m.outputText = outputText
+		}
 
 		// Determine the prompt for this generation.
 		var currentPrompt string
@@ -1514,8 +1450,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 
-		// Auto-correction: if SVG is missing or invalid, feed back error and retry.
-		if m.autoCorrectCount < m.maxAutoCorrect && msg.Err == nil {
+		// Auto-correction: if SVG is missing or invalid, feed back error
+		// and rerun the whole driver turn (the outer validation gate —
+		// app-level semantics on top of the library's DSML recovery).
+		if m.autoCorrectCount < m.maxAutoCorrect && msg.err == nil {
 			var v string
 			if len(svgData) == 0 {
 				v = "no SVG markup found in the draft file or in your response"
@@ -1524,11 +1462,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if v != "valid" {
 				m.autoCorrectCount++
-				m.statusText = fmt.Sprintf("Fixing SVG (%d/%d) · %s", m.autoCorrectCount, m.maxAutoCorrect, v)
 				m.logger.Printf("[AUTOCORRECT] #%d error=%q", m.autoCorrectCount, v)
 				feedback := autoCorrectFeedback(v, svgData, svgFromDraft)
 				m.history = append(m.history, ds4.ChatMessage{Role: "user", Content: feedback})
-				cmds = append(cmds, func() tea.Msg { return bubble.ToolRoundMsg{} })
+				// Restart: per-segment state reset (the old ToolRoundMsg
+				// duties) and a fresh driver run.
+				m.generating = true
+				m.statusText = m.roundStatus()
+				m.errText = ""
+				m.thinkText = ""
+				m.outputText = ""
+				m.thinkAutoScroll = true
+				m.genStart = time.Now() // per-segment timer resets, jobStart does not
+				m.firstTokenTime = time.Time{}
+				m.genEnd = time.Time{}
+				m.tokenCount = 0
+				m.spinnerFrame = 0
+				m.previewPending = nil
+				m.liveCalls = nil
+				m.pendingCalls = nil
+				m.roundCallStart = len(m.toolCalls)
+				cmds = append(cmds, spinnerTick())
+				var waitCmd tea.Cmd
+				m.gen, waitCmd = bubble.Start(m.runTurn)
+				cmds = append(cmds, waitCmd)
 				return m, tea.Batch(cmds...)
 			}
 		}
@@ -1539,9 +1496,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(svgData) > 0 {
 			cmds = append(cmds, m.svgWidget.SetSVGData("output.svg", svgData))
 			v := validateSVG(svgData)
-			if msg.Err != nil && (errors.Is(msg.Err, ds4.ErrContextFull) || msg.Err.Error() == "ds4go: session context full") {
-				m.statusText = "Ready · Context full"
-			} else {
+			if genErr == nil && !errors.Is(msg.err, bubble.ErrMaxRounds) {
 				if v == "valid" {
 					m.statusText = "Ready · SVG valid"
 				} else {
@@ -1682,69 +1637,54 @@ func (m *model) applyStreamEvent(ev dsml.StreamEvent) tea.Cmd {
 	return nil
 }
 
-func (m model) generate(ctx context.Context, ch chan<- tea.Msg) {
+// runTurn executes one full multi-round tool-calling turn through the
+// shared bubble driver. Stream events, round boundaries, and tool batches
+// are forwarded as msgs; turnDoneMsg is the terminal message. Tool handlers
+// only touch the draft file (each closure captures draftPath alone), so
+// executing them off the UI goroutine is safe.
+func (m model) runTurn(ctx context.Context, ch chan<- tea.Msg) {
 	defer close(ch)
 
-	done := func(err error) {
-		ch <- bubble.DoneMsg{Err: err, CtxPos: m.session.Pos()}
-	}
-
-	prompt, err := m.tools.BuildPrompt(m.engine, m.systemPrompt(), m.history, m.thinkMode)
-	if err != nil {
-		done(err)
-		return
-	}
-	defer prompt.Free()
 	if m.debug {
 		toolsSection, _ := m.tools.RenderToolsSection()
-		m.logger.Printf("[PROMPT] len=%d tools=%q", prompt.Len(), toolsSection)
+		m.logger.Printf("[PROMPT] tools=%q", toolsSection)
 	}
 
-	opts := ds4.GenerateOptions{
+	driver := bubble.NewGenerationDriver(bubble.DriverOptions{
+		Engine:    m.engine,
+		Session:   m.session,
+		Tools:     m.tools,
+		ThinkMode: m.thinkMode,
+		MaxRounds: m.maxToolRounds + 1, // tool rounds plus the final answer turn
 		MaxTokens: 8192,
-		StopOnEOS: true,
-	}
-	opts.OnToken = func(token int) {
-		if text, err := m.engine.TokenText(token); err == nil {
-			select {
-			case ch <- bubble.TokenMsg(text):
-			default:
-				// Channel full — drop token so Continue can check context.
+		ExecuteTools: func(ctx context.Context, calls []ds4.ToolCall) ([]ds4.ChatMessage, error) {
+			return m.tools.ExecuteToolCalls(ctx, calls)
+		},
+		OnEvent: func(e bubble.Event) {
+			switch ev := e.(type) {
+			case bubble.TokenEvent:
+				select {
+				case ch <- bubble.TokenMsg(ev.Text):
+				default:
+					// Drop: TokenMsg only paces metrics; the panels are fed
+					// by StreamEventMsg below, which never drops.
+				}
+			case bubble.StreamEvent:
+				ch <- bubble.StreamEventMsg{Event: ev.Event}
+			case bubble.RoundStartedEvent:
+				ch <- roundStartedMsg{round: ev.Round}
+			case bubble.ToolCallsEvent:
+				ch <- toolCallsMsg{calls: ev.Calls}
+			case bubble.ToolResultsEvent:
+				ch <- toolResultsMsg{results: ev.Results}
+			case bubble.MalformedRetryEvent:
+				ch <- malformedRetryMsg{reason: ev.Reason}
 			}
-		}
-	}
-	opts.Context = ctx
+		},
+	})
 
-	gen := ds4.Generator{Engine: m.engine, Session: m.session}
-	_, genErr := gen.GenerateTokens(prompt, opts)
-	done(genErr)
-}
-
-func (m model) generateContinue(ctx context.Context, ch chan<- tea.Msg) {
-	defer close(ch)
-
-	done := func(err error) {
-		ch <- bubble.DoneMsg{Err: err, CtxPos: m.session.Pos()}
-	}
-
-	opts := ds4.GenerateOptions{
-		MaxTokens: 8192,
-		StopOnEOS: true,
-	}
-	opts.OnToken = func(token int) {
-		if text, err := m.engine.TokenText(token); err == nil {
-			select {
-			case ch <- bubble.TokenMsg(text):
-			default:
-				// Channel full — drop token so Continue can check context.
-			}
-		}
-	}
-	opts.Context = ctx
-
-	gen := ds4.Generator{Engine: m.engine, Session: m.session}
-	_, genErr := gen.Continue(opts)
-	done(genErr)
+	res, err := driver.RunWithPrompt(ctx, m.systemPrompt(), m.history)
+	ch <- turnDoneMsg{result: res, err: err, ctxPos: m.session.Pos()}
 }
 
 func (m model) systemPrompt() string {
@@ -1815,31 +1755,6 @@ func extractIncrementalSVG(s string) []byte {
 		return []byte(partial)
 	}
 	return []byte(s[start : start+end+len("</svg>")])
-}
-
-// extractThink pulls the <think>...</think> content from a string.
-// If thinkActive is true and <think> is missing, we assume the thinking content
-// starts at the beginning of the string and goes up to </think> (or the end if no </think>).
-func extractThink(s string, thinkActive bool) string {
-	start := strings.Index(s, "<think>")
-	if start != -1 {
-		end := strings.Index(s[start:], "</think>")
-		if end == -1 {
-			return s[start+len("<think>"):]
-		}
-		return s[start+len("<think>") : start+end]
-	}
-
-	// If <think> is not found, but thinkActive is true:
-	if thinkActive {
-		end := strings.Index(s, "</think>")
-		if end == -1 {
-			return s
-		}
-		return s[:end]
-	}
-
-	return ""
 }
 
 // extractPrompt pulls the first <prompt>...</prompt> block from raw buffer.
@@ -1913,7 +1828,7 @@ func extractOutputText(s string, thinkActive bool) string {
 		}
 		s = strings.TrimSpace(s[:start] + s[start+end+len("</prompt>"):])
 	}
-	return formatDSMLStream(s)
+	return s
 }
 
 // validateSVG and validateSVGDetailed live in validate.go.
@@ -2336,16 +2251,6 @@ func (m model) render() string {
 			thinkContent = m.thinkText
 		} else if m.outputText != "" {
 			thinkContent = m.outputText
-		} else if m.generating && len(m.rawBuf) > 0 {
-			if strings.Contains(string(m.rawBuf), "<svg") {
-				thinkContent = fmt.Sprintf("Generating SVG... (%d bytes so far)", len(m.rawBuf))
-			} else {
-				preview := string(m.rawBuf)
-				if len(preview) > 200 {
-					preview = preview[:200] + "..."
-				}
-				thinkContent = preview
-			}
 		} else {
 			if m.thinkMode == ds4.ThinkNone {
 				thinkContent = "(reasoning off — r to enable in command mode)"
@@ -2893,98 +2798,4 @@ func fmtDuration(d time.Duration) string {
 		return "0s"
 	}
 	return d.Round(time.Second).String()
-}
-
-// The leading \s* on each tag pattern swallows the raw newlines the model
-// emits between DSML tags; each replacement supplies exactly one leading
-// newline instead, so the rendered block has no blank lines. reParamStart
-// also swallows trailing whitespace so the value starts inline after "= ".
-var (
-	reToolCallsStart = regexp.MustCompile(`(?i)\s*<(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?tool_calls>`)
-	reToolCallsEnd   = regexp.MustCompile(`(?i)\s*</(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?tool_calls>`)
-	reInvokeStart    = regexp.MustCompile(`(?i)\s*<(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?invoke(?:\s+[^>]*?)?\s+(?i:name)\s*=\s*(?:"([^"]*)"|'([^']*)')(?:\s+[^>]*?)?>`)
-	reInvokeEnd      = regexp.MustCompile(`(?i)\s*</(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?invoke>`)
-	reParamStart     = regexp.MustCompile(`(?i)\s*<(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?parameter(?:\s+[^>]*?)?\s+(?i:name)\s*=\s*(?:"([^"]*)"|'([^']*)')(?:\s+[^>]*?)?>\s*`)
-	reParamEnd       = regexp.MustCompile(`(?i)\s*</(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?parameter>`)
-)
-
-var (
-	dsmlToolBlockStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Bold(true) // Orange
-	dsmlInvokeStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)  // Blue
-	dsmlParamStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))            // Grey
-)
-
-var dsmlUnescaper = strings.NewReplacer(
-	"&amp;", "&",
-	"&lt;", "<",
-	"&gt;", ">",
-	"&quot;", `"`,
-	"&apos;", "'",
-)
-
-func formatDSMLStream(text string) string {
-	if text == "" {
-		return ""
-	}
-
-	// 1. Replace tool calls start/end
-	text = reToolCallsStart.ReplaceAllString(text, "\n"+dsmlToolBlockStyle.Render("🔧 [Calling Tools]"))
-	text = reToolCallsEnd.ReplaceAllString(text, "\n"+dsmlToolBlockStyle.Render("🔧 [Tools Completed]"))
-
-	// 2. Replace invoke start/end
-	text = reInvokeStart.ReplaceAllStringFunc(text, func(m string) string {
-		match := reInvokeStart.FindStringSubmatch(m)
-		name := ""
-		if len(match) > 1 {
-			if match[1] != "" {
-				name = match[1]
-			} else if len(match) > 2 && match[2] != "" {
-				name = match[2]
-			}
-		}
-		if name != "" {
-			return fmt.Sprintf("\n  👉 %s", dsmlInvokeStyle.Render(name))
-		}
-		return m
-	})
-	text = reInvokeEnd.ReplaceAllString(text, "")
-
-	// 3. Replace parameter start/end
-	text = reParamStart.ReplaceAllStringFunc(text, func(m string) string {
-		match := reParamStart.FindStringSubmatch(m)
-		name := ""
-		if len(match) > 1 {
-			if match[1] != "" {
-				name = match[1]
-			} else if len(match) > 2 && match[2] != "" {
-				name = match[2]
-			}
-		}
-		if name != "" {
-			// Start cyan formatting: \x1b[38;5;86m
-			return fmt.Sprintf("\n    ✏️ %s = \x1b[38;5;86m", dsmlParamStyle.Render(name))
-		}
-		return m
-	})
-	text = reParamEnd.ReplaceAllString(text, "\x1b[0m")
-
-	// 4. Unescape HTML/XML entities
-	text = dsmlUnescaper.Replace(text)
-
-	// 5. Hide unclosed tags at the end of the stream
-	if idx := strings.LastIndex(text, "<"); idx >= 0 {
-		tail := strings.ToLower(text[idx:])
-		if !strings.Contains(tail, ">") {
-			if strings.Contains(tail, "｜") ||
-				strings.Contains(tail, "|") ||
-				strings.Contains(tail, "ds") ||
-				strings.Contains(tail, "tool") ||
-				strings.Contains(tail, "invoke") ||
-				strings.Contains(tail, "param") {
-				text = text[:idx]
-			}
-		}
-	}
-
-	return text
 }

@@ -197,64 +197,53 @@ func TestSpliceMetadataIgnoresEmptyBlock(t *testing.T) {
 	}
 }
 
-func TestExtractThinkAndOutputText(t *testing.T) {
+func TestExtractOutputText(t *testing.T) {
 	tests := []struct {
 		name        string
 		input       string
 		thinkActive bool
-		wantThink   string
 		wantOutput  string
 	}{
 		{
 			name:        "with think tag and closed",
 			input:       "<think>reasoning text</think>output text",
 			thinkActive: true,
-			wantThink:   "reasoning text",
 			wantOutput:  "output text",
 		},
 		{
 			name:        "with think tag and unclosed",
 			input:       "<think>reasoning text",
 			thinkActive: true,
-			wantThink:   "reasoning text",
 			wantOutput:  "",
 		},
 		{
 			name:        "missing think tag but has end tag (active)",
 			input:       "reasoning text</think>output text",
 			thinkActive: true,
-			wantThink:   "reasoning text",
 			wantOutput:  "output text",
 		},
 		{
 			name:        "missing think tag but has end tag (inactive)",
 			input:       "reasoning text</think>output text",
 			thinkActive: false,
-			wantThink:   "",
 			wantOutput:  "reasoning text</think>output text",
 		},
 		{
 			name:        "missing think tag and unclosed (active)",
 			input:       "reasoning text",
 			thinkActive: true,
-			wantThink:   "reasoning text",
 			wantOutput:  "",
 		},
 		{
 			name:        "missing think tag and unclosed (inactive)",
 			input:       "reasoning text",
 			thinkActive: false,
-			wantThink:   "",
 			wantOutput:  "reasoning text",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotThink := extractThink(tt.input, tt.thinkActive)
-			if gotThink != tt.wantThink {
-				t.Errorf("extractThink(%q, %v) = %q, want %q", tt.input, tt.thinkActive, gotThink, tt.wantThink)
-			}
 			gotOutput := extractOutputText(tt.input, tt.thinkActive)
 			if gotOutput != tt.wantOutput {
 				t.Errorf("extractOutputText(%q, %v) = %q, want %q", tt.input, tt.thinkActive, gotOutput, tt.wantOutput)
