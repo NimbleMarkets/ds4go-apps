@@ -2,12 +2,14 @@ module github.com/NimbleMarkets/ds4go-apps
 
 go 1.26.3
 
+replace github.com/NimbleMarkets/ds4go => ../ds4-go
+
 require (
 	charm.land/bubbles/v2 v2.1.0
 	charm.land/bubbletea/v2 v2.0.7
 	charm.land/lipgloss/v2 v2.0.3
 	github.com/76creates/stickers v1.5.0
-	github.com/NimbleMarkets/ds4go v0.5.0
+	github.com/NimbleMarkets/ds4go v0.3.1-0.20260609131240-84238c4e9739
 	github.com/NimbleMarkets/ntcharts-svg v0.2.2
 	github.com/NimbleMarkets/ntcharts/v2 v2.2.0
 	github.com/NimbleMarkets/ntdiff v0.0.1
