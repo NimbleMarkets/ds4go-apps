@@ -42,11 +42,24 @@ type activeRay struct {
 // RenderAngled renders a perspective preview of s3 from a user-controllable orbit camera.
 // It uses CPU sphere tracing + simple Lambertian shading.
 func (r *Renderer) RenderAngled(s3 simplesdf.SDF3, name string, cp CameraParams, maxW, maxH int) (image.Image, image.Rectangle, error) {
+	return r.RenderAngledScale(s3, name, cp, maxW, maxH, 1)
+}
+
+// RenderAngledScale renders like RenderAngled at 1/downscale of the
+// resolution RenderAngled would pick (after both the pane budget and the
+// MaxEdge cap are applied). Sphere tracing cost scales with pixel count, so
+// downscale 3 is ~9x faster — used for interactive camera movement, with a
+// full-resolution pass once input settles. downscale values < 1 mean 1.
+func (r *Renderer) RenderAngledScale(s3 simplesdf.SDF3, name string, cp CameraParams, maxW, maxH, downscale int) (image.Image, image.Rectangle, error) {
 	if s3.Shader() == nil {
 		return nil, image.Rectangle{}, errors.New("nil SDF3 shader")
 	}
 
 	w, h := computeTargetSizeAngled(maxW, maxH, r.cfg.MaxEdge)
+	if downscale > 1 {
+		w = max(8, w/downscale)
+		h = max(8, h/downscale)
+	}
 	rect := image.Rect(0, 0, w, h)
 	img := image.NewNRGBA(rect)
 

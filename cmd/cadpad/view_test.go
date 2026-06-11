@@ -230,8 +230,12 @@ func TestMouseNavigation(t *testing.T) {
 	})
 	m = m5.(model)
 
-	if cmd5 != nil {
-		t.Error("expected nil command for coalesced request while rendering is in progress")
+	// The render itself coalesces (previewDirty) but the command is still
+	// non-nil: camera interaction always re-arms the full-res idle timer
+	// with the new camSeq, else the pending tick would be stale-dropped and
+	// no full-resolution pass would follow.
+	if cmd5 == nil {
+		t.Error("expected idle-timer command for coalesced camera request while rendering is in progress")
 	}
 	if !m.previewDirty {
 		t.Error("expected previewDirty to be true when a new request comes in during rendering")

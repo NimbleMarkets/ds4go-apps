@@ -5,6 +5,7 @@ import (
 	"math"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -126,6 +127,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.text != "" {
 			m.lastLuaOutput = strings.TrimSpace(msg.text)
+		}
+
+	case camIdleMsg:
+		// Camera input settled: replace the interactive low-res preview
+		// with a full-resolution render. Stale ticks (camera moved again,
+		// or a full-res render already happened) are dropped.
+		if msg.seq == m.camSeq && m.previewLowRes {
+			if cmd := m.refreshPreview(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		}
 
 	case statusMsg:
@@ -344,12 +355,12 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("left"))):
 			if m.proj == render.ProjAngle {
 				m.camAzimuth -= 0.2
-				return m, m.refreshPreview()
+				return m, m.refreshPreviewInteractive()
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("right"))):
 			if m.proj == render.ProjAngle {
 				m.camAzimuth += 0.2
-				return m, m.refreshPreview()
+				return m, m.refreshPreviewInteractive()
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("up"))):
 			if m.proj == render.ProjAngle {
@@ -358,7 +369,7 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 				if m.camElevation > maxElev {
 					m.camElevation = maxElev
 				}
-				return m, m.refreshPreview()
+				return m, m.refreshPreviewInteractive()
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("down"))):
 			if m.proj == render.ProjAngle {
@@ -367,27 +378,27 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 				if m.camElevation < -maxElev {
 					m.camElevation = -maxElev
 				}
-				return m, m.refreshPreview()
+				return m, m.refreshPreviewInteractive()
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("shift+left"))):
 			if m.proj == render.ProjAngle {
 				m.camPanX -= 1.0
-				return m, m.refreshPreview()
+				return m, m.refreshPreviewInteractive()
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("shift+right"))):
 			if m.proj == render.ProjAngle {
 				m.camPanX += 1.0
-				return m, m.refreshPreview()
+				return m, m.refreshPreviewInteractive()
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("shift+up"))):
 			if m.proj == render.ProjAngle {
 				m.camPanY += 1.0
-				return m, m.refreshPreview()
+				return m, m.refreshPreviewInteractive()
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("shift+down"))):
 			if m.proj == render.ProjAngle {
 				m.camPanY -= 1.0
-				return m, m.refreshPreview()
+				return m, m.refreshPreviewInteractive()
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("+", "="))):
 			if m.proj == render.ProjAngle {
@@ -395,7 +406,7 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 				if m.camZoom < 0.1 {
 					m.camZoom = 0.1
 				}
-				return m, m.refreshPreview()
+				return m, m.refreshPreviewInteractive()
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("-", "_"))):
 			if m.proj == render.ProjAngle {
@@ -403,7 +414,7 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 				if m.camZoom > 10.0 {
 					m.camZoom = 10.0
 				}
-				return m, m.refreshPreview()
+				return m, m.refreshPreviewInteractive()
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("0"))):
 			if m.proj == render.ProjAngle {
@@ -412,7 +423,7 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 				m.camZoom = 1.0
 				m.camPanX = 0
 				m.camPanY = 0
-				return m, m.refreshPreview()
+				return m, m.refreshPreviewInteractive()
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("p"))):
 			return m, m.refreshPreview()
@@ -658,7 +669,7 @@ func (m model) handleMouseMotion(msg tea.MouseMotionMsg) (model, tea.Cmd) {
 		}
 	}
 
-	return m, m.refreshPreview()
+	return m, m.refreshPreviewInteractive()
 }
 
 func (m model) handleMouseWheel(msg tea.MouseWheelMsg) (model, tea.Cmd) {
@@ -673,19 +684,45 @@ func (m model) handleMouseWheel(msg tea.MouseWheelMsg) (model, tea.Cmd) {
 			if m.camZoom < 0.1 {
 				m.camZoom = 0.1
 			}
-			return m, m.refreshPreview()
+			return m, m.refreshPreviewInteractive()
 		} else if msg.Button == tea.MouseWheelDown {
 			m.camZoom *= 1.1
 			if m.camZoom > 10.0 {
 				m.camZoom = 10.0
 			}
-			return m, m.refreshPreview()
+			return m, m.refreshPreviewInteractive()
 		}
 	}
 	return m, nil
 }
 
+// camIdleDelay is how long camera input must be quiet before the low-res
+// interactive preview is replaced by a full-resolution render.
+const camIdleDelay = 200 * time.Millisecond
+
+// refreshPreview requests a full-resolution preview render (coalescing with
+// any render already in flight).
 func (m *model) refreshPreview() tea.Cmd {
+	m.previewLowRes = false
+	return m.requestPreview()
+}
+
+// refreshPreviewInteractive requests a reduced-resolution preview for a
+// camera movement — sphere tracing cost scales with pixel count, so the
+// low-res pass keeps orbit/zoom/pan responsive — and arms an idle timer
+// that triggers the full-resolution render once input settles.
+func (m *model) refreshPreviewInteractive() tea.Cmd {
+	m.previewLowRes = true
+	m.camSeq++
+	seq := m.camSeq
+	idle := tea.Tick(camIdleDelay, func(time.Time) tea.Msg { return camIdleMsg{seq: seq} })
+	if cmd := m.requestPreview(); cmd != nil {
+		return tea.Batch(cmd, idle)
+	}
+	return idle
+}
+
+func (m *model) requestPreview() tea.Cmd {
 	if m.renderingPreview {
 		m.previewDirty = true
 		return nil

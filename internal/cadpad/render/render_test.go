@@ -169,7 +169,7 @@ func TestRendererInvalidate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	// Because of cache, img1 and img2 should be functionally equivalent.
 	// Now invalidate "sphere1"
 	r.Invalidate("sphere1")
@@ -185,4 +185,29 @@ func TestRendererInvalidate(t *testing.T) {
 	_ = img1
 	_ = img2
 	_ = img3
+}
+
+// RenderAngledScale must shrink the output even when MaxEdge (not the pane
+// budget) is the binding constraint — the downscale exists to cut sphere
+// tracing cost during interactive camera moves.
+func TestRenderAngledScaleShrinksWhenMaxEdgeBinds(t *testing.T) {
+	r, err := NewRenderer(PreviewConfig{MaxEdge: 96, EvalBuffer: 4096})
+	if err != nil {
+		t.Fatalf("renderer: %v", err)
+	}
+	s := simplesdf.Sphere(5)
+
+	cp := CameraParams{Zoom: 1}
+	full, _, err := r.RenderAngledScale(s, "ball", cp, 800, 400, 1)
+	if err != nil {
+		t.Fatalf("full render: %v", err)
+	}
+	low, _, err := r.RenderAngledScale(s, "ball", cp, 800, 400, 3)
+	if err != nil {
+		t.Fatalf("low render: %v", err)
+	}
+	fb, lb := full.Bounds(), low.Bounds()
+	if lb.Dx()*2 >= fb.Dx() || lb.Dy()*2 >= fb.Dy() {
+		t.Errorf("scale=3 render %v not meaningfully smaller than full %v", lb, fb)
+	}
 }
