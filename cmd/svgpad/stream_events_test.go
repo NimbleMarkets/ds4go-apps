@@ -144,3 +144,36 @@ func TestMalformedRetrySurfacesStatus(t *testing.T) {
 		t.Errorf("statusText = %q, want a tool-syntax retry note", m.statusText)
 	}
 }
+
+// Regression: a turn that hits the driver's round cap (ErrMaxRounds) with an
+// invalid or missing SVG must still enter the auto-correct gate — the cap is
+// a completed-turn condition, not a generation failure. (Previously the gate
+// keyed on msg.err == nil and silently saved the broken draft.)
+func TestMaxRoundsStillEntersAutoCorrectGate(t *testing.T) {
+	m := testModel()
+	m.generating = true
+	m.workDir = t.TempDir() // no draft.svg -> no SVG markup found
+	m.history = []ds4.ChatMessage{{Role: "user", Content: "draw"}}
+
+	m = update(t, m, turnDoneMsg{
+		result: bubble.RunResult{
+			Assistant: ds4.ChatMessage{Role: "assistant", ToolCalls: []ds4.ToolCall{{Name: "svg_append"}}},
+			History:   []ds4.ChatMessage{{Role: "user", Content: "draw"}},
+		},
+		err: bubble.ErrMaxRounds,
+	})
+
+	if m.autoCorrectCount != 1 {
+		t.Fatalf("autoCorrectCount = %d, want 1 (gate must run after ErrMaxRounds)", m.autoCorrectCount)
+	}
+	if !m.generating {
+		t.Error("generating = false, want a correction turn in flight")
+	}
+	if !strings.Contains(m.statusText, "Fixing SVG (1/3)") {
+		t.Errorf("statusText = %q, want Fixing SVG (1/3)", m.statusText)
+	}
+	last := m.history[len(m.history)-1]
+	if last.Role != "user" || !strings.Contains(last.Content, "invalid") {
+		t.Errorf("missing auto-correct feedback turn, last = %+v", last)
+	}
+}

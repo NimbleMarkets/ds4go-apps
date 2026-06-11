@@ -1455,7 +1455,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Auto-correction: if SVG is missing or invalid, feed back error
 		// and rerun the whole driver turn (the outer validation gate —
 		// app-level semantics on top of the library's DSML recovery).
-		if m.autoCorrectCount < m.maxAutoCorrect && msg.err == nil {
+		// Gate on genErr, not msg.err: ErrMaxRounds is a completed turn
+		// whose draft still deserves correction attempts, while real
+		// failures (including a user abort) carry through genErr.
+		if m.autoCorrectCount < m.maxAutoCorrect && genErr == nil {
 			var v string
 			if len(svgData) == 0 {
 				v = "no SVG markup found in the draft file or in your response"
@@ -1686,7 +1689,14 @@ func (m model) runTurn(ctx context.Context, ch chan<- tea.Msg) {
 	})
 
 	res, err := driver.RunWithPrompt(ctx, m.systemPrompt(), m.history)
-	ch <- turnDoneMsg{result: res, err: err, ctxPos: m.session.Pos()}
+	// The session can be nil when a turn starts against a released engine
+	// (e.g. an auto-correct restart racing an `x` release); the driver
+	// already reported the error, so just skip the position read.
+	ctxPos := 0
+	if m.session != nil {
+		ctxPos = m.session.Pos()
+	}
+	ch <- turnDoneMsg{result: res, err: err, ctxPos: ctxPos}
 }
 
 func (m model) systemPrompt() string {
