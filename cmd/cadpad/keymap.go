@@ -19,6 +19,7 @@ func (m model) keymap() editmode.Keymap {
 		{Keys: "s", Desc: "save (json + timestamped .lua)"},
 		{Keys: "r", Desc: "refresh"},
 		{Keys: "pgup/pgdown", Desc: "browse prev .lua files"},
+		{Keys: "v", Desc: "view lua source"},
 		{Keys: "t", Desc: "thinking"},
 		{Keys: "ctrl+n", Desc: "log"},
 		{Keys: "?", Desc: "help"},

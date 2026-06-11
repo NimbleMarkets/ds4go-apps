@@ -212,6 +212,25 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Source overlay is modal.
+	if m.showSource {
+		switch msg.String() {
+		case "ctrl+c", "ctrl+q":
+			return m, tea.Quit
+		case "esc", "v":
+			m.showSource = false
+		case "up", "k":
+			m.sourceTop = m.sourceScrollBy(-1)
+		case "down", "j":
+			m.sourceTop = m.sourceScrollBy(1)
+		case "pgup":
+			m.sourceTop = m.sourceScrollBy(-m.sourcePageSize())
+		case "pgdown":
+			m.sourceTop = m.sourceScrollBy(m.sourcePageSize())
+		}
+		return m, nil
+	}
+
 	// Global quit / log toggle.
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c", "q"))):
@@ -292,6 +311,9 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 			state = "shown"
 		}
 		m.status = "LLM output box " + state
+		return m, nil
+	case key.Matches(msg, key.NewBinding(key.WithKeys("v"))):
+		m.toggleSourceView()
 		return m, nil
 	case key.Matches(msg, key.NewBinding(key.WithKeys("L"))):
 		m.showLuaOutput = !m.showLuaOutput

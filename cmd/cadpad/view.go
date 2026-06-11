@@ -39,6 +39,9 @@ func (m model) View() tea.View {
 	if m.showLog {
 		return tea.NewView(m.logOverlay())
 	}
+	if m.showSource {
+		return tea.NewView(m.sourceOverlay())
+	}
 	if m.showHelp {
 		v := tea.NewView(m.helpView())
 		v.MouseMode = tea.MouseModeCellMotion
@@ -412,6 +415,7 @@ Viewport focus
   p             refresh preview of current
   r             clear render cache + refresh
   pgup/pgdown   browse previous .lua files
+  v             view active .lua source (syntax highlighted)
 
 Box focus (LLM output / lua output)
   ↑ / ↓         scroll content

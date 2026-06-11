@@ -120,6 +120,12 @@ type model struct {
 	showThinking  bool
 	showLuaOutput bool
 
+	// Source overlay ('v'): highlighted lines of the active lua script.
+	showSource  bool
+	sourceName  string
+	sourceLines []string
+	sourceTop   int
+
 	focus       focusRegion
 	thinkScroll int
 	luaScroll   int
