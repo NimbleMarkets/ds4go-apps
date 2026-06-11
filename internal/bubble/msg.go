@@ -5,6 +5,8 @@
 // glyphpad, and cadpad.
 package bubble
 
+import "github.com/NimbleMarkets/ds4go/dsml"
+
 // TokenMsg carries one token of generated text from the model.
 type TokenMsg string
 
@@ -12,6 +14,13 @@ type TokenMsg string
 type DoneMsg struct {
 	Err    error
 	CtxPos int // session token position at completion
+}
+
+// StreamEventMsg carries one live dsml.StreamEvent from a generation into
+// the Bubble Tea update loop. Unlike TokenMsg (raw text, droppable), hosts
+// accumulate these deltas, so senders should block rather than drop.
+type StreamEventMsg struct {
+	Event dsml.StreamEvent
 }
 
 // ToolRoundMsg indicates that tool calls were executed and another

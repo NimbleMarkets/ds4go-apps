@@ -2,6 +2,7 @@ package bubble
 
 import (
 	"github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go/dsml"
 )
 
 // Event is the base interface for all observable events during generation.
@@ -52,6 +53,24 @@ type ErrorEvent struct {
 }
 
 func (ErrorEvent) event() {}
+
+// StreamEvent forwards one live dsml.StreamEvent from the turn's stream
+// decoder: reasoning/content deltas live, tool-call events once the
+// enclosing block validates.
+type StreamEvent struct {
+	Event dsml.StreamEvent
+}
+
+func (StreamEvent) event() {}
+
+// MalformedRetryEvent signals that an assistant turn degraded to plain
+// content because its DSML could not be parsed, and the driver is feeding
+// the model a syntax-error tool turn for one consecutive retry.
+type MalformedRetryEvent struct {
+	Reason string
+}
+
+func (MalformedRetryEvent) event() {}
 
 // For custom side-effect logging (very useful for cadpad's Lua case)
 type LogEvent struct {
