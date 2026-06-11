@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/render"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/world"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
@@ -284,5 +285,26 @@ func TestMouseNavigation(t *testing.T) {
 
 	if m.camZoom == baselineZoom {
 		t.Error("expected camZoom to change after scroll up")
+	}
+}
+
+// Regression: toolDoneMsg appends the assistant's final text to toolHistory
+// verbatim, and a multi-line markdown summary rendered into the one-row
+// footer pushed the whole layout past the terminal height (TUI shear).
+func TestFooterStatusLineFlattensMultilineHistory(t *testing.T) {
+	m := model{
+		width:  80,
+		status: "tool complete · saved cadpad.20260611_113657.lua",
+		toolHistory: []string{
+			`tool: cad_bbox args={"name": "pyramid"}`,
+			"I've created a square pyramid of spheres with 4 layers:\n\n- **Layer 1 (bottom)**: 4x4 grid\n- **Layer 2**: 3x3 grid",
+		},
+	}
+	line := m.footerStatusLine()
+	if strings.Contains(line, "\n") {
+		t.Fatalf("footer status line contains newlines: %q", line)
+	}
+	if w := lipgloss.Width(line); w > m.width {
+		t.Errorf("footer status line width = %d, want <= %d", w, m.width)
 	}
 }

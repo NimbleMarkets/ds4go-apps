@@ -138,8 +138,8 @@ func (m model) viewportInnerSize() (cols, rows int) {
 	listW := max(minListW, m.width/5)
 	propsW := max(minPropsW, m.width/5)
 	viewW := max(minViewW, m.width-listW-propsW-4)
-	cols = max(8, viewW-2)       // subtract border
-	rows = max(6, m.bodyH()-3)   // subtract border + header line
+	cols = max(8, viewW-2)     // subtract border
+	rows = max(6, m.bodyH()-3) // subtract border + header line
 	return cols, rows
 }
 
@@ -160,7 +160,7 @@ func (m model) objectsList(w int) string {
 			pfx = "▶ "
 		}
 		line := pfx + n
-		b.WriteString(style.Width(w - 2).Render(line) + "\n")
+		b.WriteString(style.Width(w-2).Render(line) + "\n")
 	}
 	return lipgloss.NewStyle().Width(w).MaxHeight(m.bodyH()).Render(b.String())
 }
@@ -346,26 +346,48 @@ func (m model) helpLine() string {
 	return dimStyle.Render(" " + m.keymap().FooterText(m.input.Focused()))
 }
 
-func (m model) footerView() string {
-	inputView := m.input.View()
+// flattenLine collapses all whitespace runs (including newlines) to single
+// spaces so a string can safely occupy one terminal row.
+func flattenLine(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+// footerStatusLine renders the one-row status + recent-tool-history bar.
+// History entries can carry full multi-line model output (toolDoneMsg
+// appends the assistant's final text), so every part is flattened and the
+// line truncated — one stray newline here multiplies the footer's height
+// and shears the whole layout.
+func (m model) footerStatusLine() string {
 	hist := ""
 	if len(m.toolHistory) > 0 {
-		hist = dimStyle.Render(" " + strings.Join(m.toolHistory[max(0, len(m.toolHistory)-2):], " | "))
+		last := m.toolHistory[max(0, len(m.toolHistory)-2):]
+		flat := make([]string, 0, len(last))
+		for _, h := range last {
+			flat = append(flat, flattenLine(h))
+		}
+		hist = dimStyle.Render(" " + strings.Join(flat, " | "))
 	}
+	status := okStyle.Render(flattenLine(m.status))
+	if m.lifecycle.status == engineinit.StatusError {
+		status = errStyle.Render("engine: " + flattenLine(m.lifecycle.err.Error()))
+	}
+	line := status + hist
+	if m.width > 0 {
+		line = ansi.Truncate(line, m.width-1, "…")
+	}
+	return line
+}
+
+func (m model) footerView() string {
+	inputView := m.input.View()
 	errLine := ""
 	if m.lastErr != "" {
-		errLine = errStyle.Render(" " + ansi.Truncate(m.lastErr, m.width-2, "…"))
+		errLine = errStyle.Render(" " + ansi.Truncate(flattenLine(m.lastErr), m.width-2, "…"))
 	}
-	status := okStyle.Render(m.status)
-	if m.lifecycle.status == engineinit.StatusError {
-		status = errStyle.Render("engine: " + m.lifecycle.err.Error())
-	}
-
-	line := status + hist
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		inputView,
-		lipgloss.NewStyle().Width(m.width).Render(line),
+		lipgloss.NewStyle().Width(m.width).Render(m.footerStatusLine()),
 		errLine,
 	)
 }
