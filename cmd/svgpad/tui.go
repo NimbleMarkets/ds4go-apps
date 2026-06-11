@@ -3,11 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"errors"
 	"fmt"
 	"image"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -23,6 +21,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	ds4 "github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go/dsml"
+
 	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
 	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
@@ -67,6 +67,19 @@ type submitMsg struct{ text string }
 type yoloSubmitMsg struct{ text string }
 type loadEntryMsg struct{}
 
+// Turn-runner messages: the runTurn goroutine forwards GenerationDriver
+// events over the bubble.Start channel as these msgs. turnDoneMsg is the
+// terminal message of a run.
+type roundStartedMsg struct{ round int }
+type toolCallsMsg struct{ calls []ds4.ToolCall }
+type toolResultsMsg struct{ results []ds4.ChatMessage }
+type malformedRetryMsg struct{ reason string }
+type turnDoneMsg struct {
+	result bubble.RunResult
+	err    error
+	ctxPos int
+}
+
 // engineReadyMsg is delivered from the goroutine that opens the ds4 engine
 // and session. The model holds nil engine/session until this lands.
 type engineReadyMsg engineinit.Result
@@ -74,6 +87,11 @@ type engineReadyMsg engineinit.Result
 // engineReleasedMsg is delivered after a releaseEngineCmd finishes
 // closing the session and engine.
 type engineReleasedMsg struct{}
+
+// kittyAutoToggleMsg triggers a one-time check to enable Kitty graphics
+// when the terminal probe has completed. Fired once from Init, after the
+// probe's 250ms timeout window, so a later manual 'g' toggle sticks.
+type kittyAutoToggleMsg struct{}
 
 // cachedWidget wraps the rasterized image, document renderer, and document info
 // to allow instant rendering and vector-sharp zooming.
@@ -262,6 +280,21 @@ type model struct {
 	maxToolRounds int
 	toolCalls     []toolCallEntry
 
+	// Streaming-turn state, reset per round. liveCalls maps the decoder's
+	// per-block tool-call Index to panel entries; roundCallStart marks where
+	// this round's entries begin in toolCalls; pendingCalls is the round's
+	// executing batch (from toolCallsMsg).
+	liveCalls      []int
+	roundCallStart int
+	pendingCalls   []ds4.ToolCall
+
+	// Live preview state: previewBase is the draft content at the last
+	// round boundary; previewPending holds validated svg_append chunks
+	// streamed since then; previewTick throttles re-rasterization.
+	previewBase    string
+	previewPending []string
+	previewTick    int
+
 	totalToolCalls  int
 	totalToolRounds int
 	toolCallCounts  map[string]int // per-tool cumulative call count
@@ -370,9 +403,16 @@ func newModel(app *appinit.App) model {
 
 	reg.RegisterFunc(ds4.ToolSchema{
 		Name:        "svg_clear",
-		Description: "Clear the current draft SVG file. Call this before starting to write a new SVG.",
+		Description: "Clear the draft SVG file. Only valid while the draft is empty; once the draft has content, clearing is refused — fix it with svg_replace or svg_replace_lines instead.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
 	}, func(ctx context.Context, args json.RawMessage) (string, error) {
+		// Guard against the mid-correction death spiral: a model that
+		// clears a flawed draft instead of editing it usually never
+		// rebuilds, and the turn ends with no SVG at all.
+		if data, err := os.ReadFile(draftPath); err == nil && len(strings.TrimSpace(string(data))) > 0 {
+			lines := strings.Count(string(data), "\n") + 1
+			return fmt.Sprintf("Error: the draft already has content (%d lines); clearing is disabled mid-job. Fix specific issues with svg_replace or svg_replace_lines (you may replace all %d lines in one svg_replace_lines call).", lines, lines), nil
+		}
 		err := os.WriteFile(draftPath, nil, 0644)
 		if err != nil {
 			return fmt.Sprintf("Error clearing draft: %v", err), nil
@@ -382,9 +422,18 @@ func newModel(app *appinit.App) model {
 
 	reg.RegisterFunc(ds4.ToolSchema{
 		Name:        "svg_read",
-		Description: "Read and return the entire contents of the draft SVG file.",
-		Parameters:  json.RawMessage(`{"type":"object","properties":{}}`),
+		Description: `Read the draft SVG file with line numbers ("NNN | content"). Optional start_line/end_line (1-indexed, inclusive) read just a range. The "NNN | " prefix is display-only and NOT part of the file: never include it in svg_replace targets or replacement text.`,
+		Parameters:  json.RawMessage(`{"type":"object","properties":{"start_line":{"type":"integer","description":"First line to read (1-indexed, optional; defaults to 1)"},"end_line":{"type":"integer","description":"Last line to read (inclusive, optional; defaults to end of file)"}}}`),
 	}, func(ctx context.Context, args json.RawMessage) (string, error) {
+		var params struct {
+			StartLine int `json:"start_line"`
+			EndLine   int `json:"end_line"`
+		}
+		if len(args) > 0 {
+			// Tolerate absent/partial arguments; the zero values mean
+			// "whole file" via numberedLines clamping.
+			_ = json.Unmarshal(args, &params)
+		}
 		data, err := os.ReadFile(draftPath)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -392,7 +441,10 @@ func newModel(app *appinit.App) model {
 			}
 			return fmt.Sprintf("Error reading draft: %v", err), nil
 		}
-		return string(data), nil
+		if len(data) == 0 {
+			return "Draft file is empty.", nil
+		}
+		return numberedLines(string(data), params.StartLine, params.EndLine), nil
 	})
 
 	reg.RegisterFunc(ds4.ToolSchema{
@@ -563,6 +615,9 @@ func (m model) Init() tea.Cmd {
 	// model loaded.
 	var cmds []tea.Cmd
 	cmds = append(cmds, m.svgWidget.Init())
+	cmds = append(cmds, tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg {
+		return kittyAutoToggleMsg{}
+	}))
 	if m.entryIndex < 0 {
 		cmds = append(cmds, m.svgWidget.SetSVGData("placeholder.svg", []byte(placeholderSVG)))
 	}
@@ -585,6 +640,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
 				return loadEntryMsg{}
 			}))
+		}
+
+	case kittyAutoToggleMsg:
+		if cmd := m.autoEnableKittyCmd(); cmd != nil {
+			m.logger.Printf("[KITTY] auto-enabling Kitty graphics (probe confirmed support)")
+			cmds = append(cmds, cmd)
 		}
 
 	case loadEntryMsg:
@@ -1200,7 +1261,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinkText = ""
 		m.outputText = ""
 		m.generating = true
-		m.statusText = fmt.Sprintf("Generate [%d/%d]...", m.toolRounds, m.maxToolRounds)
+		m.statusText = m.roundStatus()
 		m.errText = ""
 		m.thinkAutoScroll = true
 		m.genStart = time.Now() // per-round timer resets, jobStart does not
@@ -1236,7 +1297,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinnerFrame++
 			if !m.genStart.IsZero() {
 				round := fmtDuration(time.Since(m.genStart))
-				if !m.jobStart.IsZero() && m.toolRounds > 0 {
+				if !m.jobStart.IsZero() && (m.toolRounds > 0 || m.autoCorrectCount > 0) {
 					total := fmtDuration(time.Since(m.jobStart))
 					m.elapsedText = round + " / " + total
 				} else {
@@ -1258,6 +1319,88 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.history = nil
 			cmds = append(cmds, func() tea.Msg { return submitMsg{msg.text} })
 		}
+
+	case bubble.StreamEventMsg:
+		if cmd := m.applyStreamEvent(msg.Event); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+		cmds = append(cmds, m.gen.Wait())
+
+	case roundStartedMsg:
+		if msg.round > 0 {
+			// Per-round panel/timer reset, mirroring the old ToolRoundMsg
+			// handler: jobStart keeps the whole turn's clock.
+			m.thinkText = ""
+			m.outputText = ""
+			m.statusText = m.roundStatus()
+			m.errText = ""
+			m.thinkAutoScroll = true
+			m.genStart = time.Now()
+			m.firstTokenTime = time.Time{}
+			m.genEnd = time.Time{}
+			m.tokenCount = 0
+		}
+		m.liveCalls = nil
+		m.roundCallStart = len(m.toolCalls)
+		cmds = append(cmds, m.gen.Wait())
+
+	case toolCallsMsg:
+		m.pendingCalls = msg.calls
+		var names []string
+		for _, call := range msg.calls {
+			names = append(names, call.Name)
+			m.logger.Printf("[TOOL] arg %s=%q", call.Name, truncateString(call.Arguments, 500))
+		}
+		m.statusText = fmt.Sprintf("Running %s...", strings.Join(names, ", "))
+		m.logger.Printf("[TOOL] round=%d calls=%d", m.toolRounds+1, len(msg.calls))
+		cmds = append(cmds, m.gen.Wait())
+
+	case toolResultsMsg:
+		m.toolRounds++
+		m.totalToolRounds++
+		m.totalToolCalls += len(m.pendingCalls)
+		// Reconcile panel entries: stream events created entries for
+		// decoder-validated blocks; a truncation-repaired block executed
+		// without ever streaming, so create what is missing.
+		for len(m.toolCalls)-m.roundCallStart < len(m.pendingCalls) {
+			call := m.pendingCalls[len(m.toolCalls)-m.roundCallStart]
+			m.toolCalls = append(m.toolCalls, toolCallEntry{
+				name: call.Name,
+				args: truncateJSON(call.Arguments, 120),
+			})
+		}
+		for i, call := range m.pendingCalls {
+			m.toolCallCounts[call.Name]++
+			var res string
+			for _, r := range msg.results {
+				if r.ToolCallID == call.ID {
+					res = r.Content
+					break
+				}
+			}
+			entry := m.roundCallStart + i
+			if entry < len(m.toolCalls) {
+				m.toolCalls[entry].round = m.toolRounds
+				m.toolCalls[entry].result = truncateString(res, 120)
+			}
+			m.logger.Printf("[TOOL] result id=%s content=%q", call.ID, res)
+		}
+		m.pendingCalls = nil
+		// The draft file is authoritative between rounds: refresh the
+		// preview base and push an exact preview.
+		m.previewPending = nil
+		if data, err := os.ReadFile(filepath.Join(m.workDir, "draft.svg")); err == nil && len(data) > 0 {
+			m.previewBase = string(data)
+			if inc := extractIncrementalSVG(string(data)); inc != nil {
+				cmds = append(cmds, m.svgWidget.SetSVGData("incremental.svg", inc))
+			}
+		}
+		cmds = append(cmds, m.gen.Wait())
+
+	case malformedRetryMsg:
+		m.statusText = "Retrying tool syntax..."
+		m.logger.Printf("[DSML] malformed tool call: %s", msg.reason)
+		cmds = append(cmds, m.gen.Wait())
 
 	case bubble.DoneMsg:
 		m.generating = false
@@ -1351,8 +1494,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			content = string(m.rawBuf)
 		}
 		var svgData []byte
+		var svgFromDraft bool
 		if draftData, err := os.ReadFile(filepath.Join(m.workDir, "draft.svg")); err == nil && len(draftData) > 0 {
 			svgData = draftData
+			svgFromDraft = true
 		} else {
 			svgData = extractSVG(content)
 		}
@@ -1381,7 +1526,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.autoCorrectCount++
 				m.statusText = fmt.Sprintf("Fixing SVG (%d/%d) · %s", m.autoCorrectCount, m.maxAutoCorrect, v)
 				m.logger.Printf("[AUTOCORRECT] #%d error=%q", m.autoCorrectCount, v)
-				feedback := fmt.Sprintf("Your output was invalid: %s. Please correct this by using tools (svg_append, svg_replace) on the draft file, or by providing the corrected SVG.", v)
+				feedback := autoCorrectFeedback(v, svgData, svgFromDraft)
 				m.history = append(m.history, ds4.ChatMessage{Role: "user", Content: feedback})
 				cmds = append(cmds, func() tea.Msg { return bubble.ToolRoundMsg{} })
 				return m, tea.Batch(cmds...)
@@ -1483,6 +1628,60 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // ── generation ───────────────────────────────────────────────────────────────
 
+// applyStreamEvent folds one dsml.StreamEvent into panel/preview state and
+// returns a Cmd when the live preview should re-render. Reasoning and
+// content deltas stream live; tool-call events arrive once the enclosing
+// block has validated (the decoder buffers them), which with early stop is
+// the end of the round — the earliest point a validated chunk exists.
+func (m *model) applyStreamEvent(ev dsml.StreamEvent) tea.Cmd {
+	switch ev.Type {
+	case dsml.EventReasoningDelta:
+		m.thinkText += ev.Delta
+
+	case dsml.EventContentDelta:
+		m.outputText += ev.Delta
+		// Fallback live preview for models that emit bare SVG in text
+		// instead of svg_append calls.
+		if strings.Contains(m.outputText, "<svg") {
+			m.previewTick++
+			if strings.Contains(ev.Delta, "\n") || m.previewTick%15 == 0 {
+				if inc := extractIncrementalSVG(m.outputText); inc != nil {
+					return m.svgWidget.SetSVGData("incremental.svg", inc)
+				}
+			}
+		}
+
+	case dsml.EventToolCallStart:
+		m.toolCalls = append(m.toolCalls, toolCallEntry{
+			round: m.toolRounds + 1,
+			name:  ev.Name,
+		})
+		m.liveCalls = append(m.liveCalls, len(m.toolCalls)-1)
+
+	case dsml.EventToolCallArgumentsDelta:
+		if ev.Index < len(m.liveCalls) {
+			entry := m.liveCalls[ev.Index]
+			m.toolCalls[entry].args = truncateJSON(m.toolCalls[entry].args+ev.Delta, 120)
+		}
+
+	case dsml.EventToolCallEnd:
+		if ev.Index >= len(m.liveCalls) {
+			break
+		}
+		entry := m.liveCalls[ev.Index]
+		m.toolCalls[entry].args = truncateJSON(ev.Arguments, 120)
+		if m.toolCalls[entry].name == "svg_append" {
+			if chunk := chunkFromArgs(ev.Arguments); chunk != "" {
+				m.previewPending = append(m.previewPending, chunk)
+			}
+			if inc := previewSVG(m.previewBase, m.previewPending); inc != nil {
+				return m.svgWidget.SetSVGData("incremental.svg", inc)
+			}
+		}
+	}
+	return nil
+}
+
 func (m model) generate(ctx context.Context, ch chan<- tea.Msg) {
 	defer close(ch)
 
@@ -1551,20 +1750,21 @@ func (m model) generateContinue(ctx context.Context, ch chan<- tea.Msg) {
 func (m model) systemPrompt() string {
 	base := `You are an SVG artist with access to tools for drafting, editing, and validating SVGs:
 
-  svg_clear() -> "Draft cleared."
-  svg_read() -> Returns current draft content.
+  svg_clear() -> "Draft cleared." (refused once the draft has content; edit instead of clearing)
+  svg_read(start_line?: int, end_line?: int) -> Draft lines, numbered "NNN | content".
   svg_append(chunk: string) -> "Chunk appended successfully."
   svg_replace(target: string, replacement: string) -> "Target substring replaced successfully."
   svg_replace_lines(start_line: int, end_line: int, replacement: string) -> "Lines replaced successfully."
-  svg_validate() -> "Valid: …" on success, "Invalid:\n<diagnostic>" on failure.
+  svg_validate() -> "Valid: …" on success, "Invalid:\n<diagnostic>" on failure. Checks XML syntax AND renders with the real rasterizer.
+
+Line numbers in svg_read output and svg_validate diagnostics match svg_replace_lines arguments. The "NNN | " prefix is display-only: NEVER include it in svg_append chunks or svg_replace targets/replacements.
 
 Workflow for every user request:
 
-1. At the start of a new request, clear the draft file using svg_clear. (Do NOT call svg_clear if you are correcting, editing, or validating an existing draft).
-2. Construct the SVG by appending chunks using svg_append.
-3. Validate the drafted SVG by calling svg_validate.
-4. If it returns "Invalid:", read the diagnostic, read the current draft using svg_read (if needed), use svg_replace or svg_replace_lines to edit/correct specific parts of the SVG, and call svg_validate again. Do NOT clear the draft.
-5. When svg_validate returns "Valid:", emit your final response. You do not need to output the complete SVG in your text response if it has been written to the draft, but confirm completion to the user.
+1. At the start of a new request the draft is already empty; construct the SVG by appending chunks using svg_append. (Do NOT call svg_clear if you are correcting, editing, or validating an existing draft — it will be refused.)
+2. Validate the drafted SVG by calling svg_validate.
+3. If it returns "Invalid:", read the diagnostic — it includes the error line number and a numbered snippet. Use svg_replace or svg_replace_lines to make a MINIMAL fix to just those lines (use svg_read on a small range for more context if needed), then call svg_validate again. Do NOT clear the draft and do NOT rebuild it from scratch.
+4. When svg_validate returns "Valid:", emit your final response. You do not need to output the complete SVG in your text response if it has been written to the draft, but confirm completion to the user.
 
 The SVG must include xmlns="http://www.w3.org/2000/svg" and be self-contained.
 
@@ -1716,84 +1916,7 @@ func extractOutputText(s string, thinkActive bool) string {
 	return formatDSMLStream(s)
 }
 
-// validateSVG checks well-formedness and returns a short status string.
-func validateSVG(data []byte) string {
-	if len(data) == 0 {
-		return "empty"
-	}
-	trim := strings.TrimSpace(string(data))
-	if !strings.HasPrefix(trim, "<svg") {
-		return "missing <svg root"
-	}
-	decoder := xml.NewDecoder(strings.NewReader(trim))
-	for {
-		tok, err := decoder.Token()
-		if err != nil {
-			return "parse error: " + err.Error()
-		}
-		if tok == nil {
-			break
-		}
-		if _, ok := tok.(xml.EndElement); ok {
-			if decoder.InputOffset() >= int64(len(trim))-10 {
-				break
-			}
-		}
-	}
-	return "valid"
-}
-
-// validateSVGDetailed performs thorough validation and returns a detailed report
-// suitable for feeding back to the LLM via a tool result.
-func validateSVGDetailed(svg string) string {
-	svg = strings.TrimSpace(svg)
-	if svg == "" {
-		return "Error: empty SVG string"
-	}
-
-	var issues []string
-
-	if !strings.HasPrefix(svg, "<svg") {
-		issues = append(issues, "Missing <svg root element. The document must start with <svg.")
-	}
-	hasNS := strings.Contains(svg, `xmlns="http://www.w3.org/2000/svg"`) || strings.Contains(svg, `xmlns='http://www.w3.org/2000/svg'`)
-	if !hasNS {
-		issues = append(issues, `Missing xmlns="http://www.w3.org/2000/svg" attribute on the root <svg> element.`)
-	}
-
-	decoder := xml.NewDecoder(strings.NewReader(svg))
-	var depth int
-	for {
-		tok, err := decoder.Token()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			issues = append(issues, fmt.Sprintf("XML parse error at byte %d: %v", decoder.InputOffset(), err))
-			break
-		}
-		if tok == nil {
-			break
-		}
-		switch t := tok.(type) {
-		case xml.StartElement:
-			depth++
-		case xml.EndElement:
-			depth--
-			if depth < 0 {
-				issues = append(issues, fmt.Sprintf("Unexpected closing tag </%s> at byte %d", t.Name.Local, decoder.InputOffset()))
-			}
-		}
-	}
-	if depth != 0 {
-		issues = append(issues, fmt.Sprintf("Unclosed tags: depth=%d at end of document", depth))
-	}
-
-	if len(issues) == 0 {
-		return "Valid: well-formed XML with correct SVG root element and namespace."
-	}
-	return "Invalid:\n" + strings.Join(issues, "\n")
-}
+// validateSVG and validateSVGDetailed live in validate.go.
 
 // ── metrics ──────────────────────────────────────────────────────────────────
 
@@ -1858,6 +1981,18 @@ func (m model) headerMetrics() string {
 		}
 	}
 	return strings.Join(parts, " · ")
+}
+
+// autoEnableKittyCmd switches the SVG widget from glyph to Kitty rendering
+// when the startup probe confirmed support. No-op if the probe resolved
+// Unsupported (or hasn't resolved) or the widget is already in Kitty mode,
+// so it never undoes a state the user chose.
+func (m *model) autoEnableKittyCmd() tea.Cmd {
+	if m.svgWidget.KittySupported() == picture.KittyCapabilitySupported &&
+		m.svgWidget.RenderMode() == svg.RenderGlyph {
+		return m.svgWidget.ToggleRenderMode()
+	}
+	return nil
 }
 
 // kittyBadge renders the header status pill indicating whether Kitty graphics is supported.
@@ -2741,6 +2876,18 @@ func truncateJSON(s string, max int) string {
 	return s[:max-3] + "..."
 }
 
+// roundStatus is the status line shown when a generation round starts.
+// Auto-correct retries get their own label: they restart the per-segment
+// tool-round counter, so a bare "Generate [0/10]" minutes into a job would
+// look like a stuck counter rather than a retry.
+func (m model) roundStatus() string {
+	if m.autoCorrectCount > 0 {
+		return fmt.Sprintf("Fixing SVG (%d/%d) [%d/%d]...",
+			m.autoCorrectCount, m.maxAutoCorrect, m.toolRounds, m.maxToolRounds)
+	}
+	return fmt.Sprintf("Generate [%d/%d]...", m.toolRounds, m.maxToolRounds)
+}
+
 func fmtDuration(d time.Duration) string {
 	if d <= 0 {
 		return "0s"
@@ -2748,13 +2895,17 @@ func fmtDuration(d time.Duration) string {
 	return d.Round(time.Second).String()
 }
 
+// The leading \s* on each tag pattern swallows the raw newlines the model
+// emits between DSML tags; each replacement supplies exactly one leading
+// newline instead, so the rendered block has no blank lines. reParamStart
+// also swallows trailing whitespace so the value starts inline after "= ".
 var (
-	reToolCallsStart = regexp.MustCompile(`(?i)<(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?tool_calls>`)
-	reToolCallsEnd   = regexp.MustCompile(`(?i)</(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?tool_calls>`)
-	reInvokeStart    = regexp.MustCompile(`(?i)<(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?invoke(?:\s+[^>]*?)?\s+(?i:name)\s*=\s*(?:"([^"]*)"|'([^']*)')(?:\s+[^>]*?)?>`)
-	reInvokeEnd      = regexp.MustCompile(`(?i)</(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?invoke>`)
-	reParamStart     = regexp.MustCompile(`(?i)<(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?parameter(?:\s+[^>]*?)?\s+(?i:name)\s*=\s*(?:"([^"]*)"|'([^']*)')(?:\s+[^>]*?)?>`)
-	reParamEnd       = regexp.MustCompile(`(?i)</(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?parameter>`)
+	reToolCallsStart = regexp.MustCompile(`(?i)\s*<(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?tool_calls>`)
+	reToolCallsEnd   = regexp.MustCompile(`(?i)\s*</(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?tool_calls>`)
+	reInvokeStart    = regexp.MustCompile(`(?i)\s*<(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?invoke(?:\s+[^>]*?)?\s+(?i:name)\s*=\s*(?:"([^"]*)"|'([^']*)')(?:\s+[^>]*?)?>`)
+	reInvokeEnd      = regexp.MustCompile(`(?i)\s*</(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?invoke>`)
+	reParamStart     = regexp.MustCompile(`(?i)\s*<(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?parameter(?:\s+[^>]*?)?\s+(?i:name)\s*=\s*(?:"([^"]*)"|'([^']*)')(?:\s+[^>]*?)?>\s*`)
+	reParamEnd       = regexp.MustCompile(`(?i)\s*</(?:[｜|]DSML[｜|]|DSML[｜|]|[｜|]DS|DS)?parameter>`)
 )
 
 var (
@@ -2777,8 +2928,8 @@ func formatDSMLStream(text string) string {
 	}
 
 	// 1. Replace tool calls start/end
-	text = reToolCallsStart.ReplaceAllString(text, "\n"+dsmlToolBlockStyle.Render("🔧 [Calling Tools]")+"\n")
-	text = reToolCallsEnd.ReplaceAllString(text, "\n"+dsmlToolBlockStyle.Render("🔧 [Tools Completed]")+"\n")
+	text = reToolCallsStart.ReplaceAllString(text, "\n"+dsmlToolBlockStyle.Render("🔧 [Calling Tools]"))
+	text = reToolCallsEnd.ReplaceAllString(text, "\n"+dsmlToolBlockStyle.Render("🔧 [Tools Completed]"))
 
 	// 2. Replace invoke start/end
 	text = reInvokeStart.ReplaceAllStringFunc(text, func(m string) string {
@@ -2792,7 +2943,7 @@ func formatDSMLStream(text string) string {
 			}
 		}
 		if name != "" {
-			return fmt.Sprintf("  👉 %s\n", dsmlInvokeStyle.Render("Invoke: "+name))
+			return fmt.Sprintf("\n  👉 %s", dsmlInvokeStyle.Render(name))
 		}
 		return m
 	})
@@ -2811,11 +2962,11 @@ func formatDSMLStream(text string) string {
 		}
 		if name != "" {
 			// Start cyan formatting: \x1b[38;5;86m
-			return fmt.Sprintf("    ✏️ %s = \x1b[38;5;86m", dsmlParamStyle.Render(name))
+			return fmt.Sprintf("\n    ✏️ %s = \x1b[38;5;86m", dsmlParamStyle.Render(name))
 		}
 		return m
 	})
-	text = reParamEnd.ReplaceAllString(text, "\x1b[0m\n")
+	text = reParamEnd.ReplaceAllString(text, "\x1b[0m")
 
 	// 4. Unescape HTML/XML entities
 	text = dsmlUnescaper.Replace(text)
