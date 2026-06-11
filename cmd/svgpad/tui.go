@@ -226,6 +226,7 @@ type model struct {
 	lifecycle     engineLifecycle   // engine state machine, drives badge + transitions
 	engineErr     error             // set when StatusError
 	modelPath     string
+	modelInfo     *ds4.ModelInfo // catalog identity behind modelPath; nil when not catalog-managed
 	mtpPath       string
 	hasMTP        bool
 	mtpDraft      int
@@ -575,6 +576,7 @@ func newModel(app *appinit.App) model {
 		engOpts:        engOpts,
 		lifecycle:      engineLifecycle{status: engineinit.StatusDormant},
 		modelPath:      modelPath,
+		modelInfo:      app.ModelInfo,
 		mtpPath:        mtpPath,
 		backend:        backend,
 		workDir:        wd,
@@ -1524,7 +1526,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.metadataCtx, m.metadataCancel = context.WithCancel(context.Background())
 				cmds = append(cmds, enrichMetadataCmd(
-					m.metadataCtx, m.metadataWG, m.engine, filepath.Base(m.modelPath), path, currentPrompt, svgData, m.genTime(), m.toolCalls, m.thinkText))
+					m.metadataCtx, m.metadataWG, m.engine, m.modelDisplayName(), path, currentPrompt, svgData, m.genTime(), m.toolCalls, m.thinkText))
 			}
 		}
 
@@ -1946,6 +1948,17 @@ func (m model) kittyBadge() string {
 	return style.Render(padded)
 }
 
+// modelDisplayName returns the catalog alias for the loaded model when it
+// resolves to a ds4 catalog entry — the ds4flash.gguf default link's
+// basename says nothing about the actual model — falling back to the
+// file's basename.
+func (m model) modelDisplayName() string {
+	if m.modelInfo != nil && m.modelInfo.Alias != "" {
+		return m.modelInfo.Alias
+	}
+	return filepath.Base(m.modelPath)
+}
+
 // thinkModeLabel returns a fixed-width (4-char) label for the reasoning mode.
 func (m model) thinkModeLabel() string {
 	switch m.thinkMode {
@@ -2083,7 +2096,7 @@ func (m model) render() string {
 	}
 
 	// Header — plain text to avoid lipgloss v2 truncation issues
-	modelName := filepath.Base(m.modelPath)
+	modelName := m.modelDisplayName()
 	if lipgloss.Width(modelName) > 20 {
 		modelName = modelName[:17] + "..."
 	}
@@ -2463,7 +2476,25 @@ func (m model) infoOverlay() string {
 		}
 		row("gpu power", fmt.Sprintf("%d%%", p))
 	}
-	row("file", filepath.Base(m.modelPath))
+	if info := m.modelInfo; info != nil {
+		alias := info.Alias
+		if info.Default {
+			alias += " (default)"
+		}
+		row("catalog", alias)
+		row("file", info.FileName)
+		row("size", fmt.Sprintf("%.0f GB", info.SizeGB))
+		sha := info.SHA256
+		if len(sha) > 16 {
+			sha = sha[:16] + "…"
+		}
+		row("sha256", sha)
+		if info.Notes != "" {
+			row("notes", info.Notes)
+		}
+	} else {
+		row("file", filepath.Base(m.modelPath))
+	}
 	row("path", m.modelPath)
 	mtpDisplay := "--"
 	mtpActive := false

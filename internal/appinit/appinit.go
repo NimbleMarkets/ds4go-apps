@@ -127,6 +127,7 @@ type App struct {
 	Flags      *Flags
 	Lib        *ds4.Library      // nil in no-engine mode
 	EngineOpts ds4.EngineOptions // MTP resolved, ApplyMTPDefaults applied
+	ModelInfo  *ds4.ModelInfo    // catalog identity behind ModelPath; nil when not catalog-managed
 	Logger     *log.Logger       // writes to <app>.log
 	LogBuf     *ds4log.Buffer    // libds4 diagnostics ring; teed to the log file with --debug
 
@@ -212,8 +213,16 @@ func Bootstrap(f *Flags, opts ...Option) (*App, error) {
 		ds4.ApplyMTPDefaults(&app.EngineOpts)
 	}
 
+	// The default model reaches apps as the stable ds4flash.gguf link, so
+	// resolve the catalog identity behind the path for display/provenance.
+	modelLabel := filepath.Base(modelPath)
+	if info, ok := ds4.ResolveModelInfo(modelPath); ok {
+		app.ModelInfo = &info
+		modelLabel = info.Alias
+	}
+
 	logger.Printf("=== %s start  model=%s backend=%s ctx=%d debug=%v ===",
-		f.app, filepath.Base(modelPath), backendName(app.EngineOpts.Backend), f.Ctx, f.Debug)
+		f.app, modelLabel, backendName(app.EngineOpts.Backend), f.Ctx, f.Debug)
 	return app, nil
 }
 
