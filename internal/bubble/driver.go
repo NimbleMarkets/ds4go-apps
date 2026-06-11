@@ -255,5 +255,3 @@ func (d *GenerationDriver) RunWithPrompt(ctx context.Context, system string, his
 		d.opts.OnEvent(RoundCompletedEvent{Round: round})
 	}
 }
-
-
