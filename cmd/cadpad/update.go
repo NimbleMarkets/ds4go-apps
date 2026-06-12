@@ -128,6 +128,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.text != "" {
 			m.lastLuaOutput = strings.TrimSpace(msg.text)
 		}
+		// Final state of the script (the active path switches back to the
+		// just-saved timestamped entry once inferencing ends).
+		if m.showSource {
+			m.reloadSource()
+		}
 
 	case camIdleMsg:
 		// Camera input settled: replace the interactive low-res preview
@@ -208,25 +213,6 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.logTop = m.logScrollBy(-m.logPageSize())
 		case "pgdown":
 			m.logTop = m.logScrollBy(m.logPageSize())
-		}
-		return m, nil
-	}
-
-	// Source overlay is modal.
-	if m.showSource {
-		switch msg.String() {
-		case "ctrl+c", "ctrl+q":
-			return m, tea.Quit
-		case "esc", "v":
-			m.showSource = false
-		case "up", "k":
-			m.sourceTop = m.sourceScrollBy(-1)
-		case "down", "j":
-			m.sourceTop = m.sourceScrollBy(1)
-		case "pgup":
-			m.sourceTop = m.sourceScrollBy(-m.sourcePageSize())
-		case "pgdown":
-			m.sourceTop = m.sourceScrollBy(m.sourcePageSize())
 		}
 		return m, nil
 	}
@@ -492,6 +478,23 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.status = fmt.Sprintf("thinking scroll %d", m.thinkScroll)
 			return m, nil
 		}
+	case focusSource:
+		// sourceScroll counts lines back from the tail; 0 follows writes.
+		maxScroll := max(0, len(m.sourceLines)-sourceVisibleLines)
+		switch {
+		case key.Matches(msg, key.NewBinding(key.WithKeys("up"))):
+			m.sourceScroll = min(maxScroll, m.sourceScroll+1)
+			return m, nil
+		case key.Matches(msg, key.NewBinding(key.WithKeys("down"))):
+			m.sourceScroll = max(0, m.sourceScroll-1)
+			return m, nil
+		case key.Matches(msg, key.NewBinding(key.WithKeys("pgup"))):
+			m.sourceScroll = min(maxScroll, m.sourceScroll+sourceVisibleLines)
+			return m, nil
+		case key.Matches(msg, key.NewBinding(key.WithKeys("pgdown"))):
+			m.sourceScroll = max(0, m.sourceScroll-sourceVisibleLines)
+			return m, nil
+		}
 	case focusLuaOutput:
 		switch {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("up"))):
@@ -527,6 +530,9 @@ func (m *model) cycleFocus() {
 	if m.showThinking {
 		order = append(order, focusThinking)
 	}
+	if m.showSource {
+		order = append(order, focusSource)
+	}
 	if m.showLuaOutput {
 		order = append(order, focusLuaOutput)
 	}
@@ -543,6 +549,8 @@ func (m *model) cycleFocus() {
 		m.status = "focus: viewport"
 	case focusThinking:
 		m.status = "focus: LLM output"
+	case focusSource:
+		m.status = "focus: lua source"
 	case focusLuaOutput:
 		m.status = "focus: lua output"
 	}
@@ -565,6 +573,12 @@ func (m model) handleDriverEvent(msg driverEventMsg, cmds *[]tea.Cmd) model {
 				p = filepath.Join(m.luaWorkspace, p)
 			}
 			m.lastActiveLua = p
+			// Show the script as the model writes it: auto-open the source
+			// panel on the first lua_* call of a generation.
+			if !m.showSource && m.reloadSource() {
+				m.sourceScroll = 0
+				m.showSource = true
+			}
 		}
 		if strings.HasPrefix(ev.Message, "tool:") {
 			m.toolHistory = append(m.toolHistory, ev.Message)
@@ -605,6 +619,11 @@ func (m model) handleDriverEvent(msg driverEventMsg, cmds *[]tea.Cmd) model {
 	case bubble.ToolResultsEvent:
 		for _, r := range ev.Results {
 			m.logger.Printf("[TOOL] result role=%s content_len=%d", r.Role, len(r.Content))
+		}
+		// The tool batch may have rewritten the active script; keep the
+		// source panel current while it follows the tail.
+		if m.showSource {
+			m.reloadSource()
 		}
 
 	case bubble.RoundStartedEvent:

@@ -73,6 +73,7 @@ const (
 	focusViewport focusRegion = iota
 	focusThinking
 	focusLuaOutput
+	focusSource
 )
 
 // model is the Bubble Tea root.
@@ -120,11 +121,13 @@ type model struct {
 	showThinking  bool
 	showLuaOutput bool
 
-	// Source overlay ('v'): highlighted lines of the active lua script.
-	showSource  bool
-	sourceName  string
-	sourceLines []string
-	sourceTop   int
+	// Source panel ('v'): highlighted lines of the active lua script,
+	// shown beside the LLM Output box. sourceScroll counts lines back
+	// from the tail; 0 follows new content as the model writes the file.
+	showSource   bool
+	sourceName   string
+	sourceLines  []string
+	sourceScroll int
 
 	focus       focusRegion
 	thinkScroll int

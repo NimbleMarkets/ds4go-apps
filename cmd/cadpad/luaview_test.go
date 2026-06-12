@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -33,7 +34,7 @@ func TestHighlightLuaAddsANSIAndPreservesText(t *testing.T) {
 func luaViewTestModel(t *testing.T) model {
 	t.Helper()
 	m := newModel(testApp(log.New(io.Discard, "", 0), ds4log.NewBuffer(10)))
-	m.width, m.height = 90, 30
+	m.width, m.height = 100, 36
 
 	path := filepath.Join(t.TempDir(), "cadpad.tower.lua")
 	if err := os.WriteFile(path, []byte(sampleLua), 0o644); err != nil {
@@ -55,12 +56,12 @@ func TestToggleSourceViewLoadsActiveScript(t *testing.T) {
 		t.Errorf("sourceName = %q", m.sourceName)
 	}
 
-	out := m.sourceOverlay()
-	if !strings.Contains(out, "cadpad.tower.lua") {
-		t.Error("overlay missing script name")
+	panel := m.sourcePanel(m.width / 2)
+	if !strings.Contains(panel, "cadpad.tower.lua") {
+		t.Error("panel missing script name")
 	}
-	if !strings.Contains(ansi.Strip(out), "sdf.register") {
-		t.Error("overlay missing source content")
+	if !strings.Contains(ansi.Strip(panel), "sdf.register") {
+		t.Error("panel missing source content")
 	}
 
 	m.toggleSourceView()
@@ -83,15 +84,80 @@ func TestToggleSourceViewWithoutScript(t *testing.T) {
 	}
 }
 
-func TestSourceScrollClamps(t *testing.T) {
+// The bottom row shows LLM output and lua source side by side — the row is
+// 13 lines tall either way, so the source panel costs no vertical space.
+func TestBottomBoxesSideBySide(t *testing.T) {
+	m := luaViewTestModel(t)
+	m.showThinking = true
+	m.lastThinking = "planning the tower"
+	m.toggleSourceView()
+
+	out := m.bottomBoxesView()
+	if !strings.Contains(out, "LLM Output") || !strings.Contains(out, "cadpad.tower.lua") {
+		t.Fatalf("expected both panels in bottom row:\n%s", ansi.Strip(out))
+	}
+	if lines := strings.Count(out, "\n"); lines > 16 {
+		t.Errorf("bottom boxes span %d lines — stacked, not side-by-side?", lines)
+	}
+	// Side-by-side panels must not add to the row height accounting.
+	withSource := m.bottomBoxesHeight()
+	m.showSource = false
+	if withoutSource := m.bottomBoxesHeight(); withSource != withoutSource {
+		t.Errorf("bottomBoxesHeight with source = %d, without = %d — should share the row", withSource, withoutSource)
+	}
+}
+
+// During generation the panel follows the file the model is writing:
+// lastActiveLua wins over the browsed history entry, the panel auto-opens,
+// and each tool result reloads the content.
+func TestSourceFollowsWritesDuringGeneration(t *testing.T) {
+	m := luaViewTestModel(t)
+	m.inferencing = true
+	active := filepath.Join(t.TempDir(), "current.lua")
+	if err := os.WriteFile(active, []byte("local a = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The driver log line that records the file being written auto-opens the panel.
+	m = updateDriverEvent(t, m, bubble.LogEvent{Level: "info", Message: `tool: lua_write args={"path": "` + active + `"}`})
+	if !m.showSource {
+		t.Fatal("source panel did not auto-open when generation started writing lua")
+	}
+	if m.sourceName != "current.lua" {
+		t.Errorf("sourceName = %q, want the actively-written file", m.sourceName)
+	}
+
+	// New content lands on each tool result.
+	if err := os.WriteFile(active, []byte("local a = 1\nsdf.register(\"a\", sdf.sphere(a))\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m = updateDriverEvent(t, m, bubble.ToolResultsEvent{})
+	joined := ansi.Strip(strings.Join(m.sourceLines, "\n"))
+	if !strings.Contains(joined, "sdf.register") {
+		t.Errorf("source not reloaded after tool result: %q", joined)
+	}
+}
+
+func updateDriverEvent(t *testing.T, m model, e bubble.Event) model {
+	t.Helper()
+	next, _ := m.Update(driverEventMsg{e: e})
+	nm, ok := next.(model)
+	if !ok {
+		t.Fatalf("Update returned %T", next)
+	}
+	return nm
+}
+
+func TestSourceScrollClampsAndFollowsTail(t *testing.T) {
 	m := luaViewTestModel(t)
 	m.toggleSourceView()
 
-	if top := m.sourceScrollBy(-5); top != 0 {
-		t.Errorf("scroll above top = %d, want 0", top)
+	if m.sourceScroll != 0 {
+		t.Errorf("sourceScroll = %d on open, want 0 (follow tail)", m.sourceScroll)
 	}
-	m.sourceTop = 0
-	if top := m.sourceScrollBy(1000); top > len(m.sourceLines) {
-		t.Errorf("scroll below bottom = %d, want clamped", top)
+	m.sourceScroll = 10000
+	panel := m.sourcePanel(60)
+	if !strings.Contains(ansi.Strip(panel), "-- build a tower") {
+		t.Error("over-scrolled panel should clamp to the top of the file")
 	}
 }

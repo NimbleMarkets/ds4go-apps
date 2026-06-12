@@ -39,9 +39,6 @@ func (m model) View() tea.View {
 	if m.showLog {
 		return tea.NewView(m.logOverlay())
 	}
-	if m.showSource {
-		return tea.NewView(m.sourceOverlay())
-	}
 	if m.showHelp {
 		v := tea.NewView(m.helpView())
 		v.MouseMode = tea.MouseModeCellMotion
@@ -235,12 +232,18 @@ func (m model) propsView(w int) string {
 }
 
 func (m model) bottomBoxesView() string {
-	if !m.showThinking && !m.showLuaOutput {
+	if !m.showThinking && !m.showLuaOutput && !m.showSource {
 		return ""
 	}
 
 	w := m.width
 	var parts []string
+
+	// LLM Output and Lua Source share the top row side by side; either one
+	// alone takes the full width.
+	if m.showThinking && m.showSource {
+		w = m.width / 2
+	}
 
 	if m.showThinking {
 		var content string
@@ -284,7 +287,21 @@ func (m model) bottomBoxesView() string {
 		parts = append(parts, box)
 	}
 
+	if m.showSource {
+		srcW := m.width - w
+		if !m.showThinking {
+			srcW = m.width
+		}
+		src := m.sourcePanel(srcW)
+		if m.showThinking && len(parts) == 1 {
+			parts[0] = lipgloss.JoinHorizontal(lipgloss.Top, parts[0], src)
+		} else {
+			parts = append(parts, src)
+		}
+	}
+
 	if m.showLuaOutput {
+		w := m.width // the lua_run output box always spans the full width
 		content := sanitizeForDisplay(m.lastLuaOutput)
 		if content != "" {
 			lines := strings.Split(content, "\n")
@@ -417,7 +434,7 @@ Viewport focus
   pgup/pgdown   browse previous .lua files
   v             view active .lua source (syntax highlighted)
 
-Box focus (LLM output / lua output)
+Box focus (LLM output / lua source / lua output)
   ↑ / ↓         scroll content
   pgup/pgdown   page scroll
 
@@ -464,17 +481,17 @@ func (m model) bodyH() int {
 }
 
 func (m model) bottomBoxesHeight() int {
-	if !m.showThinking && !m.showLuaOutput {
+	if !m.showThinking && !m.showLuaOutput && !m.showSource {
 		return 0
 	}
 	h := 0
-	if m.showThinking {
-		h += 13 // title + border + up to 12 lines of content
+	if m.showThinking || m.showSource {
+		h += 13 // title + border + up to 12 lines; LLM + source share this row
 	}
 	if m.showLuaOutput {
 		h += 7
 	}
-	if m.showThinking && m.showLuaOutput {
+	if (m.showThinking || m.showSource) && m.showLuaOutput {
 		h += 1
 	}
 	return h
