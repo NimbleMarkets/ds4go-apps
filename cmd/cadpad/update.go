@@ -33,9 +33,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		pc, pr := m.viewportInnerSize()
 		m.logger.Printf("[SIZE] width=%d height=%d viewport=%dx%d", m.width, m.height, pc, pr)
 		cmds = append(cmds, m.pic.SetSize(pc, pr))
-		// Note: we do NOT auto-refresh the preview on every resize because
-		// animated terminal resizes would trigger a CPU-render storm.
-		// The picture widget scales the existing image. Press 'p' to re-render.
+		// The first size message triggers the initial preview render (Init
+		// ran with an unknown terminal size). Subsequent resizes do NOT
+		// auto-refresh — animated terminal resizes would trigger a
+		// CPU-render storm; the picture widget scales the existing image
+		// and 'p' re-renders.
+		if !m.sizedOnce {
+			m.sizedOnce = true
+			if len(m.w.Names()) > 0 {
+				if cmd := m.refreshPreview(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			}
+		}
 
 	case tea.KeyMsg:
 		var cmd tea.Cmd

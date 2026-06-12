@@ -163,6 +163,10 @@ type model struct {
 	lastMouseX    int
 	lastMouseY    int
 
+	// sizedOnce is set by the first WindowSizeMsg, which also triggers the
+	// initial preview render (Init cannot — the size is unknown there).
+	sizedOnce bool
+
 	// Preview render throttling/coalescing
 	renderingPreview bool
 	previewDirty     bool
@@ -375,11 +379,13 @@ func (m model) Init() tea.Cmd {
 		m.w.Create("debug_box", "box", map[string]float64{"x": 4, "y": 3, "z": 2})
 	}
 
+	// The initial preview render waits for the first WindowSizeMsg — at
+	// Init time the terminal size is unknown and a width-0 layout would
+	// produce a tiny raster that later resizes never replace.
 	cmds := []tea.Cmd{
 		m.pic.Init(),
 		picture.RequestCellSize(),
 		picture.QueryKittySupport(),
-		m.refreshPreviewCmd(),
 		tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg {
 			return kittyAutoToggleMsg{}
 		}),

@@ -162,9 +162,12 @@ func TestMouseNavigation(t *testing.T) {
 
 	m.w.Create("box1", "box", map[string]float64{"x": 4, "y": 3, "z": 2})
 
-	// Simulate window size so the model knows its dimensions.
+	// Simulate window size so the model knows its dimensions; the first
+	// size message also starts the initial preview render — model the
+	// steady state where it has completed.
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
 	m = m2.(model)
+	m.renderingPreview = false
 
 	x0, y0, x1, y1 := m.viewportBounds()
 	if x0 >= x1 || y0 >= y1 {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
 	"github.com/charmbracelet/x/ansi"
@@ -241,5 +242,29 @@ func TestInitSeedsDebugBoxWithoutScripts(t *testing.T) {
 	}
 	if !m.w.Has("debug_box") {
 		t.Errorf("expected debug_box fallback, objects = %v", m.w.Names())
+	}
+}
+
+// Init runs before the terminal size is known, so the initial preview must
+// wait for the first WindowSizeMsg — rendering at width 0 produces a tiny
+// raster that the resize handler (which deliberately never re-renders)
+// would leave on screen.
+func TestInitialPreviewRendersAtFirstWindowSize(t *testing.T) {
+	m := luaViewTestModel(t)
+	m.width, m.height = 0, 0
+	m.w.Create("box1", "box", map[string]float64{"x": 1, "y": 1, "z": 1})
+
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = m2.(model)
+	if !m.renderingPreview {
+		t.Error("first WindowSizeMsg did not kick off the initial preview render")
+	}
+
+	// Subsequent resizes keep the no-render-storm behavior.
+	m.renderingPreview = false
+	m2, _ = m.Update(tea.WindowSizeMsg{Width: 90, Height: 38})
+	m = m2.(model)
+	if m.renderingPreview {
+		t.Error("later resizes must not auto-render")
 	}
 }

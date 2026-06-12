@@ -17,7 +17,11 @@ func progressiveTestModel(t *testing.T) model {
 	m.proj = render.ProjAngle
 	m.w.Create("ball", "sphere", map[string]float64{"r": 3})
 	m2, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
-	return m2.(model)
+	m = m2.(model)
+	// The first WindowSizeMsg kicks off the initial preview; model the
+	// steady state where that render has completed.
+	m.renderingPreview = false
+	return m
 }
 
 func TestInteractiveRefreshUsesLowResAndArmsIdleTimer(t *testing.T) {
