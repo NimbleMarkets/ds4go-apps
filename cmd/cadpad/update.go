@@ -299,7 +299,13 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.status = "LLM output box " + state
 		return m, nil
 	case key.Matches(msg, key.NewBinding(key.WithKeys("v"))):
+		wasShown := m.showSource
 		m.toggleSourceView()
+		if m.showSource != wasShown {
+			// The viewport column changes width; resize the picture widget.
+			pc, pr := m.viewportInnerSize()
+			return m, m.pic.SetSize(pc, pr)
+		}
 		return m, nil
 	case key.Matches(msg, key.NewBinding(key.WithKeys("L"))):
 		m.showLuaOutput = !m.showLuaOutput
@@ -480,7 +486,8 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 	case focusSource:
 		// sourceScroll counts lines back from the tail; 0 follows writes.
-		maxScroll := max(0, len(m.sourceLines)-sourceVisibleLines)
+		page := m.sourceVisibleLines()
+		maxScroll := max(0, len(m.sourceLines)-page)
 		switch {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("up"))):
 			m.sourceScroll = min(maxScroll, m.sourceScroll+1)
@@ -489,10 +496,10 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.sourceScroll = max(0, m.sourceScroll-1)
 			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("pgup"))):
-			m.sourceScroll = min(maxScroll, m.sourceScroll+sourceVisibleLines)
+			m.sourceScroll = min(maxScroll, m.sourceScroll+page)
 			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("pgdown"))):
-			m.sourceScroll = max(0, m.sourceScroll-sourceVisibleLines)
+			m.sourceScroll = max(0, m.sourceScroll-page)
 			return m, nil
 		}
 	case focusLuaOutput:
@@ -578,6 +585,8 @@ func (m model) handleDriverEvent(msg driverEventMsg, cmds *[]tea.Cmd) model {
 			if !m.showSource && m.reloadSource() {
 				m.sourceScroll = 0
 				m.showSource = true
+				pc, pr := m.viewportInnerSize()
+				*cmds = append(*cmds, m.pic.SetSize(pc, pr))
 			}
 		}
 		if strings.HasPrefix(ev.Message, "tool:") {

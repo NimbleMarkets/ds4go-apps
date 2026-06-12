@@ -56,7 +56,7 @@ func TestToggleSourceViewLoadsActiveScript(t *testing.T) {
 		t.Errorf("sourceName = %q", m.sourceName)
 	}
 
-	panel := m.sourcePanel(m.width / 2)
+	panel := m.sourcePanel(40, 20)
 	if !strings.Contains(panel, "cadpad.tower.lua") {
 		t.Error("panel missing script name")
 	}
@@ -84,26 +84,36 @@ func TestToggleSourceViewWithoutScript(t *testing.T) {
 	}
 }
 
-// The bottom row shows LLM output and lua source side by side — the row is
-// 13 lines tall either way, so the source panel costs no vertical space.
-func TestBottomBoxesSideBySide(t *testing.T) {
+// The source panel lives in the body row, to the left of the CAD viewport,
+// at full body height; the bottom row and its height accounting are
+// untouched by it.
+func TestSourceBesideViewport(t *testing.T) {
 	m := luaViewTestModel(t)
 	m.showThinking = true
 	m.lastThinking = "planning the tower"
 	m.toggleSourceView()
 
-	out := m.bottomBoxesView()
-	if !strings.Contains(out, "LLM Output") || !strings.Contains(out, "cadpad.tower.lua") {
-		t.Fatalf("expected both panels in bottom row:\n%s", ansi.Strip(out))
+	body := ansi.Strip(m.bodyView())
+	if !strings.Contains(body, "cadpad.tower.lua") || !strings.Contains(body, "view") {
+		t.Fatalf("expected source panel and viewport in body row:\n%s", body)
 	}
-	if lines := strings.Count(out, "\n"); lines > 16 {
-		t.Errorf("bottom boxes span %d lines — stacked, not side-by-side?", lines)
+	if bottom := ansi.Strip(m.bottomBoxesView()); strings.Contains(bottom, "cadpad.tower.lua") {
+		t.Error("source panel leaked into the bottom boxes")
 	}
-	// Side-by-side panels must not add to the row height accounting.
+
 	withSource := m.bottomBoxesHeight()
 	m.showSource = false
 	if withoutSource := m.bottomBoxesHeight(); withSource != withoutSource {
-		t.Errorf("bottomBoxesHeight with source = %d, without = %d — should share the row", withSource, withoutSource)
+		t.Errorf("bottomBoxesHeight with source = %d, without = %d — body panel must not affect it", withSource, withoutSource)
+	}
+
+	// The viewport render budget shrinks to make room for the panel.
+	m.showSource = true
+	colsWith, _ := m.viewportInnerSize()
+	m.showSource = false
+	colsWithout, _ := m.viewportInnerSize()
+	if colsWith >= colsWithout {
+		t.Errorf("viewport cols with source = %d, without = %d — want narrower", colsWith, colsWithout)
 	}
 }
 
@@ -156,7 +166,7 @@ func TestSourceScrollClampsAndFollowsTail(t *testing.T) {
 		t.Errorf("sourceScroll = %d on open, want 0 (follow tail)", m.sourceScroll)
 	}
 	m.sourceScroll = 10000
-	panel := m.sourcePanel(60)
+	panel := m.sourcePanel(60, 8)
 	if !strings.Contains(ansi.Strip(panel), "-- build a tower") {
 		t.Error("over-scrolled panel should clamp to the top of the file")
 	}

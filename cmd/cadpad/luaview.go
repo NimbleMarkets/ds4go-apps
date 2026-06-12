@@ -1,8 +1,9 @@
 // luaview.go: syntax-highlighted source panel for the active Lua script.
-// 'v' toggles it; it shares the bottom row side-by-side with the LLM Output
-// box. During generation it follows the file the model is writing — the
-// panel auto-opens on the first lua_* tool call and reloads on every tool
-// result — and follows the tail unless scrolled (tab focus, ↑/↓).
+// 'v' toggles it; it sits in the body row to the left of the CAD viewport
+// at full body height. During generation it follows the file the model is
+// writing — the panel auto-opens on the first lua_* tool call and reloads
+// on every tool result — and follows the tail unless scrolled (tab focus,
+// ↑/↓).
 
 package main
 
@@ -19,10 +20,11 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// sourceVisibleLines is how many source lines the panel window shows —
-// sized so the panel matches the LLM Output box's 13-row footprint
-// (border + title + content).
-const sourceVisibleLines = 9
+// sourceVisibleLines is how many source lines fit in the panel window at
+// the current body height (border + title subtracted).
+func (m model) sourceVisibleLines() int {
+	return max(4, m.bodyH()-3)
+}
 
 // highlightLua renders Lua source with ANSI syntax highlighting. The text
 // content is preserved exactly; on any highlighting failure the source is
@@ -100,26 +102,28 @@ func (m *model) toggleSourceView() {
 	m.showSource = true
 }
 
-// sourcePanel renders the bordered source panel at the given total width.
-func (m model) sourcePanel(w int) string {
+// sourcePanel renders the bordered source panel at the given total width
+// and height (h is the full panel height including border and title).
+func (m model) sourcePanel(w, h int) string {
 	innerW := w - 4 // border + padding
 	if innerW < 8 {
 		innerW = 8
 	}
+	visible := max(4, h-3) // border + title
 
 	total := len(m.sourceLines)
 	scroll := m.sourceScroll
-	if scroll > total-sourceVisibleLines {
-		scroll = total - sourceVisibleLines
+	if scroll > total-visible {
+		scroll = total - visible
 	}
 	if scroll < 0 {
 		scroll = 0
 	}
-	start := total - sourceVisibleLines - scroll
+	start := total - visible - scroll
 	if start < 0 {
 		start = 0
 	}
-	end := start + sourceVisibleLines
+	end := start + visible
 	if end > total {
 		end = total
 	}
@@ -141,15 +145,16 @@ func (m model) sourcePanel(w int) string {
 	if m.focus == focusSource {
 		borderColor = "3"
 	}
-	title := "Lua Source (toggle with v) · " + m.sourceName
+	title := "Lua Source (v) · " + m.sourceName
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(borderColor)).
 		Width(w).
-		MaxHeight(13).
+		Height(h).
+		MaxHeight(h).
 		Padding(0, 1).
 		Render(lipgloss.JoinVertical(lipgloss.Left,
-			ansi.Truncate(title, innerW, "…"),
+			ansi.Truncate(dimStyle.Render(title), innerW, "…"),
 			content,
 		))
 }

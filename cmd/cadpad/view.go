@@ -120,24 +120,34 @@ func (m model) header() string {
 		Render(raw)
 }
 
+// bodyWidths returns the column widths of the body row panels: objects
+// list, lua source (0 when hidden), viewport, and props.
+func (m model) bodyWidths() (listW, srcW, viewW, propsW int) {
+	listW = max(minListW, m.width/5)
+	propsW = max(minPropsW, m.width/5)
+	if m.showSource {
+		srcW = max(30, m.width/3)
+	}
+	viewW = max(minViewW, m.width-listW-srcW-propsW-4)
+	return listW, srcW, viewW, propsW
+}
+
 func (m model) bodyView() string {
-	listW := max(minListW, m.width/5)
-	propsW := max(minPropsW, m.width/5)
-	viewW := max(minViewW, m.width-listW-propsW-4)
+	listW, srcW, viewW, propsW := m.bodyWidths()
 
-	list := m.objectsList(listW)
-	view := m.viewportView(viewW)
-	props := m.propsView(propsW)
+	parts := []string{m.objectsList(listW)}
+	if srcW > 0 {
+		parts = append(parts, m.sourcePanel(srcW, m.bodyH()))
+	}
+	parts = append(parts, m.viewportView(viewW), m.propsView(propsW))
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, list, view, props)
+	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
 }
 
 // viewportInnerSize returns the column and row count available for the
 // picture widget inside the bordered viewport panel.
 func (m model) viewportInnerSize() (cols, rows int) {
-	listW := max(minListW, m.width/5)
-	propsW := max(minPropsW, m.width/5)
-	viewW := max(minViewW, m.width-listW-propsW-4)
+	_, _, viewW, _ := m.bodyWidths()
 	cols = max(8, viewW-2)     // subtract border
 	rows = max(6, m.bodyH()-3) // subtract border + header line
 	return cols, rows
@@ -232,18 +242,12 @@ func (m model) propsView(w int) string {
 }
 
 func (m model) bottomBoxesView() string {
-	if !m.showThinking && !m.showLuaOutput && !m.showSource {
+	if !m.showThinking && !m.showLuaOutput {
 		return ""
 	}
 
 	w := m.width
 	var parts []string
-
-	// LLM Output and Lua Source share the top row side by side; either one
-	// alone takes the full width.
-	if m.showThinking && m.showSource {
-		w = m.width / 2
-	}
 
 	if m.showThinking {
 		var content string
@@ -287,21 +291,7 @@ func (m model) bottomBoxesView() string {
 		parts = append(parts, box)
 	}
 
-	if m.showSource {
-		srcW := m.width - w
-		if !m.showThinking {
-			srcW = m.width
-		}
-		src := m.sourcePanel(srcW)
-		if m.showThinking && len(parts) == 1 {
-			parts[0] = lipgloss.JoinHorizontal(lipgloss.Top, parts[0], src)
-		} else {
-			parts = append(parts, src)
-		}
-	}
-
 	if m.showLuaOutput {
-		w := m.width // the lua_run output box always spans the full width
 		content := sanitizeForDisplay(m.lastLuaOutput)
 		if content != "" {
 			lines := strings.Split(content, "\n")
@@ -481,17 +471,17 @@ func (m model) bodyH() int {
 }
 
 func (m model) bottomBoxesHeight() int {
-	if !m.showThinking && !m.showLuaOutput && !m.showSource {
+	if !m.showThinking && !m.showLuaOutput {
 		return 0
 	}
 	h := 0
-	if m.showThinking || m.showSource {
-		h += 13 // title + border + up to 12 lines; LLM + source share this row
+	if m.showThinking {
+		h += 13 // title + border + up to 12 lines of content
 	}
 	if m.showLuaOutput {
 		h += 7
 	}
-	if (m.showThinking || m.showSource) && m.showLuaOutput {
+	if m.showThinking && m.showLuaOutput {
 		h += 1
 	}
 	return h
