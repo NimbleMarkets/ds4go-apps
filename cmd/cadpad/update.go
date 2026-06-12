@@ -582,9 +582,9 @@ func (m model) handleDriverEvent(msg driverEventMsg, cmds *[]tea.Cmd) model {
 				p = filepath.Join(m.luaWorkspace, p)
 			}
 			m.lastActiveLua = p
-			// Show the script as the model writes it: auto-open the source
-			// panel on the first lua_* call of a generation.
-			if !m.showSource && m.reloadSource() {
+			// Show the script as the model writes it: switch the panel to
+			// the newly-active file, auto-opening it if hidden.
+			if m.reloadSource() && !m.showSource {
 				m.sourceScroll = 0
 				m.showSource = true
 				pc, pr := m.viewportInnerSize()
@@ -657,14 +657,6 @@ func (m model) handleDriverEvent(msg driverEventMsg, cmds *[]tea.Cmd) model {
 		}
 	}
 	return m
-}
-
-func (m model) viewportBounds() (x0, y0, x1, y1 int) {
-	listW := max(minListW, m.width/5)
-	propsW := max(minPropsW, m.width/5)
-	viewW := max(minViewW, m.width-listW-propsW-4)
-	h := m.bodyH()
-	return listW, 1, listW + viewW - 1, 1 + h - 1
 }
 
 func (m model) handleMouseClick(msg tea.MouseClickMsg) (model, tea.Cmd) {

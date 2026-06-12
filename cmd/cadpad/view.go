@@ -15,12 +15,9 @@ import (
 )
 
 const (
-	headerH   = 1
-	helpH     = 1
-	footerH   = 3
-	minListW  = 18
-	minPropsW = 22
-	minViewW  = 30
+	headerH = 1
+	helpH   = 1
+	footerH = 3
 )
 
 var (
@@ -120,47 +117,22 @@ func (m model) header() string {
 		Render(raw)
 }
 
-// bodyWidths returns the column widths of the body row panels: objects
-// list, lua source (0 when hidden), viewport, and props.
-func (m model) bodyWidths() (listW, srcW, viewW, propsW int) {
-	listW = max(minListW, m.width/5)
-	propsW = max(minPropsW, m.width/5)
-	if m.showSource {
-		srcW = max(30, m.width/3)
-	}
-	viewW = max(minViewW, m.width-listW-srcW-propsW-4)
-	return listW, srcW, viewW, propsW
-}
-
-func (m model) bodyView() string {
-	listW, srcW, viewW, propsW := m.bodyWidths()
-
-	parts := []string{m.objectsList(listW)}
-	if srcW > 0 {
-		parts = append(parts, m.sourcePanel(srcW, m.bodyH()))
-	}
-	parts = append(parts, m.viewportView(viewW), m.propsView(propsW))
-
-	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
-}
-
-// viewportInnerSize returns the column and row count available for the
-// picture widget inside the bordered viewport panel.
-func (m model) viewportInnerSize() (cols, rows int) {
-	_, _, viewW, _ := m.bodyWidths()
-	cols = max(8, viewW-2)     // subtract border
-	rows = max(6, m.bodyH()-3) // subtract border + header line
-	return cols, rows
-}
-
-func (m model) objectsList(w int) string {
+// objectsBubble renders the named-objects list in a bordered bubble.
+// j/k move the selection (which follows through to the viewport); ▶ marks
+// the world's current object.
+func (m model) objectsBubble(w, h int) string {
 	names := m.w.Names()
-	if len(names) == 0 {
-		return dimStyle.Render("  (no objects)\n  pgup/pgdown: browse previous .lua\n  describe what to build...")
-	}
 	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().Bold(true).Render(" Objects\n"))
-	for i, n := range names {
+	if len(names) == 0 {
+		b.WriteString(dimStyle.Render("(no objects)\ndescribe what\nto build..."))
+	}
+	visible := max(1, h-3) // border + title
+	start := 0
+	if m.selected >= visible {
+		start = m.selected - visible + 1
+	}
+	for i := start; i < len(names) && i < start+visible; i++ {
+		n := names[i]
 		style := objStyle
 		if i == m.selected || n == m.w.Current() {
 			style = currStyle
@@ -169,10 +141,52 @@ func (m model) objectsList(w int) string {
 		if n == m.w.Current() {
 			pfx = "▶ "
 		}
-		line := pfx + n
-		b.WriteString(style.Width(w-2).Render(line) + "\n")
+		if i > start {
+			b.WriteByte('\n')
+		}
+		b.WriteString(style.Render(ansi.Truncate(pfx+n, max(8, w-4), "…")))
 	}
-	return lipgloss.NewStyle().Width(w).MaxHeight(m.bodyH()).Render(b.String())
+	return bubbleBox("Objects", b.String(), w, h, "8")
+}
+
+// metricsBubble renders the current object's metrics (bbox, volume,
+// updated time) below the objects bubble.
+func (m model) metricsBubble(w, h int) string {
+	cur := m.w.Current()
+	var content string
+	if cur == "" {
+		content = dimStyle.Render("(no selection)\nj/k to pick")
+	} else if bb, ok := m.w.Bounds(cur); ok {
+		_, meta, _ := m.w.Get(cur)
+		vol := (bb.Max.X - bb.Min.X) * (bb.Max.Y - bb.Min.Y) * (bb.Max.Z - bb.Min.Z)
+		content = fmt.Sprintf("%s\nbbox:\n x %.2f..%.2f\n y %.2f..%.2f\n z %.2f..%.2f\nvol≈%.1f\nupd %s",
+			cur,
+			bb.Min.X, bb.Max.X,
+			bb.Min.Y, bb.Max.Y,
+			bb.Min.Z, bb.Max.Z,
+			vol,
+			meta.Updated.Format("15:04:05"),
+		)
+	} else {
+		content = errStyle.Render("missing?")
+	}
+	return bubbleBox("Metrics", content, w, h, "8")
+}
+
+// bubbleBox wraps content in a rounded bordered bubble with a dim title.
+func bubbleBox(title, content string, w, h int, borderColor string) string {
+	innerW := max(8, w-4)
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(borderColor)).
+		Width(w).
+		Height(h).
+		MaxHeight(h).
+		Padding(0, 1).
+		Render(lipgloss.JoinVertical(lipgloss.Left,
+			ansi.Truncate(dimStyle.Render(title), innerW, "…"),
+			content,
+		))
 }
 
 func (m model) viewportView(w int) string {
@@ -215,30 +229,6 @@ func (m model) viewportView(w int) string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(borderColor)).
 		Render(lipgloss.JoinVertical(lipgloss.Left, dimStyle.Render(header), content))
-}
-
-func (m model) propsView(w int) string {
-	cur := m.w.Current()
-	if cur == "" {
-		return dimStyle.Width(w).Render(" no selection\n\nj/k: nav objects\nenter: set current\ntab: cycle focus\nT/L: toggle boxes\n\nViewport (focused):\n1/2/3/4: projection\np: preview  r: refresh\n←→↑↓: orbit (3D)\nshift+arrows: pan (3D)\n+/−: zoom  0: reset\n[ ]: resolution\npgup/pgdown: lua history\n\nBox (focused):\n↑↓: scroll\npgup/pgdown: page scroll\n\ns: save\nt: think mode\nctrl+n: full logs\n?: help")
-	}
-	s, meta, ok := m.w.Get(cur)
-	if !ok {
-		return errStyle.Render("missing?")
-	}
-	bb, _ := m.w.Bounds(cur)
-	vol := (bb.Max.X - bb.Min.X) * (bb.Max.Y - bb.Min.Y) * (bb.Max.Z - bb.Min.Z)
-	txt := fmt.Sprintf("%s\n\nbbox:\n  x %.2f..%.2f\n  y %.2f..%.2f\n  z %.2f..%.2f\nvol≈%.1f\n\nupdated: %s",
-		cur,
-		bb.Min.X, bb.Max.X,
-		bb.Min.Y, bb.Max.Y,
-		bb.Min.Z, bb.Max.Z,
-		vol,
-		meta.Updated.Format("15:04:05"),
-	)
-	_ = s
-
-	return lipgloss.NewStyle().Width(w).MaxHeight(m.bodyH()).Render(txt)
 }
 
 func (m model) bottomBoxesView() string {

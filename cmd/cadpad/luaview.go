@@ -84,22 +84,22 @@ func (m *model) reloadSource() bool {
 	return true
 }
 
-// toggleSourceView opens or closes the source panel, loading the active
-// script on open.
+// toggleSourceView opens or closes the source panel, reloading the active
+// script on open (best-effort: with no script yet the panel shows a
+// placeholder until the model writes one).
 func (m *model) toggleSourceView() {
 	if m.showSource {
 		m.showSource = false
 		if m.focus == focusSource {
 			m.focus = focusViewport
 		}
+		m.status = "lua source hidden"
 		return
 	}
-	if !m.reloadSource() {
-		m.status = "no lua script yet — generate something or pgup/pgdown to browse"
-		return
-	}
+	m.reloadSource()
 	m.sourceScroll = 0 // follow the tail
 	m.showSource = true
+	m.status = "lua source shown"
 }
 
 // sourcePanel renders the bordered source panel at the given total width
@@ -138,14 +138,17 @@ func (m model) sourcePanel(w, h int) string {
 	}
 	content := b.String()
 	if content == "" {
-		content = dimStyle.Render("(empty file)")
+		content = dimStyle.Render("(no lua yet — describe\nsomething to build)")
 	}
 
 	borderColor := "11"
 	if m.focus == focusSource {
 		borderColor = "3"
 	}
-	title := "Lua Source (v) · " + m.sourceName
+	title := "Lua Source (v)"
+	if m.sourceName != "" {
+		title += " · " + m.sourceName
+	}
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color(borderColor)).

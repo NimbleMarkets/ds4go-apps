@@ -290,6 +290,11 @@ func newModel(app *appinit.App) model {
 		m.luaEntryIndex = 0
 	}
 
+	// The lua source panel is part of the default layout; load the most
+	// recent workspace script if one exists, else it shows a placeholder.
+	m.showSource = true
+	m.reloadSource()
+
 	return m
 }
 

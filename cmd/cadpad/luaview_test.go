@@ -42,6 +42,11 @@ func luaViewTestModel(t *testing.T) model {
 	}
 	m.luaEntries = []luaEntry{{filename: "cadpad.tower.lua", path: path}}
 	m.luaEntryIndex = 0
+	// newModel defaults the panel on and may have loaded a real workspace
+	// script; reset so each test drives the fixture explicitly.
+	m.showSource = false
+	m.sourceName = ""
+	m.sourceLines = nil
 	return m
 }
 
@@ -72,15 +77,20 @@ func TestToggleSourceViewLoadsActiveScript(t *testing.T) {
 
 func TestToggleSourceViewWithoutScript(t *testing.T) {
 	m := luaViewTestModel(t)
+	m.showSource = false
 	m.luaEntries = nil
 	m.lastActiveLua = ""
+	m.sourceLines = nil
+	m.sourceName = ""
 
+	// The panel is a fixture of the layout now: it opens even with no
+	// script and shows a placeholder until the model writes one.
 	m.toggleSourceView()
-	if m.showSource {
-		t.Error("showSource = true with no script available")
+	if !m.showSource {
+		t.Error("showSource = false after toggle, want placeholder panel")
 	}
-	if !strings.Contains(m.status, "no lua script") {
-		t.Errorf("status = %q, want a no-script notice", m.status)
+	if panel := ansi.Strip(m.sourcePanel(40, 12)); !strings.Contains(panel, "no lua yet") {
+		t.Errorf("panel missing placeholder: %q", panel)
 	}
 }
 
@@ -169,5 +179,36 @@ func TestSourceScrollClampsAndFollowsTail(t *testing.T) {
 	panel := m.sourcePanel(60, 8)
 	if !strings.Contains(ansi.Strip(panel), "-- build a tower") {
 		t.Error("over-scrolled panel should clamp to the top of the file")
+	}
+}
+
+func TestSourceShownByDefault(t *testing.T) {
+	m := newModel(testApp(log.New(io.Discard, "", 0), ds4log.NewBuffer(10)))
+	if !m.showSource {
+		t.Error("showSource = false on startup, want the lua panel visible by default")
+	}
+}
+
+// The body row is flexbox-managed: objects + metrics bubbles stacked on the
+// left, lua source beside them, viewport taking the rest. Mouse hit-testing
+// must account for the source column.
+func TestBodyBubblesAndViewportBounds(t *testing.T) {
+	m := luaViewTestModel(t)
+	m.showSource = true
+	m.reloadSource()
+	m.w.Create("box1", "box", map[string]float64{"x": 4, "y": 3, "z": 2})
+
+	body := ansi.Strip(m.bodyView())
+	for _, want := range []string{"Objects", "Metrics", "cadpad.tower.lua", "box1"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q:\n%s", want, body)
+		}
+	}
+
+	x0With, _, _, _ := m.viewportBounds()
+	m.showSource = false
+	x0Without, _, _, _ := m.viewportBounds()
+	if x0With <= x0Without {
+		t.Errorf("viewport x0 with source = %d, without = %d — bounds must shift right of the source column", x0With, x0Without)
 	}
 }
