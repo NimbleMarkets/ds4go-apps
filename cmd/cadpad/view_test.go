@@ -312,3 +312,36 @@ func TestFooterStatusLineFlattensMultilineHistory(t *testing.T) {
 		t.Errorf("footer status line width = %d, want <= %d", w, m.width)
 	}
 }
+
+// Selecting an object in the list must follow through to the viewport:
+// j/k (and enter) make the selection current AND refresh the preview —
+// previously SetCurrent never re-rendered, so the list appeared dead.
+func TestSelectObjectFollowsViewport(t *testing.T) {
+	m := newModel(testApp(log.New(io.Discard, "", 0), ds4log.NewBuffer(10)))
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = m2.(model)
+	m.w.Create("box1", "box", map[string]float64{"x": 1, "y": 1, "z": 1})
+	m.w.Create("box2", "box", map[string]float64{"x": 2, "y": 2, "z": 2})
+	m.selected = 0
+
+	cmd := m.selectObject(1)
+	if got := m.w.Current(); got != "box2" {
+		t.Errorf("Current() = %q after selectObject(1), want box2", got)
+	}
+	if cmd == nil {
+		t.Error("expected a preview render command so the viewport follows the selection")
+	}
+
+	// A second move while the first render is in flight still switches
+	// current and queues the re-render.
+	cmd2 := m.selectObject(-1)
+	if got := m.w.Current(); got != "box1" {
+		t.Errorf("Current() = %q after selectObject(-1), want box1", got)
+	}
+	if cmd2 != nil && !m.previewDirty {
+		t.Error("expected coalesced render: nil cmd with previewDirty set")
+	}
+	if cmd2 == nil && !m.previewDirty {
+		t.Error("second selection neither rendered nor queued a render")
+	}
+}

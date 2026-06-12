@@ -61,6 +61,19 @@ func (m *model) moveSelection(delta int) {
 	m.selected = (m.selected + delta + len(names)) % len(names)
 }
 
+// selectObject moves the list selection, makes it current, and refreshes
+// the preview so the viewport follows the selection.
+func (m *model) selectObject(delta int) tea.Cmd {
+	m.moveSelection(delta)
+	names := m.w.Names()
+	if len(names) == 0 || m.selected >= len(names) {
+		return nil
+	}
+	m.w.SetCurrent(names[m.selected])
+	m.status = "current = " + names[m.selected]
+	return m.refreshPreview()
+}
+
 func (m model) refreshPreviewCmd() tea.Cmd {
 	cur := m.w.Current()
 	if cur == "" {

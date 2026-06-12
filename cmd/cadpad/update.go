@@ -250,6 +250,7 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 				m.w.SetCurrent(names[m.selected])
 				m.status = "current = " + names[m.selected]
 				m.input.Blur()
+				return m, m.refreshPreview()
 			}
 			return m, nil
 		}
@@ -329,15 +330,16 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.status = msg
 		return m, nil
 	case key.Matches(msg, key.NewBinding(key.WithKeys("j"))):
-		m.moveSelection(1)
-		return m, nil
+		// Selection follows the viewport: moving makes the object current
+		// and re-renders.
+		return m, m.selectObject(1)
 	case key.Matches(msg, key.NewBinding(key.WithKeys("k"))):
-		m.moveSelection(-1)
-		return m, nil
+		return m, m.selectObject(-1)
 	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
 		if names := m.w.Names(); len(names) > 0 {
 			m.w.SetCurrent(names[m.selected])
 			m.status = "current = " + names[m.selected]
+			return m, m.refreshPreview()
 		}
 		return m, nil
 	}
