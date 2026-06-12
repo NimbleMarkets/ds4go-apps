@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	ds4 "github.com/NimbleMarkets/ds4go"
 	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
 	"github.com/charmbracelet/x/ansi"
@@ -266,5 +267,37 @@ func TestInitialPreviewRendersAtFirstWindowSize(t *testing.T) {
 	m = m2.(model)
 	if m.renderingPreview {
 		t.Error("later resizes must not auto-render")
+	}
+}
+
+// An intermediate successful lua_run during a generation must show up in
+// the viewport immediately, not at end of turn.
+func TestIntermediateLuaRunRefreshesPreview(t *testing.T) {
+	m := luaViewTestModel(t)
+	m.inferencing = true
+	m.w.Create("ball", "sphere", map[string]float64{"r": 2})
+	m.renderingPreview = false
+
+	m = updateDriverEvent(t, m, bubble.ToolResultsEvent{Results: []ds4.ChatMessage{
+		{Role: "tool", Content: "Executed current.lua successfully. World updated."},
+	}})
+	if !m.renderingPreview {
+		t.Error("successful intermediate lua_run did not refresh the preview")
+	}
+
+	// A failed run must not waste a render on unchanged geometry.
+	m.renderingPreview = false
+	m = updateDriverEvent(t, m, bubble.ToolResultsEvent{Results: []ds4.ChatMessage{
+		{Role: "tool", Content: "Lua execution error in current.lua:\nsyntax error"},
+	}})
+	if m.renderingPreview {
+		t.Error("failed lua_run should not refresh the preview")
+	}
+}
+
+func TestToolLoopBudget(t *testing.T) {
+	m := newModel(testApp(log.New(io.Discard, "", 0), ds4log.NewBuffer(10)))
+	if m.maxRounds != 36 {
+		t.Errorf("maxRounds = %d, want 36", m.maxRounds)
 	}
 }

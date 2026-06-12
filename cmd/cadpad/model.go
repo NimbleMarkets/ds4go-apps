@@ -227,7 +227,7 @@ func newModel(app *appinit.App) model {
 		pic:       pic,
 		tools:     ds4.NewToolRegistry(),
 		thinkMode: ds4.ThinkNone,
-		maxRounds: 12,
+		maxRounds: 36,
 		lifecycle: engineLifecycle{status: engineinit.StatusDormant},
 		status:    "Ready. Type a modeling request or /create box base 4 3 2",
 		logTop:    -1,

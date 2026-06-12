@@ -646,6 +646,16 @@ func (m model) handleDriverEvent(msg driverEventMsg, cmds *[]tea.Cmd) model {
 		if m.showSource {
 			m.reloadSource()
 		}
+		// An intermediate successful lua_run changed the world — show the
+		// new geometry now rather than at end of turn.
+		for _, r := range ev.Results {
+			if strings.Contains(r.Content, "successfully. World updated") {
+				if cmd := m.refreshPreview(); cmd != nil {
+					*cmds = append(*cmds, cmd)
+				}
+				break
+			}
+		}
 
 	case bubble.RoundStartedEvent:
 		m.genRound = ev.Round + 1
