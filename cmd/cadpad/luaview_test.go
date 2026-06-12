@@ -212,3 +212,34 @@ func TestBodyBubblesAndViewportBounds(t *testing.T) {
 		t.Errorf("viewport x0 with source = %d, without = %d — bounds must shift right of the source column", x0With, x0Without)
 	}
 }
+
+// On startup the viewport must show the same script the source panel
+// displays: Init executes the active lua entry into the world (the
+// debug_box seed is only a fallback for an empty workspace).
+func TestInitSyncsWorldWithSourcePanel(t *testing.T) {
+	m := luaViewTestModel(t)
+	m.showSource = true
+	m.reloadSource()
+
+	if cmd := m.Init(); cmd == nil {
+		t.Fatal("Init returned nil batch")
+	}
+	if !m.w.Has("tower") {
+		t.Errorf("world missing %q from the startup script; objects = %v", "tower", m.w.Names())
+	}
+	if m.w.Has("debug_box") {
+		t.Error("debug_box seeded even though a workspace script exists")
+	}
+}
+
+func TestInitSeedsDebugBoxWithoutScripts(t *testing.T) {
+	m := luaViewTestModel(t)
+	m.luaEntries = nil
+
+	if cmd := m.Init(); cmd == nil {
+		t.Fatal("Init returned nil batch")
+	}
+	if !m.w.Has("debug_box") {
+		t.Errorf("expected debug_box fallback, objects = %v", m.w.Names())
+	}
+}

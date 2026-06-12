@@ -17,6 +17,7 @@ import (
 	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
 	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/harness"
+	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/lua"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/luals"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/render"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/tools"
@@ -359,13 +360,26 @@ func scanExistingLuaFiles(dir string, logger *log.Logger) []luaEntry {
 }
 
 func (m model) Init() tea.Cmd {
-	// Seed a debug object so the preview pane is never empty on start.
-	m.w.Create("debug_box", "box", map[string]float64{"x": 4, "y": 3, "z": 2})
+	// Sync the startup viewport with the source panel: build the world from
+	// the same script the panel shows. The debug box is only a fallback so
+	// the preview pane is never empty on a fresh workspace.
+	if m.luaEntryIndex >= 0 && m.luaEntryIndex < len(m.luaEntries) {
+		entry := m.luaEntries[m.luaEntryIndex]
+		st := lua.NewState(m.w, m.renderer)
+		if err := st.DoFile(entry.path); err != nil {
+			m.logger.Printf("[INIT] startup load %s failed: %v", entry.filename, err)
+		}
+		st.Close()
+	}
+	if len(m.w.Names()) == 0 {
+		m.w.Create("debug_box", "box", map[string]float64{"x": 4, "y": 3, "z": 2})
+	}
 
 	cmds := []tea.Cmd{
 		m.pic.Init(),
 		picture.RequestCellSize(),
 		picture.QueryKittySupport(),
+		m.refreshPreviewCmd(),
 		tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg {
 			return kittyAutoToggleMsg{}
 		}),

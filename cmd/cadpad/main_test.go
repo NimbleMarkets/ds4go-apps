@@ -42,13 +42,16 @@ func TestNoEngineInit(t *testing.T) {
 
 	// Calling Init must not panic and must not schedule an engine open cmd.
 	// We don't execute the returned cmds (they are tea.Cmd funcs), we just
-	// ensure the batch is constructed without crashing.
+	// ensure the batch is constructed without crashing. Clear any real
+	// workspace scripts so Init takes the debug_box fallback path.
+	m.luaEntries = nil
 	cmd := m.Init()
 	if cmd == nil {
 		t.Fatal("Init returned nil batch")
 	}
 
-	// cadpad now seeds a debug object on start so the preview pane is never empty.
+	// cadpad seeds a debug object on an empty workspace so the preview pane
+	// is never empty.
 	if len(m.w.Names()) != 1 {
 		t.Errorf("expected 1 seeded object, got %d", len(m.w.Names()))
 	}
