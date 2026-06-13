@@ -141,9 +141,11 @@ func (m model) sourcePanel(w, h int) string {
 		content = dimStyle.Render("(no lua yet — describe\nsomething to build)")
 	}
 
-	borderColor := "11"
+	// Neutral gray when unfocused (matching the other panels), bright
+	// yellow when focused — yellow-on-yellow gave no visible focus cue.
+	borderColor := "8"
 	if m.focus == focusSource {
-		borderColor = "3"
+		borderColor = "11"
 	}
 	title := "Lua Source (v)"
 	if m.sourceName != "" {

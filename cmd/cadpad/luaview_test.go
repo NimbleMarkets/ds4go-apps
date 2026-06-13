@@ -301,3 +301,40 @@ func TestToolLoopBudget(t *testing.T) {
 		t.Errorf("maxRounds = %d, want 36", m.maxRounds)
 	}
 }
+
+// topBorderColor returns the first SGR escape sequence in a rendered box,
+// i.e. its border color.
+func topBorderColor(rendered string) string {
+	if i := strings.Index(rendered, "\x1b["); i >= 0 {
+		if j := strings.IndexByte(rendered[i:], 'm'); j >= 0 {
+			return rendered[i : i+j+1]
+		}
+	}
+	return ""
+}
+
+// tab must cycle focus onto the source panel, and the panel must use the
+// same neutral border as the other panels when unfocused and a distinct
+// bright border when focused — yellow-on-yellow gave no visible cue.
+func TestSourcePanelFocusIsVisible(t *testing.T) {
+	m := luaViewTestModel(t)
+	m.showSource = true
+	m.reloadSource()
+	m.w.Create("ball", "sphere", map[string]float64{"r": 2})
+
+	unfocused := m.sourcePanel(40, 12)
+	neutral := topBorderColor(m.objectsBubble(20, 10)) // always-unfocused reference
+	if got := topBorderColor(unfocused); got != neutral {
+		t.Errorf("unfocused source border = %q, want neutral %q (match other panels)", got, neutral)
+	}
+
+	m2, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
+	m = m2.(model)
+	if m.focus != focusSource {
+		t.Fatalf("focus = %v after tab, want focusSource", m.focus)
+	}
+	focused := m.sourcePanel(40, 12)
+	if topBorderColor(focused) == neutral {
+		t.Error("focused source border is still neutral — no visible focus indicator")
+	}
+}

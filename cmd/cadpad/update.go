@@ -500,18 +500,27 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 		// sourceScroll counts lines back from the tail; 0 follows writes.
 		page := m.sourceVisibleLines()
 		maxScroll := max(0, len(m.sourceLines)-page)
+		scrolled := false
 		switch {
 		case key.Matches(msg, key.NewBinding(key.WithKeys("up"))):
 			m.sourceScroll = min(maxScroll, m.sourceScroll+1)
-			return m, nil
+			scrolled = true
 		case key.Matches(msg, key.NewBinding(key.WithKeys("down"))):
 			m.sourceScroll = max(0, m.sourceScroll-1)
-			return m, nil
+			scrolled = true
 		case key.Matches(msg, key.NewBinding(key.WithKeys("pgup"))):
 			m.sourceScroll = min(maxScroll, m.sourceScroll+page)
-			return m, nil
+			scrolled = true
 		case key.Matches(msg, key.NewBinding(key.WithKeys("pgdown"))):
 			m.sourceScroll = max(0, m.sourceScroll-page)
+			scrolled = true
+		}
+		if scrolled {
+			if m.sourceScroll == 0 {
+				m.status = "lua source: following"
+			} else {
+				m.status = fmt.Sprintf("lua source: %d line(s) from end", m.sourceScroll)
+			}
 			return m, nil
 		}
 	case focusLuaOutput:
