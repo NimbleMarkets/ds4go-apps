@@ -89,12 +89,6 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 			return previewUpdatedMsg{name: cur, ok: false, err: "no sdf"}
 		}
 		pc, pr := m.viewportInnerSize()
-		// Interactive camera movement traces at a third of the pixel budget
-		// (~9x fewer rays); the camIdleMsg full-res pass restores quality.
-		scale := 1
-		if m.previewLowRes && m.proj == render.ProjAngle {
-			scale = 3
-		}
 		var img image.Image
 		var rect image.Rectangle
 		var err error
@@ -106,7 +100,11 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 				PanX:      m.camPanX,
 				PanY:      m.camPanY,
 			}
-			img, rect, err = m.renderer.RenderAngledScale(s, cur, cp, pc*8, pr*16, scale)
+			// Mesh path: the SDF is marched to triangles once (cached by
+			// object name) and the cached mesh is rasterized each frame, so
+			// camera moves are fast regardless of scene complexity and need
+			// no low-res interactive pass.
+			img, rect, err = m.renderer.RenderAngledMesh(s, cur, cp, pc*8, pr*16, 1)
 		} else {
 			img, rect, err = m.renderer.Render(s, cur, m.proj, pc*8, pr*16)
 		}

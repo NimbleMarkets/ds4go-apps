@@ -57,11 +57,6 @@ type generationStartedMsg struct {
 // when the terminal probe has completed.
 type kittyAutoToggleMsg struct{}
 
-// camIdleMsg fires after camIdleDelay following a camera interaction. seq
-// identifies which interaction armed it: a tick whose seq no longer matches
-// camSeq is stale (the camera moved again) and is dropped.
-type camIdleMsg struct{ seq int }
-
 type engineLifecycle struct {
 	status engineinit.Status
 	err    error
@@ -170,12 +165,6 @@ type model struct {
 	// Preview render throttling/coalescing
 	renderingPreview bool
 	previewDirty     bool
-
-	// Progressive refinement for the 3D angle view: camera interactions
-	// render at reduced resolution for instant feedback, then a camIdleMsg
-	// triggers the full-resolution pass once input has settled.
-	previewLowRes bool
-	camSeq        int
 
 	// View cache for high-frequency input events
 	cachedView *string

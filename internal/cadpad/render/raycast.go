@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"math"
 	"runtime"
 	"sync"
 
@@ -15,13 +14,6 @@ import (
 )
 
 // Camera describes a simple perspective camera.
-type Camera struct {
-	Eye    ms3.Vec
-	LookAt ms3.Vec
-	Up     ms3.Vec
-	FOV    float32 // vertical field of view in radians
-}
-
 // CameraParams holds user-controllable orbit camera settings.
 type CameraParams struct {
 	Azimuth   float32 // radians around Z, 0 = +X
@@ -72,43 +64,21 @@ func (r *Renderer) RenderAngledScale(s3 simplesdf.SDF3, name string, cp CameraPa
 		img.Pix[off+3] = 255
 	}
 
-	// Build camera basis from azimuth/elevation.
+	// Build camera basis from azimuth/elevation (shared with the mesh
+	// rasterizer so both framings match).
 	bb3cpu, err := gleval.NewCPUSDF3(s3.Shader())
 	if err != nil {
 		return nil, image.Rectangle{}, fmt.Errorf("NewCPUSDF3 bounds check: %w", err)
 	}
 	bb := bb3cpu.Bounds()
-	center := bb.Center()
-	size := bb.Size()
-	diag := math32.Sqrt(size.X*size.X + size.Y*size.Y + size.Z*size.Z)
-
-	forward := ms3.Unit(ms3.Vec{
-		X: math32.Cos(cp.Elevation) * math32.Cos(cp.Azimuth),
-		Y: math32.Cos(cp.Elevation) * math32.Sin(cp.Azimuth),
-		Z: math32.Sin(cp.Elevation),
-	})
-	right := ms3.Unit(ms3.Vec{X: -math32.Sin(cp.Azimuth), Y: math32.Cos(cp.Azimuth), Z: 0})
-	up := ms3.Unit(ms3.Cross(forward, right))
-
-	dist := diag * 1.5 * cp.Zoom
-	pan := ms3.Add(ms3.Scale(cp.PanX*diag*0.1, right), ms3.Scale(cp.PanY*diag*0.1, up))
-	lookAt := ms3.Add(center, pan)
-	eye := ms3.Add(lookAt, ms3.Scale(dist, forward))
-
-	cam := Camera{
-		Eye:    eye,
-		LookAt: lookAt,
-		Up:     up,
-		FOV:    float32(math.Pi / 4),
-	}
-
-	lightDir := ms3.Unit(ms3.Vec{X: 1, Y: 1, Z: 1})
-
-	forward = ms3.Unit(ms3.Sub(cam.LookAt, cam.Eye))
-	right = ms3.Unit(ms3.Cross(forward, cam.Up))
-	up = ms3.Cross(right, forward)
+	cam := cameraFor(bb, cp)
+	eye := cam.eye
+	forward := cam.forward
+	right := cam.right
+	up := cam.up
+	diag := cam.diag
 	aspect := float32(w) / float32(h)
-	tanFOV := math32.Tan(cam.FOV / 2)
+	tanFOV := math32.Tan(cam.fov / 2)
 
 	numWorkers := runtime.GOMAXPROCS(0)
 	if numWorkers < 1 {
@@ -143,7 +113,7 @@ func (r *Renderer) RenderAngledScale(s3 simplesdf.SDF3, name string, cp CameraPa
 					u := (2.0*(float32(x)+0.5)/float32(w) - 1.0) * aspect * tanFOV
 					d := ms3.Unit(ms3.Add(ms3.Add(forward, ms3.Scale(u, right)), ms3.Scale(v, up)))
 					active = append(active, activeRay{
-						origin: cam.Eye,
+						origin: eye,
 						dir:    d,
 						t:      0,
 						pix:    y*w + x,

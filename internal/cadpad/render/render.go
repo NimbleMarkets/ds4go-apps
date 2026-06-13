@@ -105,7 +105,7 @@ func projectSDF3ToSDF2(s3 simplesdf.SDF3, p Projection) (gleval.SDF2, ms2.Box, e
 // coordinate on the omitted axis (midplane cross-section).
 type axisSlice struct {
 	s3      *gleval.SDF3CPU
-	fixAxis int     // 0=X, 1=Y, 2=Z
+	fixAxis int // 0=X, 1=Y, 2=Z
 	fixVal  float32
 	bb2     ms2.Box // padded 2D bounds for rendering
 }
@@ -140,11 +140,12 @@ func (a *axisSlice) Evaluate(pos []ms2.Vec, dist []float32, userData any) error 
 // Renderer wraps a reusable glrender.ImageRendererSDF2 + small cache of
 // projected SDF2s so repeated previews of the same object+proj are near-instant.
 type Renderer struct {
-	mu     sync.Mutex
-	ir     *glrender.ImageRendererSDF2
-	cfg    PreviewConfig
-	cache  map[string]cachedSDF2 // key = name + ":" + proj
-	lastSz map[string]image.Rectangle
+	mu        sync.Mutex
+	ir        *glrender.ImageRendererSDF2
+	cfg       PreviewConfig
+	cache     map[string]cachedSDF2 // key = name + ":" + proj
+	lastSz    map[string]image.Rectangle
+	meshCache map[string][]ms3.Triangle // key = object name (3D angle view)
 }
 
 // NewRenderer constructs a renderer. A single Renderer should be shared by
@@ -161,11 +162,42 @@ func NewRenderer(cfg PreviewConfig) (*Renderer, error) {
 		return nil, err
 	}
 	return &Renderer{
-		ir:     ir,
-		cfg:    cfg,
-		cache:  make(map[string]cachedSDF2),
-		lastSz: make(map[string]image.Rectangle),
+		ir:        ir,
+		cfg:       cfg,
+		cache:     make(map[string]cachedSDF2),
+		lastSz:    make(map[string]image.Rectangle),
+		meshCache: make(map[string][]ms3.Triangle),
 	}, nil
+}
+
+// RenderAngledMesh renders the 3D angle view by rasterizing a cached
+// triangle mesh of the object. The expensive SDF march happens once per
+// object (cached by name); subsequent camera moves only re-rasterize, so
+// cost is independent of CSG-tree size. Call Invalidate(name) or
+// ClearCache when the object's geometry changes. downscale < 1 means 1.
+func (r *Renderer) RenderAngledMesh(s3 simplesdf.SDF3, name string, cp CameraParams, maxW, maxH, downscale int) (image.Image, image.Rectangle, error) {
+	if s3.Shader() == nil {
+		return nil, image.Rectangle{}, errors.New("nil SDF3")
+	}
+	r.mu.Lock()
+	tris, ok := r.meshCache[name]
+	r.mu.Unlock()
+
+	if !ok {
+		var err error
+		tris, err = MeshObject(s3, 0)
+		if err != nil {
+			return nil, image.Rectangle{}, err
+		}
+		r.mu.Lock()
+		r.meshCache[name] = tris
+		r.mu.Unlock()
+	}
+
+	r.mu.Lock()
+	maxEdge := r.cfg.MaxEdge
+	r.mu.Unlock()
+	return rasterizeMesh(tris, cp, maxW, maxH, maxEdge, downscale)
 }
 
 // Render produces an image.Image for the given object's projection.
@@ -264,6 +296,7 @@ func (r *Renderer) ClearCache() {
 	r.mu.Lock()
 	r.cache = make(map[string]cachedSDF2)
 	r.lastSz = make(map[string]image.Rectangle)
+	r.meshCache = make(map[string][]ms3.Triangle)
 	r.mu.Unlock()
 }
 
@@ -287,6 +320,7 @@ func (r *Renderer) Invalidate(name string) {
 		delete(r.cache, key)
 		delete(r.lastSz, key)
 	}
+	delete(r.meshCache, name)
 }
 
 // DefaultColorConv returns a simple high-contrast scheme (black=inside).
