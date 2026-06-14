@@ -411,6 +411,7 @@ Viewport focus
   0             reset camera (3D angle mode only)
   p             refresh preview of current
   r             clear render cache + refresh
+  R             high-quality render of current view (smooth, slow)
   pgup/pgdown   browse previous .lua files
   v             view active .lua source (syntax highlighted)
 

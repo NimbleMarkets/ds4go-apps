@@ -309,6 +309,19 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, m.pic.SetSize(pc, pr)
 		}
 		return m, nil
+	case key.Matches(msg, key.NewBinding(key.WithKeys("R"))):
+		// One-shot high-quality (smooth SDF-traced) render of the current
+		// view. Slow for complex scenes, so it's manual — the fast mesh
+		// stays the default for navigation.
+		if m.w.Current() == "" && len(m.w.Names()) == 0 {
+			m.status = "nothing to render yet"
+			return m, nil
+		}
+		m.hqRender = true
+		m.status = "high-quality render… (a few seconds)"
+		cmd := m.refreshPreview()
+		m.hqRender = false // one-shot: next camera move uses the fast mesh
+		return m, cmd
 	case key.Matches(msg, key.NewBinding(key.WithKeys("L"))):
 		m.showLuaOutput = !m.showLuaOutput
 		if !m.showLuaOutput && m.focus == focusLuaOutput {

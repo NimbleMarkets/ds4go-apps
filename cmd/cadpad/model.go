@@ -166,6 +166,12 @@ type model struct {
 	renderingPreview bool
 	previewDirty     bool
 
+	// hqRender is a one-shot flag: when set, the next angle-view render uses
+	// the slow, smooth SDF sphere tracer instead of the fast cached mesh.
+	// The 'R' key sets it and immediately resets it so camera moves stay on
+	// the fast path.
+	hqRender bool
+
 	// View cache for high-frequency input events
 	cachedView *string
 }

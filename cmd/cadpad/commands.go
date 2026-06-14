@@ -99,11 +99,17 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 				PanX:      m.camPanX,
 				PanY:      m.camPanY,
 			}
-			// Mesh path: the SDF is marched to triangles once (cached by
-			// object name) and the cached mesh is rasterized each frame, so
-			// camera moves are fast regardless of scene complexity and need
-			// no low-res interactive pass.
-			img, rect, err = m.renderer.RenderAngledMesh(s, cur, cp, pc*8, pr*16, 1)
+			if m.hqRender {
+				// High-quality one-shot: smooth SDF sphere trace at full
+				// resolution (the slow path), for a final look once the
+				// camera is framed.
+				img, rect, err = m.renderer.RenderAngledScale(s, cur, cp, pc*8, pr*16, 1)
+			} else {
+				// Mesh path: the SDF is marched to triangles once (cached by
+				// object name) and the cached mesh is rasterized each frame,
+				// so camera moves are fast regardless of scene complexity.
+				img, rect, err = m.renderer.RenderAngledMesh(s, cur, cp, pc*8, pr*16, 1)
+			}
 		} else {
 			img, rect, err = m.renderer.Render(s, cur, m.proj, pc*8, pr*16)
 		}

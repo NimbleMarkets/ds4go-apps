@@ -11,6 +11,7 @@ import (
 	tea "charm.land/bubbletea/v2"
 	ds4 "github.com/NimbleMarkets/ds4go"
 	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
+	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/render"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -358,5 +359,48 @@ func TestExportObjectByExtension(t *testing.T) {
 
 	if _, err := exportObject(m.w, "nope", tmf, 64); err == nil {
 		t.Error("expected error exporting a missing object")
+	}
+}
+
+// 'R' triggers a one-shot high-quality (SDF-traced) render of the current
+// view: it issues a render, flags it, and resets the flag so subsequent
+// camera moves go back to the fast mesh path.
+func TestHighQualityRenderIsOneShot(t *testing.T) {
+	m := luaViewTestModel(t)
+	m.w.Create("ball", "sphere", map[string]float64{"r": 3})
+	m.proj = render.ProjAngle
+	m.renderingPreview = false
+
+	m, cmd := m.handleKeyMsg(tea.KeyPressMsg{Code: 'R', Text: "R"})
+	if cmd == nil {
+		t.Fatal("R produced no render command")
+	}
+	if !m.renderingPreview {
+		t.Error("R did not start a render")
+	}
+	if m.hqRender {
+		t.Error("hqRender not reset — HQ must be one-shot, not a sticky mode")
+	}
+	if !strings.Contains(strings.ToLower(m.status), "high") {
+		t.Errorf("status = %q, want a high-quality notice", m.status)
+	}
+}
+
+// With hqRender set, the render path produces a valid preview (the SDF
+// tracer branch runs end to end).
+func TestHighQualityRenderProducesImage(t *testing.T) {
+	m := luaViewTestModel(t)
+	m.w.Create("ball", "sphere", map[string]float64{"r": 3})
+	m.proj = render.ProjAngle
+	m.width, m.height = 100, 36
+	m.hqRender = true
+
+	msg := m.refreshPreviewCmd()()
+	pu, ok := msg.(previewUpdatedMsg)
+	if !ok || !pu.ok {
+		t.Fatalf("HQ render failed: %+v", msg)
+	}
+	if pu.img == nil || pu.img.Bounds().Dx() == 0 {
+		t.Error("HQ render produced no image")
 	}
 }
