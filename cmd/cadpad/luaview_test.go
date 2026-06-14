@@ -338,3 +338,25 @@ func TestSourcePanelFocusIsVisible(t *testing.T) {
 		t.Error("focused source border is still neutral — no visible focus indicator")
 	}
 }
+
+func TestExportObjectByExtension(t *testing.T) {
+	m := luaViewTestModel(t)
+	m.w.Create("ball", "sphere", map[string]float64{"r": 3})
+	dir := t.TempDir()
+
+	// .3mf routes to the octree mesh + WriteSDF3MF path.
+	// (The .stl branch routes to gsdf's SaveSTL, which has a data race in
+	// its parallel CPU renderer under -race; that path is upstream and
+	// unchanged here, so this test exercises the 3MF branch end to end.)
+	tmf := filepath.Join(dir, "ball.3mf")
+	if _, err := exportObject(m.w, "ball", tmf, 64); err != nil {
+		t.Fatalf("3MF export: %v", err)
+	}
+	if fi, err := os.Stat(tmf); err != nil || fi.Size() == 0 {
+		t.Errorf("3MF not written: %v", err)
+	}
+
+	if _, err := exportObject(m.w, "nope", tmf, 64); err == nil {
+		t.Error("expected error exporting a missing object")
+	}
+}

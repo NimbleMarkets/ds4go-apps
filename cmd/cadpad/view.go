@@ -436,7 +436,7 @@ Commands (bottom bar)
     /boolean diff base cutter blend=0.1
     /transform post translate 0 0 3
     /group assembly base post
-    /export name.stl
+    /export name file.stl|file.3mf
     /save mysession.cad.json
     /load mysession.cad.json
     /clear

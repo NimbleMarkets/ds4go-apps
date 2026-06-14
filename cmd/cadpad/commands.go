@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"image"
 	"os"
@@ -357,7 +356,7 @@ func (m model) handleSlash(text string) tea.Cmd {
 			out = "group ok"
 		case "export":
 			if len(args) < 1 {
-				err = fmt.Errorf("usage: /export <name> <file.stl>")
+				err = fmt.Errorf("usage: /export <name> [file.stl|file.3mf]")
 				break
 			}
 			name := args[0]
@@ -365,8 +364,7 @@ func (m model) handleSlash(text string) tea.Cmd {
 			if len(args) > 1 {
 				file = args[1]
 			}
-			raw, _ := json.Marshal(map[string]any{"name": name, "filename": file, "resolution_divisions": 256})
-			out, err = toolsExportShim(m.w, m.renderer, raw)
+			out, err = exportObject(m.w, name, file, 256)
 		case "save":
 			fn := "cadpad-session.cad.json"
 			if len(args) > 0 {
@@ -401,25 +399,32 @@ func (m model) handleSlash(text string) tea.Cmd {
 	}
 }
 
-func toolsExportShim(w *world.World, r *render.Renderer, raw json.RawMessage) (string, error) {
-	var a struct {
-		Name     string `json:"name"`
-		Filename string `json:"filename"`
-		ResDiv   int    `json:"resolution_divisions"`
+// exportObject writes a world object to filename, choosing the format by
+// extension: ".3mf" -> 3MF mesh, anything else -> STL.
+func exportObject(w *world.World, name, filename string, divisions int) (string, error) {
+	if divisions <= 0 {
+		divisions = 256
 	}
-	json.Unmarshal(raw, &a)
-	if a.ResDiv == 0 {
-		a.ResDiv = 256
-	}
-	s, _, ok := w.Get(a.Name)
+	s, _, ok := w.Get(name)
 	if !ok {
-		return "", fmt.Errorf("not found")
+		return "", fmt.Errorf("object %q not found", name)
 	}
-	cfg := simplesdf.STLConfig{ResolutionDivisions: uint(a.ResDiv)}
-	if err := s.SaveSTL(a.Filename, cfg); err != nil {
+	if strings.EqualFold(filepath.Ext(filename), ".3mf") {
+		f, err := os.Create(filename)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+		if err := render.WriteSDF3MF(f, name, s, divisions); err != nil {
+			return "", err
+		}
+		return "exported " + filename, nil
+	}
+	cfg := simplesdf.STLConfig{ResolutionDivisions: uint(divisions)}
+	if err := s.SaveSTL(filename, cfg); err != nil {
 		return "", err
 	}
-	return "exported " + a.Filename, nil
+	return "exported " + filename, nil
 }
 
 // extractThinkFromContent extracts <think>...</think> reasoning from raw assistant

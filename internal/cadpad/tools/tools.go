@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -27,7 +28,7 @@ func Schemas() []ds4.ToolSchema {
 		{
 			Name:        "cad_create",
 			Description: "Create a named primitive (sphere, box, cylinder, torus). Replaces existing name. Sets as current.",
-			Parameters:  mustSchema(`{
+			Parameters: mustSchema(`{
 				"type":"object",
 				"properties":{
 					"name":{"type":"string","description":"Unique object name"},
@@ -79,6 +80,19 @@ func Schemas() []ds4.ToolSchema {
 		{
 			Name:        "cad_export_stl",
 			Description: "Export named object to STL file. ResolutionDivisions controls fineness (default 512).",
+			Parameters: mustSchema(`{
+				"type":"object",
+				"properties":{
+					"name":{"type":"string"},
+					"filename":{"type":"string"},
+					"resolution_divisions":{"type":"integer","minimum":64,"maximum":4096}
+				},
+				"required":["name","filename"]
+			}`),
+		},
+		{
+			Name:        "cad_export_3mf",
+			Description: "Export named object to a 3MF file (modern STL replacement: smaller, carries units + name, accepted by all slicers). ResolutionDivisions controls fineness (default 512).",
 			Parameters: mustSchema(`{
 				"type":"object",
 				"properties":{
@@ -148,16 +162,17 @@ type Handler func(ctx context.Context, w *world.World, r *render.Renderer, args 
 // Registry returns a map of name -> handler (used by harness to bind schemas).
 func Registry() map[string]Handler {
 	return map[string]Handler{
-		"cad_create":        CreatePrimitive,
-		"cad_boolean":       BooleanOp,
-		"cad_transform":     Transform,
-		"cad_group":         Group,
-		"cad_export_stl":    ExportSTL,
+		"cad_create":         CreatePrimitive,
+		"cad_boolean":        BooleanOp,
+		"cad_transform":      Transform,
+		"cad_group":          Group,
+		"cad_export_stl":     ExportSTL,
+		"cad_export_3mf":     Export3MF,
 		"cad_render_preview": RenderPreview,
-		"cad_describe":      DescribeState,
-		"cad_bbox":          GetBoundingBox,
-		"cad_save":          SaveWorld,
-		"cad_load":          LoadWorld,
+		"cad_describe":       DescribeState,
+		"cad_bbox":           GetBoundingBox,
+		"cad_save":           SaveWorld,
+		"cad_load":           LoadWorld,
 	}
 }
 
@@ -290,6 +305,39 @@ func ExportSTL(ctx context.Context, w *world.World, r *render.Renderer, raw json
 	return fmt.Sprintf("exported %s -> %s (divs=%d) in %v", a.Name, filepath.Base(a.Filename), a.ResolutionDivisions, dur.Round(time.Millisecond)), nil
 }
 
+// Export3MF writes a named object to a 3MF file (mesh, millimeters).
+func Export3MF(ctx context.Context, w *world.World, r *render.Renderer, raw json.RawMessage) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	var a struct {
+		Name                string `json:"name"`
+		Filename            string `json:"filename"`
+		ResolutionDivisions int    `json:"resolution_divisions"`
+	}
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return "", fmt.Errorf("bad args: %w", err)
+	}
+	if a.ResolutionDivisions == 0 {
+		a.ResolutionDivisions = 512
+	}
+	s, _, ok := w.Get(a.Name)
+	if !ok {
+		return "", fmt.Errorf("object %q not found", a.Name)
+	}
+	f, err := os.Create(a.Filename)
+	if err != nil {
+		return "", fmt.Errorf("3mf export: %w", err)
+	}
+	defer f.Close()
+	start := time.Now()
+	if err := render.WriteSDF3MF(f, a.Name, s, a.ResolutionDivisions); err != nil {
+		return "", fmt.Errorf("3mf export: %w", err)
+	}
+	dur := time.Since(start)
+	return fmt.Sprintf("exported %s -> %s (divs=%d) in %v", a.Name, filepath.Base(a.Filename), a.ResolutionDivisions, dur.Round(time.Millisecond)), nil
+}
+
 func RenderPreview(ctx context.Context, w *world.World, r *render.Renderer, raw json.RawMessage) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -340,7 +388,9 @@ func GetBoundingBox(ctx context.Context, w *world.World, r *render.Renderer, raw
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	var a struct{ Name string `json:"name"` }
+	var a struct {
+		Name string `json:"name"`
+	}
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return "", fmt.Errorf("bad args: %w", err)
 	}
@@ -357,7 +407,9 @@ func SaveWorld(ctx context.Context, w *world.World, r *render.Renderer, raw json
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	var a struct{ Filename string `json:"filename"` }
+	var a struct {
+		Filename string `json:"filename"`
+	}
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return "", fmt.Errorf("bad args: %w", err)
 	}
@@ -374,7 +426,9 @@ func LoadWorld(ctx context.Context, w *world.World, r *render.Renderer, raw json
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	var a struct{ Filename string `json:"filename"` }
+	var a struct {
+		Filename string `json:"filename"`
+	}
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return "", fmt.Errorf("bad args: %w", err)
 	}
