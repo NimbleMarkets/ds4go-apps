@@ -28,6 +28,19 @@ docs
 # SVG in root
 /*.svg
 
+# Mesh exports in root
+/*.stl
+/*.3mf
+
+# Local SSH keys (NEVER commit private keys)
+/id_ed25519
+/id_ed25519.pub
+
+# cadpad session + tool/runtime artifacts
+/cadpad-session.cad.json
+/users.json
+/.antigravitycli/
+
 # Go test/coverage artifacts
 *.log
 *.test
