@@ -406,7 +406,118 @@ func rewriteStatement(s string) string {
 		return "var " + rest + ";"
 	}
 
+	// Multi-component swizzle-write assignment, e.g. `p.xy -= expr` or
+	// `p.xy = expr`. naga miscompiles writes to a multi-component swizzle l-value
+	// (the assignment silently produces wrong results — see the hexprism corpus
+	// shape), so we lower it to explicit per-component writes through a temp:
+	//   p.xy -= EXPR  ->  { let _s = (EXPR); p.x = p.x - (_s).x; p.y = p.y - (_s).y; }
+	//   p.xy  = EXPR  ->  { let _s = (EXPR); p.x = (_s).x; p.y = (_s).y; }
+	// Single-component writes (p.x = ...) are correct in naga and are left alone.
+	if exp, ok := expandSwizzleWrite(s); ok {
+		return exp
+	}
+
 	return s + ";"
+}
+
+// swizzleComponents maps a swizzle name to the underlying component selectors.
+var swizzleComponents = map[byte]string{'x': "x", 'y': "y", 'z': "z", 'w': "w"}
+
+// expandSwizzleWrite detects a statement of the form
+// `<base>.<swizzle> [op]= <rhs>` where <swizzle> has two or more components and
+// rewrites it into a braced block of per-component scalar assignments through a
+// temporary. It returns the rewritten statement and true on a match; otherwise
+// ("", false). <base> may itself be an identifier (the only form in the corpus);
+// the rhs is captured verbatim. This sidesteps a naga codegen bug on
+// multi-component swizzle l-values.
+func expandSwizzleWrite(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	// Find the assignment operator at top level (paren depth 0): a '=' not part
+	// of ==/<=/>=/!=, optionally preceded by one of + - * / (compound form).
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '(', '[':
+			depth++
+		case ')', ']':
+			depth--
+		case '=':
+			if depth != 0 {
+				continue
+			}
+			// Skip comparison operators.
+			if i+1 < len(s) && s[i+1] == '=' {
+				return "", false
+			}
+			if i > 0 && (s[i-1] == '=' || s[i-1] == '<' || s[i-1] == '>' || s[i-1] == '!') {
+				return "", false
+			}
+			op := byte(0)
+			lhsEnd := i
+			if i > 0 && (s[i-1] == '+' || s[i-1] == '-' || s[i-1] == '*' || s[i-1] == '/') {
+				op = s[i-1]
+				lhsEnd = i - 1
+			}
+			lhs := strings.TrimSpace(s[:lhsEnd])
+			rhs := strings.TrimSpace(s[i+1:])
+			return buildSwizzleExpansion(lhs, op, rhs)
+		}
+	}
+	return "", false
+}
+
+// buildSwizzleExpansion turns lhs (must be `base.swizzle` with 2+ components),
+// op ('+','-','*','/' or 0 for plain '='), and rhs into a braced block of
+// per-component assignments. Returns ("", false) if lhs is not a multi-component
+// swizzle.
+func buildSwizzleExpansion(lhs string, op byte, rhs string) (string, bool) {
+	dot := strings.LastIndexByte(lhs, '.')
+	if dot <= 0 {
+		return "", false
+	}
+	base := strings.TrimSpace(lhs[:dot])
+	swz := lhs[dot+1:]
+	if len(swz) < 2 {
+		return "", false // single-component write is fine as-is
+	}
+	for i := 0; i < len(swz); i++ {
+		if _, ok := swizzleComponents[swz[i]]; !ok {
+			return "", false // not a pure swizzle (e.g. a method/field) — bail
+		}
+	}
+	// base must be a plain identifier l-value for the per-component writes to be
+	// valid (the corpus only ever swizzle-writes a local var).
+	for i := 0; i < len(base); i++ {
+		if !isIdentChar(base[i]) {
+			return "", false
+		}
+	}
+	var b strings.Builder
+	b.WriteString("{ let _swz = (")
+	b.WriteString(rhs)
+	b.WriteString(");")
+	for i := 0; i < len(swz); i++ {
+		comp := string(swz[i])
+		b.WriteString(" ")
+		b.WriteString(base)
+		b.WriteString(".")
+		b.WriteString(comp)
+		b.WriteString(" = ")
+		if op != 0 {
+			// p.x = p.x - (_swz).x
+			b.WriteString(base)
+			b.WriteString(".")
+			b.WriteString(comp)
+			b.WriteString(" ")
+			b.WriteByte(op)
+			b.WriteString(" ")
+		}
+		b.WriteString("(_swz).")
+		b.WriteString(comp)
+		b.WriteString(";")
+	}
+	b.WriteString(" }")
+	return b.String(), true
 }
 
 // stripDeclHead removes the leading declaration keywords from a statement,
@@ -520,6 +631,9 @@ var glslBuiltins = map[string]bool{
 	// are emitted by rewriteStatements when lowering GLSL declarations.
 	"return": true, "const": true, "if": true, "float": true,
 	"var": true, "let": true,
+	// synthetic temporary emitted by expandSwizzleWrite when lowering a
+	// multi-component swizzle l-value (p.xy = ...) to per-component writes.
+	"_swz": true,
 }
 
 // paramNames parses a GLSL param list "<type> <name>, ..." into the set of

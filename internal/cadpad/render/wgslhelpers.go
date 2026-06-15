@@ -50,9 +50,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (hit) {
         let p = cam.eye + t*dir;
         let n = sdfNormal(p);
-        let ld = normalize(vec3<f32>(0.5,0.7,0.6));
+        // Match raycast.go's lightDir = normalize(1,1,1) and lambert shade.
+        let ld = normalize(vec3<f32>(1.0,1.0,1.0));
         let lambert = max(dot(n,ld),0.0);
-        let shade = 0.25 + 0.75*lambert;
+        let shade = min(0.25 + 0.75*lambert, 1.0);
         col = vec3<f32>(0.85,0.95,1.0) * shade; // teal tint
     }
     out[gid.y*cam.w + gid.x] = pack(col);

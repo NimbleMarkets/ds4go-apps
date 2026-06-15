@@ -121,6 +121,44 @@ func TestTranspileCorpusCompiles(t *testing.T) {
 	}
 }
 
+// TestExpandSwizzleWrite covers the multi-component swizzle l-value lowering
+// that fixes the hexprism corpus shape (naga miscompiles `p.xy -= ...`). Single
+// component writes and non-assignments must pass through untouched.
+func TestExpandSwizzleWrite(t *testing.T) {
+	cases := []struct {
+		in       string
+		want     string
+		expanded bool
+	}{
+		{
+			in:       "p.xy -= 2.0*min(dot(k.xy, p.xy), 0.0)*k.xy",
+			want:     "{ let _swz = (2.0*min(dot(k.xy, p.xy), 0.0)*k.xy); p.x = p.x - (_swz).x; p.y = p.y - (_swz).y; }",
+			expanded: true,
+		},
+		{
+			in:       "p.xy = vec3<f32>(1.0,2.0,3.0).xy",
+			want:     "{ let _swz = (vec3<f32>(1.0,2.0,3.0).xy); p.x = (_swz).x; p.y = (_swz).y; }",
+			expanded: true,
+		},
+		// Single-component write: left to passthrough (naga handles it).
+		{in: "p.x = 1.0", expanded: false},
+		// Whole-variable assignment: not a swizzle l-value.
+		{in: "p = p.xzy", expanded: false},
+		// Comparison, not an assignment.
+		{in: "d.x == d.y", expanded: false},
+	}
+	for _, c := range cases {
+		got, ok := expandSwizzleWrite(c.in)
+		if ok != c.expanded {
+			t.Errorf("expandSwizzleWrite(%q) expanded=%v, want %v (got %q)", c.in, ok, c.expanded, got)
+			continue
+		}
+		if c.expanded && got != c.want {
+			t.Errorf("expandSwizzleWrite(%q)\n got: %q\nwant: %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestNormalizeFloatLiterals(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"length(p)-3.;", "length(p)-3.0;"},
