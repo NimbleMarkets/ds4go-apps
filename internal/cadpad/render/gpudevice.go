@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"sync"
 	"testing"
 	"unsafe"
@@ -35,7 +34,13 @@ var (
 // It returns an error (never a software-backend device) when no GPU is present.
 func device() (*wgpu.Device, error) {
 	gpuOnce.Do(func() {
-		runtime.LockOSThread()
+		// NOTE: GPU calls currently run on whatever goroutine invokes them
+		// (e.g. the test goroutine, and later a bubbletea tea.Cmd goroutine).
+		// The Metal backend tolerates this for the spike. A real GPU-thread
+		// affinity design — funneling all GPU work through one dedicated
+		// LockOSThread'd goroutine — belongs to the render-dispatch task
+		// (Task 2.1), not here. Pinning a random first-caller goroutine with
+		// no UnlockOSThread would be a misleading half-measure, so we don't.
 		inst, err := wgpu.CreateInstance(nil)
 		if err != nil {
 			gpuErr = fmt.Errorf("create instance: %w", err)
@@ -96,6 +101,9 @@ func requireGPU(t *testing.T) {
 // buffers are not directly mappable, so a CopyBufferToBuffer staging step is
 // required before Finish.)
 func runComputeDouble(in []float32) ([]float32, error) {
+	if len(in) == 0 {
+		return nil, nil // nothing to dispatch; avoids zero-sized buffers and &in[0] panic
+	}
 	dev, err := device()
 	if err != nil {
 		return nil, err
