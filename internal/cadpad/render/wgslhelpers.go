@@ -57,6 +57,3 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     out[gid.y*cam.w + gid.x] = pack(col);
 }`
-
-// spikeSphereSDF is a hardcoded WGSL sdf used only by the Phase 0 spike.
-const spikeSphereSDF = `fn sdf(p: vec3<f32>) -> f32 { return length(p) - 3.0; }`

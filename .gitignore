@@ -36,6 +36,9 @@ docs
 /id_ed25519
 /id_ed25519.pub
 
+# cadpad GPU spike dump (regenerated with DUMP_PNG=1)
+/internal/cadpad/render/testdata/spike_*.png
+
 # cadpad session + tool/runtime artifacts
 /cadpad-session.cad.json
 /users.json

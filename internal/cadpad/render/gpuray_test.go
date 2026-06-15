@@ -11,6 +11,9 @@ import (
 	"unsafe"
 )
 
+// spikeSphereSDF is a hardcoded WGSL sdf used only by the Phase 0 spike test.
+const spikeSphereSDF = `fn sdf(p: vec3<f32>) -> f32 { return length(p) - 3.0; }`
+
 // lum returns the perceptual-ish luminance of a pixel in [0,1].
 func lum(c color.NRGBA) float64 {
 	return (0.299*float64(c.R) + 0.587*float64(c.G) + 0.114*float64(c.B)) / 255.0

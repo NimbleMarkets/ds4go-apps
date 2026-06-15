@@ -36,6 +36,11 @@ type gpuCam struct {
 // MapRead staging buffer (CopyBufferToBuffer before Finish) and that is mapped
 // for readback — exactly as runComputeDouble does in gpudevice.go.
 func dispatchKernel(wgsl string, cam gpuCam, w, h int) (*image.NRGBA, error) {
+	if w <= 0 || h <= 0 {
+		// A collapsed viewport (e.g. a bubbletea pane at zero size during
+		// resize) is a legitimate per-frame input; avoid zero-sized buffers.
+		return image.NewNRGBA(image.Rect(0, 0, max(w, 0), max(h, 0))), nil
+	}
 	dev, err := device()
 	if err != nil {
 		return nil, err
@@ -163,6 +168,9 @@ func dispatchKernel(wgsl string, cam gpuCam, w, h int) (*image.NRGBA, error) {
 	defer rng.Release()
 
 	img := image.NewNRGBA(image.Rect(0, 0, w, h))
-	copy(img.Pix, rng.Bytes()) // rgba8 packed little-endian == NRGBA byte order
+	// pack() writes u32 = R | G<<8 | B<<16 | 255<<24; on little-endian targets
+	// (arm64/amd64) that's bytes [R,G,B,A], exactly NRGBA.Pix order. Alpha is a
+	// constant 255, so NRGBA's non-premultiplied contract is satisfied.
+	copy(img.Pix, rng.Bytes())
 	return img, nil
 }
