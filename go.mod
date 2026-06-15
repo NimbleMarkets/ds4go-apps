@@ -16,6 +16,8 @@ require (
 	github.com/alecthomas/chroma/v2 v2.26.1
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/chewxy/math32 v1.11.1
+	github.com/gogpu/gputypes v0.5.0
+	github.com/gogpu/wgpu v0.29.14
 	github.com/hpinc/go3mf v0.24.2
 	github.com/soypat/geometry v0.0.0-20251107203642-291c5648d529
 	github.com/soypat/gsdf v0.0.0-20260521211636-e24bea4564b4
@@ -44,6 +46,9 @@ require (
 	github.com/go-gl/gl v0.0.0-20231021071112-07e5d0ea2e71 // indirect
 	github.com/go-gl/glfw v0.0.0-20250301202403-da16c1255728 // indirect
 	github.com/go-gl/glfw/v3.3/glfw v0.0.0-20250301202403-da16c1255728 // indirect
+	github.com/go-webgpu/goffi v0.5.3 // indirect
+	github.com/go-webgpu/webgpu v0.5.2 // indirect
+	github.com/gogpu/naga v0.17.14 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/lrstanley/bubblezone/v2 v2.0.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
