@@ -28,6 +28,31 @@ type gpuCam struct {
 	_p3, _p4   uint32
 }
 
+// compileKernel builds a shader module and compute pipeline from the given WGSL
+// on the real device and returns any error, without dispatching. It is the
+// correctness gate for the transpiler: a WGSL string that naga rejects fails at
+// CreateShaderModule or CreateComputePipeline. The created objects are released
+// before returning; only the error matters.
+func compileKernel(wgsl string) error {
+	dev, err := device()
+	if err != nil {
+		return err
+	}
+	shader, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{Label: "compilecheck", WGSL: wgsl})
+	if err != nil {
+		return fmt.Errorf("create shader: %w", err)
+	}
+	defer shader.Release()
+	pipe, err := dev.CreateComputePipeline(&wgpu.ComputePipelineDescriptor{
+		Module: shader, EntryPoint: "main",
+	})
+	if err != nil {
+		return fmt.Errorf("create compute pipeline: %w", err)
+	}
+	pipe.Release()
+	return nil
+}
+
 // dispatchKernel runs the given raymarch WGSL over a w*h grid with the supplied
 // camera uniform and returns the rgba8 result as an image.NRGBA.
 //

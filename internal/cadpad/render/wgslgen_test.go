@@ -61,6 +61,66 @@ func TestTranspileCorpusNoError(t *testing.T) {
 	}
 }
 
+// corpusNames is the full set of captured goldens, used by the snapshot and
+// compile tests.
+var corpusNames = []string{
+	"sphere", "box", "box_round", "cylinder", "torus", "hexprism",
+	"triprism", "boxframe", "union", "diff", "translate",
+}
+
+// TestTranspileCorpus is a snapshot test: under UPDATE_GOLDEN it writes the
+// transpiled WGSL to testdata/wgsl/<name>.wgsl; otherwise it compares against the
+// captured snapshot. Snapshots prove "no regression" — they do NOT prove the
+// WGSL is valid; TestTranspileCorpusCompiles is the real validity gate.
+func TestTranspileCorpus(t *testing.T) {
+	dir := filepath.Join("testdata", "wgsl")
+	for _, name := range corpusNames {
+		glsl := readGLSLGolden(t, name)
+		wgsl, err := transpileGLSLToWGSL(glsl)
+		if err != nil {
+			t.Fatalf("transpile %s: %v", name, err)
+		}
+		golden := filepath.Join(dir, name+".wgsl")
+		if os.Getenv("UPDATE_GOLDEN") != "" {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatalf("%s: mkdir: %v", name, err)
+			}
+			if err := os.WriteFile(golden, []byte(wgsl), 0o644); err != nil {
+				t.Fatalf("%s: write golden: %v", name, err)
+			}
+			continue
+		}
+		want, err := os.ReadFile(golden)
+		if err != nil {
+			t.Fatalf("%s: read wgsl golden (run with UPDATE_GOLDEN=1 first): %v", name, err)
+		}
+		if string(want) != wgsl {
+			t.Errorf("%s WGSL changed:\n--- got ---\n%s", name, wgsl)
+		}
+	}
+}
+
+// TestTranspileCorpusCompiles is the correctness gate: it transpiles each golden,
+// substitutes it into kernelTemplate, and asks the real GPU (via naga) to build a
+// compute pipeline. Any WGSL the transpiler emits that naga rejects fails here.
+// Guarded by requireGPU; on this machine it must PASS (not skip).
+func TestTranspileCorpusCompiles(t *testing.T) {
+	requireGPU(t)
+	for _, name := range corpusNames {
+		t.Run(name, func(t *testing.T) {
+			glsl := readGLSLGolden(t, name)
+			sdfWGSL, err := transpileGLSLToWGSL(glsl)
+			if err != nil {
+				t.Fatalf("transpile %s: %v", name, err)
+			}
+			wgsl := strings.Replace(kernelTemplate, "%SDF%", sdfWGSL, 1)
+			if err := compileKernel(wgsl); err != nil {
+				t.Fatalf("compile %s: %v\n--- WGSL ---\n%s", name, err, sdfWGSL)
+			}
+		})
+	}
+}
+
 func TestNormalizeFloatLiterals(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"length(p)-3.;", "length(p)-3.0;"},

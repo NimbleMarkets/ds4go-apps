@@ -167,13 +167,24 @@ func transpileFunction(f glslFunc, declared map[string]bool) (string, error) {
 		return "", fmt.Errorf("transpile %s: return type: %w", f.name, err)
 	}
 
-	params, err := rewriteParams(f.params)
+	// WGSL function parameters are IMMUTABLE: gsdf freely reassigns the position
+	// parameter (`p = abs(p);`, `p = p.xzy;`, `p.x = ...;`), which is a compile
+	// error on a WGSL param. For every parameter the body writes to, we rename
+	// the incoming param to `<name>_in` and seed a mutable `var <name> = <name>_in;`
+	// as the first body statement. Callers pass arguments positionally, so the
+	// rename is invisible across the call boundary.
+	mutated := assignedParams(f.body, paramNames(f.params))
+
+	params, err := rewriteParams(f.params, mutated)
 	if err != nil {
 		return "", fmt.Errorf("transpile %s: %w", f.name, err)
 	}
 
 	// The set of identifiers legal in this body besides builtins and declared
 	// functions: the function's own parameters plus any locals it declares.
+	// Seeded params keep their original name as an in-body local; their `_in`
+	// alias is a synthetic name that never appears in the body, so it needs no
+	// scope entry.
 	scope := paramNames(f.params)
 	for name := range collectLocals(f.body) {
 		scope[name] = true
@@ -186,14 +197,22 @@ func transpileFunction(f glslFunc, declared map[string]bool) (string, error) {
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "fn %s(%s) -> %s {\n", f.name, params, retType)
+	// Seed mutable locals for every mutated parameter, in stable order.
+	for _, name := range orderedParamNames(f.params) {
+		if mutated[name] {
+			fmt.Fprintf(&b, "var %s = %s_in;\n", name, name)
+		}
+	}
 	b.WriteString(body)
 	b.WriteString("\n}")
 	return b.String(), nil
 }
 
 // rewriteParams converts a comma-separated GLSL param list "<type> <name>, ..."
-// into WGSL "<name>: <type>, ...". An empty list yields "".
-func rewriteParams(params string) (string, error) {
+// into WGSL "<name>: <type>, ...". Parameters whose name is in mutated are
+// emitted as "<name>_in: <type>" so the body can seed a mutable local of the
+// original name (see transpileFunction). An empty list yields "".
+func rewriteParams(params string, mutated map[string]bool) (string, error) {
 	params = strings.TrimSpace(params)
 	if params == "" {
 		return "", nil
@@ -210,9 +229,71 @@ func rewriteParams(params string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		out = append(out, fmt.Sprintf("%s: %s", fields[1], wt))
+		name := fields[1]
+		if mutated[name] {
+			name += "_in"
+		}
+		out = append(out, fmt.Sprintf("%s: %s", name, wt))
 	}
 	return strings.Join(out, ", "), nil
+}
+
+// orderedParamNames returns the parameter names in declaration order. (paramNames
+// returns a set, which has no stable iteration order; the seed prelude wants
+// deterministic output.)
+func orderedParamNames(params string) []string {
+	params = strings.TrimSpace(params)
+	if params == "" {
+		return nil
+	}
+	var names []string
+	for _, p := range strings.Split(params, ",") {
+		fields := strings.Fields(strings.TrimSpace(p))
+		if len(fields) == 2 {
+			names = append(names, fields[1])
+		}
+	}
+	return names
+}
+
+// assignedParams returns the subset of params that the body assigns to, whether
+// as a whole (`p = ...`), a component (`p.x = ...`), or a swizzle (`p.xy -= ...`),
+// including compound-assignment forms. A name is considered assigned when it (or
+// a `.`-suffixed access on it) is immediately followed — modulo whitespace and an
+// optional `.<swizzle>` — by an assignment operator (`=`, `+=`, `-=`, `*=`, `/=`)
+// that is not the `==`/`>=`/`<=`/`!=` comparison form.
+func assignedParams(body string, params map[string]bool) map[string]bool {
+	assigned := make(map[string]bool)
+	toks := tokenize(body)
+	for i := 0; i < len(toks); i++ {
+		name := toks[i]
+		if !params[name] {
+			continue
+		}
+		// Walk past an optional `.<member>` swizzle suffix: tokens ".", "<ident>".
+		j := i + 1
+		if j+1 < len(toks) && toks[j] == "." && isIdentStart(toks[j+1][0]) {
+			j += 2
+		}
+		if j >= len(toks) {
+			continue
+		}
+		// The next punctuation token must begin an assignment. tokenize emits
+		// single-char punctuation, so a compound op like `-=` is ["-","="] and a
+		// comparison like `>=` is [">","="]; a bare `=` is a plain assignment.
+		switch toks[j] {
+		case "=":
+			// Plain assignment, but NOT the `==` comparison (tokenized "=","=").
+			if j+1 >= len(toks) || toks[j+1] != "=" {
+				assigned[name] = true
+			}
+		case "+", "-", "*", "/":
+			if j+1 < len(toks) && toks[j+1] == "=" {
+				assigned[name] = true
+			}
+		}
+	}
+	return assigned
 }
 
 // mapGLSLType maps a GLSL scalar/vector/matrix type keyword to its WGSL form.
@@ -241,11 +322,149 @@ func mapGLSLType(t string) (string, error) {
 // occur in the box/triprism goldens.
 func rewriteBody(body string, declared, scope map[string]bool) (string, error) {
 	body = normalizeFloatLiterals(body)
+	// Statement-level rewrites run on GLSL type keywords (`vec3 q`, `const float k`)
+	// BEFORE rewriteTypeKeywords mangles them, so declaration detection sees the
+	// raw `vec3`/`float`/`const` lead tokens.
+	body = rewriteStatements(body)
 	body = rewriteTypeKeywords(body)
 	if err := validateIdents(body, declared, scope); err != nil {
 		return "", err
 	}
 	return body, nil
+}
+
+// rewriteStatements rewrites GLSL statements into WGSL statements. It handles the
+// two syntactic gaps between GLSL and WGSL that survive token-level rewriting:
+//
+//   - Local/const declarations. GLSL types its locals (`vec3 q = ...;`,
+//     `const float k = ...;`); WGSL infers them. We emit `var <name> = <init>;`
+//     for plain locals (some are reassigned, so `var` not `let`) and
+//     `let <name> = <init>;` for `const` declarations (function-scope immutable).
+//   - Braceless `if`. GLSL allows `if (c) stmt;`; WGSL requires a block. We wrap
+//     the single controlled statement in `{ ... }`.
+//
+// The body is split into `;`-terminated statements. This is safe for the corpus:
+// no statement contains an interior `;` (no for/while loops; the only control
+// flow is a single-statement braceless `if`, whose condition has no `;`).
+func rewriteStatements(body string) string {
+	stmts := splitStatements(body)
+	var out strings.Builder
+	for _, s := range stmts {
+		trimmed := strings.TrimSpace(s)
+		if trimmed == "" {
+			continue
+		}
+		out.WriteString(rewriteStatement(trimmed))
+		out.WriteString("\n")
+	}
+	return out.String()
+}
+
+// splitStatements splits a body on top-level ';'. Each returned element excludes
+// its terminating ';'. A trailing fragment without a ';' (none in the corpus) is
+// still returned.
+func splitStatements(body string) []string {
+	var stmts []string
+	start := 0
+	for i := 0; i < len(body); i++ {
+		if body[i] == ';' {
+			stmts = append(stmts, body[start:i])
+			start = i + 1
+		}
+	}
+	if rest := strings.TrimSpace(body[start:]); rest != "" {
+		stmts = append(stmts, body[start:])
+	}
+	return stmts
+}
+
+// rewriteStatement rewrites one trimmed, ';'-stripped GLSL statement into WGSL,
+// re-appending the ';'. A braceless `if` is wrapped; declarations are converted;
+// everything else (assignments, swizzle-assignments, `return`) passes through.
+func rewriteStatement(s string) string {
+	toks := tokenize(s)
+	if len(toks) == 0 {
+		return s + ";"
+	}
+
+	// Braceless if: `if ( <cond> ) <stmt>` -> `if (<cond>) { <stmt>; }`.
+	if toks[0] == "if" {
+		return rewriteBracelessIf(s)
+	}
+
+	// `const <type> <name> = <init>` -> `let <name> = <init>`.
+	if toks[0] == "const" && len(toks) >= 3 && glslDeclTypes[toks[1]] {
+		rest := stripDeclHead(s, true)
+		return "let " + rest + ";"
+	}
+
+	// `<type> <name> = <init>` or `<type> <name>` -> `var <name> [= <init>]`.
+	// A bare type keyword used as a constructor (`vec3(...)`) is NOT a
+	// declaration: the token after the type would be '(' not an identifier.
+	if glslDeclTypes[toks[0]] && len(toks) >= 2 && isIdentStart(toks[1][0]) && !glslDeclTypes[toks[1]] {
+		rest := stripDeclHead(s, false)
+		return "var " + rest + ";"
+	}
+
+	return s + ";"
+}
+
+// stripDeclHead removes the leading declaration keywords from a statement,
+// returning the remainder starting at the variable name. With constDecl it strips
+// a leading `const` then the type keyword; otherwise it strips only the type
+// keyword. e.g. "vec3 q = abs(p)" -> "q = abs(p)".
+func stripDeclHead(s string, constDecl bool) string {
+	s = strings.TrimSpace(s)
+	if constDecl {
+		s = strings.TrimSpace(strings.TrimPrefix(s, "const"))
+	}
+	// Strip the single leading type keyword token.
+	for kw := range glslDeclTypes {
+		if strings.HasPrefix(s, kw) && len(s) > len(kw) && isSpace(s[len(kw)]) {
+			return strings.TrimSpace(s[len(kw):])
+		}
+	}
+	return s
+}
+
+// rewriteBracelessIf converts a braceless GLSL `if` into a WGSL `if` with a
+// braced body. The input is a single `;`-stripped statement beginning with `if`.
+// It locates the closing ')' of the condition by paren-matching, then wraps the
+// remaining controlled statement in `{ ... ; }`. WGSL also wants a space between
+// the condition and the block, which the formatting provides.
+func rewriteBracelessIf(s string) string {
+	s = strings.TrimSpace(s)
+	// Find the '(' that opens the condition.
+	open := strings.IndexByte(s, '(')
+	if open < 0 {
+		return s + ";" // not actually an if-with-condition; leave alone
+	}
+	depth := 0
+	close := -1
+	for i := open; i < len(s); i++ {
+		switch s[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				close = i
+			}
+		}
+		if close >= 0 {
+			break
+		}
+	}
+	if close < 0 {
+		return s + ";"
+	}
+	cond := strings.TrimSpace(s[open : close+1]) // includes the parens
+	controlled := strings.TrimSpace(s[close+1:])
+	if controlled == "" {
+		// `if (c) ;` — empty controlled statement; emit an empty block.
+		return "if " + cond + " { }"
+	}
+	return "if " + cond + " { " + controlled + "; }"
 }
 
 // rewriteTypeKeywords replaces whole-word GLSL vector/matrix type keywords used
@@ -297,8 +516,10 @@ var glslBuiltins = map[string]bool{
 	// type tokens left behind by rewriteTypeKeywords
 	"f32": true, "mat3x3": true,
 	// keywords (incl. the scalar type keyword `float`, which may introduce a
-	// local declaration in a body, e.g. `float a = sphere3p(p);`)
+	// local declaration in a body, e.g. `float a = sphere3p(p);`). `var`/`let`
+	// are emitted by rewriteStatements when lowering GLSL declarations.
 	"return": true, "const": true, "if": true, "float": true,
+	"var": true, "let": true,
 }
 
 // paramNames parses a GLSL param list "<type> <name>, ..." into the set of
