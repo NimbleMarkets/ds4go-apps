@@ -53,14 +53,130 @@ func compileKernel(wgsl string) error {
 	return nil
 }
 
+// gpuPipeline holds the geometry-dependent GPU objects produced by compiling a
+// raymarch WGSL string: the shader module, the bind group layout, the pipeline
+// layout, and the compute pipeline. These are expensive to build (naga compiles
+// WGSL→MSL on CreateShaderModule, and the driver builds the pipeline) but only
+// change when the SDF/geometry changes — not per camera frame. The Renderer
+// caches one of these per object so interactive camera moves reuse it. All four
+// objects are live GPU resources; call Release() exactly once when done.
+type gpuPipeline struct {
+	shader *wgpu.ShaderModule
+	bgl    *wgpu.BindGroupLayout
+	pl     *wgpu.PipelineLayout
+	pipe   *wgpu.ComputePipeline
+}
+
+// Release frees all GPU objects held by the pipeline. It is safe to call on a
+// partially-built pipeline (nil fields are skipped) and must not be called more
+// than once on the same instance.
+func (p *gpuPipeline) Release() {
+	if p == nil {
+		return
+	}
+	if p.pipe != nil {
+		p.pipe.Release()
+		p.pipe = nil
+	}
+	if p.pl != nil {
+		p.pl.Release()
+		p.pl = nil
+	}
+	if p.bgl != nil {
+		p.bgl.Release()
+		p.bgl = nil
+	}
+	if p.shader != nil {
+		p.shader.Release()
+		p.shader = nil
+	}
+}
+
+// buildGPUPipeline compiles the given raymarch WGSL into a reusable gpuPipeline.
+// This is the naga-compile + pipeline-build cost; the result is cacheable and
+// reused across dispatches (different cameras/sizes) of the same geometry.
+// On any error the partially-built objects are released before returning.
+func buildGPUPipeline(wgsl string) (*gpuPipeline, error) {
+	dev, err := device()
+	if err != nil {
+		return nil, err
+	}
+	p := &gpuPipeline{}
+
+	p.shader, err = dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{Label: "ray", WGSL: wgsl})
+	if err != nil {
+		p.Release()
+		return nil, fmt.Errorf("create shader: %w", err)
+	}
+
+	p.bgl, err = dev.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
+		Entries: []wgpu.BindGroupLayoutEntry{
+			{
+				Binding:    0,
+				Visibility: wgpu.ShaderStageCompute,
+				Buffer:     &gputypes.BufferBindingLayout{Type: gputypes.BufferBindingTypeUniform},
+			},
+			{
+				Binding:    1,
+				Visibility: wgpu.ShaderStageCompute,
+				Buffer:     &gputypes.BufferBindingLayout{Type: gputypes.BufferBindingTypeStorage},
+			},
+		},
+	})
+	if err != nil {
+		p.Release()
+		return nil, fmt.Errorf("create bind group layout: %w", err)
+	}
+
+	p.pl, err = dev.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
+		BindGroupLayouts: []*wgpu.BindGroupLayout{p.bgl},
+	})
+	if err != nil {
+		p.Release()
+		return nil, fmt.Errorf("create pipeline layout: %w", err)
+	}
+
+	p.pipe, err = dev.CreateComputePipeline(&wgpu.ComputePipelineDescriptor{
+		Layout: p.pl, Module: p.shader, EntryPoint: "main",
+	})
+	if err != nil {
+		p.Release()
+		return nil, fmt.Errorf("create compute pipeline: %w", err)
+	}
+	return p, nil
+}
+
 // dispatchKernel runs the given raymarch WGSL over a w*h grid with the supplied
-// camera uniform and returns the rgba8 result as an image.NRGBA.
+// camera uniform and returns the rgba8 result as an image.NRGBA. It builds a
+// throwaway pipeline (compiling the WGSL) and releases it after the dispatch;
+// callers that re-render the same geometry should cache a gpuPipeline and call
+// dispatchPipeline directly to skip the recompile (see RenderAngledGPU).
+func dispatchKernel(wgsl string, cam gpuCam, w, h int) (*image.NRGBA, error) {
+	if w <= 0 || h <= 0 {
+		// A collapsed viewport (e.g. a bubbletea pane at zero size during
+		// resize) is a legitimate per-frame input; avoid zero-sized buffers.
+		return image.NewNRGBA(image.Rect(0, 0, max(w, 0), max(h, 0))), nil
+	}
+	p, err := buildGPUPipeline(wgsl)
+	if err != nil {
+		return nil, err
+	}
+	defer p.Release()
+	return dispatchPipeline(p, cam, w, h)
+}
+
+// dispatchPipeline runs a previously-built (and possibly cached) gpuPipeline
+// over a w*h grid with the supplied camera uniform and returns the rgba8 result
+// as an image.NRGBA. It creates only the per-dispatch resources (uniform buffer,
+// output + staging buffers, bind group, command encoder) and releases them
+// before returning; the pipeline's cached objects (shader/BGL/pipeline-layout/
+// pipeline) are left intact for reuse.
 //
 // The output is an array<u32> storage buffer (one packed rgba8 per pixel).
 // Storage buffers are not directly mappable, so the result is copied into a
 // MapRead staging buffer (CopyBufferToBuffer before Finish) and that is mapped
 // for readback — exactly as runComputeDouble does in gpudevice.go.
-func dispatchKernel(wgsl string, cam gpuCam, w, h int) (*image.NRGBA, error) {
+func dispatchPipeline(p *gpuPipeline, cam gpuCam, w, h int) (*image.NRGBA, error) {
 	if w <= 0 || h <= 0 {
 		// A collapsed viewport (e.g. a bubbletea pane at zero size during
 		// resize) is a legitimate per-frame input; avoid zero-sized buffers.
@@ -73,12 +189,6 @@ func dispatchKernel(wgsl string, cam gpuCam, w, h int) (*image.NRGBA, error) {
 	q := dev.Queue()
 	npix := w * h
 	outBytes := uint64(npix * 4)
-
-	shader, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{Label: "ray", WGSL: wgsl})
-	if err != nil {
-		return nil, fmt.Errorf("create shader: %w", err)
-	}
-	defer shader.Release()
 
 	camBytes := unsafe.Slice((*byte)(unsafe.Pointer(&cam)), int(unsafe.Sizeof(cam)))
 	uni, err := dev.CreateBuffer(&wgpu.BufferDescriptor{
@@ -112,27 +222,8 @@ func dispatchKernel(wgsl string, cam gpuCam, w, h int) (*image.NRGBA, error) {
 		return nil, fmt.Errorf("write uniform: %w", err)
 	}
 
-	bgl, err := dev.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
-		Entries: []wgpu.BindGroupLayoutEntry{
-			{
-				Binding:    0,
-				Visibility: wgpu.ShaderStageCompute,
-				Buffer:     &gputypes.BufferBindingLayout{Type: gputypes.BufferBindingTypeUniform},
-			},
-			{
-				Binding:    1,
-				Visibility: wgpu.ShaderStageCompute,
-				Buffer:     &gputypes.BufferBindingLayout{Type: gputypes.BufferBindingTypeStorage},
-			},
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create bind group layout: %w", err)
-	}
-	defer bgl.Release()
-
 	bg, err := dev.CreateBindGroup(&wgpu.BindGroupDescriptor{
-		Layout: bgl,
+		Layout: p.bgl,
 		Entries: []wgpu.BindGroupEntry{
 			{Binding: 0, Buffer: uni, Size: uint64(len(camBytes))},
 			{Binding: 1, Buffer: out, Size: outBytes},
@@ -143,22 +234,6 @@ func dispatchKernel(wgsl string, cam gpuCam, w, h int) (*image.NRGBA, error) {
 	}
 	defer bg.Release()
 
-	pl, err := dev.CreatePipelineLayout(&wgpu.PipelineLayoutDescriptor{
-		BindGroupLayouts: []*wgpu.BindGroupLayout{bgl},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create pipeline layout: %w", err)
-	}
-	defer pl.Release()
-
-	pipe, err := dev.CreateComputePipeline(&wgpu.ComputePipelineDescriptor{
-		Layout: pl, Module: shader, EntryPoint: "main",
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create compute pipeline: %w", err)
-	}
-	defer pipe.Release()
-
 	enc, err := dev.CreateCommandEncoder(nil)
 	if err != nil {
 		return nil, fmt.Errorf("create command encoder: %w", err)
@@ -167,7 +242,7 @@ func dispatchKernel(wgsl string, cam gpuCam, w, h int) (*image.NRGBA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("begin compute pass: %w", err)
 	}
-	pass.SetPipeline(pipe)
+	pass.SetPipeline(p.pipe)
 	pass.SetBindGroup(0, bg, nil)
 	pass.Dispatch((uint32(w)+7)/8, (uint32(h)+7)/8, 1)
 	if err := pass.End(); err != nil {
