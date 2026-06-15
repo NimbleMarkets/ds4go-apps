@@ -9,7 +9,7 @@ package render
 // WGSL `fn`, then append a `fn sdf(p: vec3<f32>) -> f32` shim that calls the
 // top-level function. The transpiler is intentionally a clean pipeline of small
 // functions (splitFunctions -> transpileFunction -> assemble) so that Task 1.3
-// can extend the body rewriter (rewriteBody / glslIdentAllowed) without
+// can extend the body rewriter (rewriteBody / validateIdents) without
 // restructuring anything. Unrecognized identifiers produce an error so the
 // caller can fall back to the CPU raymarcher.
 
@@ -38,9 +38,17 @@ func transpileGLSLToWGSL(glsl string) (string, error) {
 		return "", fmt.Errorf("transpile: no GLSL function declarations found")
 	}
 
+	// Collect the names of all functions declared in this program so that calls
+	// between helpers (e.g. extrusion -> circle2p -> gsdfEqTri) are recognized
+	// as known identifiers rather than rejected as unknown.
+	declared := make(map[string]bool, len(funcs))
+	for _, f := range funcs {
+		declared[f.name] = true
+	}
+
 	var out strings.Builder
 	for _, f := range funcs {
-		w, err := transpileFunction(f)
+		w, err := transpileFunction(f, declared)
 		if err != nil {
 			return "", err
 		}
@@ -151,7 +159,9 @@ func splitFunctions(glsl string) ([]glslFunc, error) {
 }
 
 // transpileFunction rewrites a single GLSL function declaration into a WGSL fn.
-func transpileFunction(f glslFunc) (string, error) {
+// declared is the set of function names declared in the whole program, used to
+// validate inter-function calls.
+func transpileFunction(f glslFunc, declared map[string]bool) (string, error) {
 	retType, err := mapGLSLType(f.returnType)
 	if err != nil {
 		return "", fmt.Errorf("transpile %s: return type: %w", f.name, err)
@@ -162,7 +172,14 @@ func transpileFunction(f glslFunc) (string, error) {
 		return "", fmt.Errorf("transpile %s: %w", f.name, err)
 	}
 
-	body, err := rewriteBody(f.body)
+	// The set of identifiers legal in this body besides builtins and declared
+	// functions: the function's own parameters plus any locals it declares.
+	scope := paramNames(f.params)
+	for name := range collectLocals(f.body) {
+		scope[name] = true
+	}
+
+	body, err := rewriteBody(f.body, declared, scope)
 	if err != nil {
 		return "", fmt.Errorf("transpile %s: %w", f.name, err)
 	}
@@ -222,10 +239,10 @@ func mapGLSLType(t string) (string, error) {
 // float-literal normalization and identifier validation; type keywords appearing
 // in bodies (vecN constructors, mat3) are handled here too since they already
 // occur in the box/triprism goldens.
-func rewriteBody(body string) (string, error) {
+func rewriteBody(body string, declared, scope map[string]bool) (string, error) {
 	body = normalizeFloatLiterals(body)
 	body = rewriteTypeKeywords(body)
-	if err := validateIdents(body); err != nil {
+	if err := validateIdents(body, declared, scope); err != nil {
 		return "", err
 	}
 	return body, nil
@@ -244,40 +261,131 @@ func rewriteTypeKeywords(body string) string {
 	return replaceWholeWords(body, repl)
 }
 
-// validateIdents walks the identifiers in the body and ensures each is in the
-// allowlist of recognized builtins/keywords, a user-defined helper, a vector
-// component/swizzle, or a local variable. Anything else is an error so the
-// caller falls back to CPU. For the sphere case this is trivially satisfied by
-// `length`. The allowlist is the extension seam for richer bodies in Task 1.3.
-func validateIdents(body string) error {
+// validateIdents enforces a TRUE allowlist over the identifiers in the body: an
+// identifier is accepted iff it is a known builtin/keyword, the name of a
+// function declared elsewhere in this same program, one of the current
+// function's parameters, or a local variable declared in this body. Anything
+// else is rejected with an error so the caller falls back to the CPU
+// raymarcher. Member/swizzle accesses (e.g. p.x, k.xy) are skipped by
+// identifiers(), so swizzle components are never treated as unknown idents.
+//
+// declared is the set of function names in the whole program; scope is the set
+// of parameter and local-variable names visible in this body.
+func validateIdents(body string, declared, scope map[string]bool) error {
 	for _, id := range identifiers(body) {
-		if glslBuiltins[id] {
+		if glslBuiltins[id] || declared[id] || scope[id] {
 			continue
 		}
-		// Local variables, helper-function names, and swizzles/components are
-		// accepted structurally: any plain identifier is allowed as long as it
-		// is not a reserved/unsupported GLSL construct. We only reject known-bad
-		// constructs explicitly so the sphere case passes; Task 1.3 will tighten
-		// this against the helper-name set and swizzle grammar.
-		if glslUnsupported[id] {
-			return fmt.Errorf("unsupported GLSL construct %q", id)
-		}
+		return fmt.Errorf("unsupported GLSL identifier %q (no WGSL builtin, "+
+			"declared function, parameter, or local)", id)
 	}
 	return nil
 }
 
-// glslBuiltins is the allowlist of builtin function/identifier names that map
-// 1:1 to WGSL. Extended in Task 1.3.
+// glslBuiltins is the allowlist of builtin function/identifier names and
+// keywords that map 1:1 to WGSL. The vecN/matN constructor names appear both in
+// their GLSL form (vec3) and — because rewriteTypeKeywords runs first — in their
+// WGSL-rewritten tokenization (vec3<f32> tokenizes as "vec3" then "f32",
+// mat3x3<f32> as "mat3x3" then "f32"), so the rewritten spellings are listed too.
 var glslBuiltins = map[string]bool{
+	// math builtins (1:1 GLSL->WGSL)
 	"length": true, "abs": true, "min": true, "max": true, "clamp": true,
 	"dot": true, "normalize": true, "sign": true, "sqrt": true, "mix": true,
+	"floor": true, "fract": true, "mod": true,
+	// type constructors (GLSL spellings)
 	"vec2": true, "vec3": true, "vec4": true, "mat3": true,
-	"return": true, "const": true, "if": true,
+	// type tokens left behind by rewriteTypeKeywords
+	"f32": true, "mat3x3": true,
+	// keywords (incl. the scalar type keyword `float`, which may introduce a
+	// local declaration in a body, e.g. `float a = sphere3p(p);`)
+	"return": true, "const": true, "if": true, "float": true,
 }
 
-// glslUnsupported flags GLSL constructs that have no direct WGSL equivalent and
-// must be rejected (forcing CPU fallback). Empty for now; populated as needed.
-var glslUnsupported = map[string]bool{}
+// paramNames parses a GLSL param list "<type> <name>, ..." into the set of
+// parameter names. A malformed/empty list yields an empty set; malformed params
+// are caught separately by rewriteParams.
+func paramNames(params string) map[string]bool {
+	names := make(map[string]bool)
+	params = strings.TrimSpace(params)
+	if params == "" {
+		return names
+	}
+	for _, p := range strings.Split(params, ",") {
+		fields := strings.Fields(strings.TrimSpace(p))
+		if len(fields) == 2 {
+			names[fields[1]] = true
+		}
+	}
+	return names
+}
+
+// collectLocals scans a function body for local-variable declarations and
+// returns the set of declared names. GLSL declares locals as
+//
+//	<type> <name> = ...;
+//	<type> <name>;
+//	const <type> <name> = ...;
+//
+// We detect them by finding a known type keyword used as a declaration (i.e. a
+// type token NOT immediately followed by '(' — which would be a constructor
+// call — and NOT preceded by '.') and taking the following identifier as the
+// declared name.
+func collectLocals(body string) map[string]bool {
+	locals := make(map[string]bool)
+	toks := tokenize(body)
+	for i := 0; i < len(toks)-1; i++ {
+		if !glslDeclTypes[toks[i]] {
+			continue
+		}
+		// A constructor call like vec3(...) has '(' as the next token, not an
+		// identifier; skip those — they are not declarations.
+		next := toks[i+1]
+		if next == "" || !isIdentStart(next[0]) {
+			continue
+		}
+		// Exclude the type keywords themselves and builtins appearing as the
+		// "name" slot (defensive; shouldn't happen in well-formed GLSL).
+		if glslDeclTypes[next] {
+			continue
+		}
+		locals[next] = true
+	}
+	return locals
+}
+
+// glslDeclTypes are the GLSL type keywords that can introduce a local variable
+// declaration in a body.
+var glslDeclTypes = map[string]bool{
+	"float": true, "vec2": true, "vec3": true, "vec4": true, "mat3": true,
+}
+
+// tokenize splits s into identifier tokens and single-character punctuation
+// tokens, dropping whitespace. Identifier tokens preceded by '.' are emitted as
+// the bare member name; callers that care about member access can inspect the
+// preceding punctuation token. This is intentionally simple — enough to locate
+// "<type> <name>" declaration pairs.
+func tokenize(s string) []string {
+	var toks []string
+	n := len(s)
+	for i := 0; i < n; {
+		c := s[i]
+		if isSpace(c) {
+			i++
+			continue
+		}
+		if isIdentStart(c) {
+			start := i
+			for i < n && isIdentChar(s[i]) {
+				i++
+			}
+			toks = append(toks, s[start:i])
+			continue
+		}
+		toks = append(toks, string(c))
+		i++
+	}
+	return toks
+}
 
 // --- small lexical helpers ---
 
@@ -356,6 +464,11 @@ func replaceWholeWords(s string, repl map[string]string) string {
 // and not to misparse the '.' that begins a number vs. a struct field: a '.' is
 // the start of a numeric literal only when not preceded by an identifier/digit
 // or ')'/']' (which would make it member access on an expression result).
+//
+// It assumes a non-identifier character follows the fractional part of a
+// trailing-dot literal: GLSL has no "3.foo" form (a member access after a number
+// is not valid GLSL), so the function does not special-case an identifier
+// immediately following the dot.
 func normalizeFloatLiterals(s string) string {
 	var b strings.Builder
 	n := len(s)
