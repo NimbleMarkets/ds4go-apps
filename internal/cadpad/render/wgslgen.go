@@ -309,6 +309,8 @@ func mapGLSLType(t string) (string, error) {
 		return "vec4<f32>", nil
 	case "mat3":
 		return "mat3x3<f32>", nil
+	case "mat4":
+		return "mat4x4<f32>", nil
 	default:
 		return "", fmt.Errorf("unsupported type %q", t)
 	}
@@ -392,6 +394,24 @@ func rewriteStatement(s string) string {
 		return rewriteBracelessIf(s)
 	}
 
+	// Hoist any `(<expr>).<swizzle>` applied to a parenthesized GROUPING
+	// expression into a preceding temp. naga's MSL backend miscompiles a
+	// multi-component swizzle taken directly off a parenthesized binary
+	// expression — e.g. the transform op's `((invT) * vec4<f32>(p,0.0)).xyz` —
+	// silently dropping the swizzle (a vec4->vec3 implicit conversion error, or
+	// outright wrong codegen). Assigning the group to a `var` first and swizzling
+	// that var is correct, so we lift it. This runs before declaration/return
+	// handling; the prelude temps are emitted ahead of the (rewritten) statement.
+	if prelude, rewritten := hoistParenSwizzle(s); len(prelude) > 0 {
+		var b strings.Builder
+		for _, p := range prelude {
+			b.WriteString(p)
+			b.WriteString("\n")
+		}
+		b.WriteString(rewriteStatement(rewritten))
+		return b.String()
+	}
+
 	// `const <type> <name> = <init>` -> `let <name> = <init>`.
 	if toks[0] == "const" && len(toks) >= 3 && glslDeclTypes[toks[1]] {
 		rest := stripDeclHead(s, true)
@@ -418,6 +438,122 @@ func rewriteStatement(s string) string {
 	}
 
 	return s + ";"
+}
+
+// hoistParenSwizzle finds substrings of the form `(<group>).<swizzle>` where the
+// `(` is a GROUPING paren (the preceding non-space char is not an identifier char
+// and not ')'/']' — i.e. it is not a function call or an index/member result) and
+// <swizzle> selects two or more components. naga's MSL backend miscompiles such an
+// inline swizzle-of-a-parenthesized-expression, so each match is lifted into a
+// fresh `var _hsN = (<group>);` prelude statement (the UN-swizzled group) and the
+// inline occurrence is replaced by `_hsN.<swizzle>`. naga miscompiles the swizzle
+// even when the parenthesized expression is itself a var initializer, so the temp
+// must carry only the group, never the swizzle. It returns the prelude statements
+// (in order) and the rewritten statement; an empty prelude means nothing changed.
+//
+// The `var` (not `let`) seed keeps the temp usable even if the surrounding
+// statement is itself a declaration whose rewriting expects a mutable head; the
+// temp is never reassigned, so `var` is harmless. Names are unique within the
+// statement via a counter, and the "_hs" prefix is accepted by validateIdents.
+func hoistParenSwizzle(s string) (prelude []string, rewritten string) {
+	rewritten = s
+	n := 0
+	for {
+		idx, group, swz, found := findParenSwizzle(rewritten)
+		if !found {
+			break
+		}
+		name := fmt.Sprintf("_hs%d", n)
+		n++
+		// Hoist the UN-swizzled group into the temp, then swizzle the temp inline.
+		// naga miscompiles the swizzle even when the parenthesized expression is a
+		// `var` initializer, so the temp must NOT carry the swizzle; only a plain
+		// var-then-`.swz` form compiles correctly.
+		prelude = append(prelude, fmt.Sprintf("var %s = (%s);", name, group))
+		// Replace the matched `(group).swz` span with `temp.swz`.
+		rewritten = rewritten[:idx.start] + name + "." + swz + rewritten[idx.lhsEnd:]
+	}
+	if n == 0 {
+		return nil, s
+	}
+	return prelude, rewritten
+}
+
+// parenSwizzleSpan locates the byte span of a matched `(group).swizzle`.
+type parenSwizzleSpan struct {
+	start  int // index of the opening '('
+	lhsEnd int // one past the last swizzle char
+}
+
+// findParenSwizzle scans s for the FIRST `(<group>).<swizzle>` whose '(' is a
+// grouping paren and whose swizzle has 2+ components. It returns the span, the
+// inner group text (without the parens), the swizzle string, and whether a match
+// was found.
+func findParenSwizzle(s string) (span parenSwizzleSpan, group, swz string, found bool) {
+	for i := 0; i < len(s); i++ {
+		if s[i] != '(' {
+			continue
+		}
+		// Determine whether this '(' is a grouping paren (not a call/index).
+		prev := byte(0)
+		for j := i - 1; j >= 0; j-- {
+			if isSpace(s[j]) {
+				continue
+			}
+			prev = s[j]
+			break
+		}
+		if isIdentChar(prev) || prev == ')' || prev == ']' {
+			continue // function call or member/index result — not a grouping paren
+		}
+		// Match the closing ')'.
+		depth := 0
+		close := -1
+		for j := i; j < len(s); j++ {
+			switch s[j] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+				if depth == 0 {
+					close = j
+				}
+			}
+			if close >= 0 {
+				break
+			}
+		}
+		if close < 0 {
+			return parenSwizzleSpan{}, "", "", false
+		}
+		// Require `.` + a 2+ component swizzle immediately after the ')'.
+		if close+1 >= len(s) || s[close+1] != '.' {
+			continue
+		}
+		k := close + 2
+		swStart := k
+		for k < len(s) {
+			if _, ok := swizzleComponents[s[k]]; ok {
+				k++
+				continue
+			}
+			break
+		}
+		sw := s[swStart:k]
+		if len(sw) < 2 {
+			continue // single-component swizzle is fine for naga
+		}
+		// The swizzle run above consumed only {x,y,z,w} chars; if the immediately
+		// following char is still an identifier char, this was a longer field name
+		// (e.g. `.xyzw_foo`), not a pure swizzle — bail rather than mis-clip it.
+		// gsdf emits no such names, so this is a conservative guard.
+		if k < len(s) && isIdentChar(s[k]) {
+			continue
+		}
+		group = strings.TrimSpace(s[i+1 : close])
+		return parenSwizzleSpan{start: i, lhsEnd: k}, group, sw, true
+	}
+	return parenSwizzleSpan{}, "", "", false
 }
 
 // swizzleComponents maps a swizzle name to the underlying component selectors.
@@ -587,6 +723,7 @@ func rewriteTypeKeywords(body string) string {
 		"vec3": "vec3<f32>",
 		"vec4": "vec4<f32>",
 		"mat3": "mat3x3<f32>",
+		"mat4": "mat4x4<f32>",
 	}
 	return replaceWholeWords(body, repl)
 }
@@ -606,6 +743,11 @@ func validateIdents(body string, declared, scope map[string]bool) error {
 		if glslBuiltins[id] || declared[id] || scope[id] {
 			continue
 		}
+		// Synthetic temps emitted by hoistParenSwizzle (`_hs0`, `_hs1`, ...) when
+		// lifting a swizzle-of-parenthesized-expression out of an argument.
+		if strings.HasPrefix(id, "_hs") {
+			continue
+		}
 		return fmt.Errorf("unsupported GLSL identifier %q (no WGSL builtin, "+
 			"declared function, parameter, or local)", id)
 	}
@@ -623,9 +765,9 @@ var glslBuiltins = map[string]bool{
 	"dot": true, "normalize": true, "sign": true, "sqrt": true, "mix": true,
 	"floor": true, "fract": true, "mod": true,
 	// type constructors (GLSL spellings)
-	"vec2": true, "vec3": true, "vec4": true, "mat3": true,
+	"vec2": true, "vec3": true, "vec4": true, "mat3": true, "mat4": true,
 	// type tokens left behind by rewriteTypeKeywords
-	"f32": true, "mat3x3": true,
+	"f32": true, "mat3x3": true, "mat4x4": true,
 	// keywords (incl. the scalar type keyword `float`, which may introduce a
 	// local declaration in a body, e.g. `float a = sphere3p(p);`). `var`/`let`
 	// are emitted by rewriteStatements when lowering GLSL declarations.
@@ -691,7 +833,8 @@ func collectLocals(body string) map[string]bool {
 // glslDeclTypes are the GLSL type keywords that can introduce a local variable
 // declaration in a body.
 var glslDeclTypes = map[string]bool{
-	"float": true, "vec2": true, "vec3": true, "vec4": true, "mat3": true,
+	"float": true, "vec2": true, "vec3": true, "vec4": true,
+	"mat3": true, "mat4": true,
 }
 
 // tokenize splits s into identifier tokens and single-character punctuation

@@ -97,6 +97,85 @@ func TestGPUParityCorpus(t *testing.T) {
 	}
 }
 
+// gpuParityOps is the full set of Lua SDF operations (lua/bind.go) that were not
+// in the original glsl-golden corpus, each as a representative shape with a
+// non-axis-aligned camera so a transposed/mirrored/mis-scaled result would blow
+// up the per-pixel diff. Every entry is expected to render on the GPU at parity
+// with the CPU sphere-tracer:
+//
+//   - intersect, xor, smooth-min (K): boolean ops.
+//   - scale, offset, shell, elongate: modifiers.
+//   - rotate / rotate_x/y/z: mat4 transforms — these emit `mat4 invT=mat4(...)`
+//     and `((invT)*vec4(p,0)).xyz`, which the transpiler now supports (mat4 type
+//     + a hoist of the swizzle-of-parenthesized-expr that naga's MSL backend
+//     miscompiles). A transposed rotation matrix would show here as a wrongly
+//     oriented box and fail parity; ~0.002 diffs confirm correct orientation.
+//
+// This is the "nothing renders silently wrong" gate for the Lua op surface.
+var gpuParityOps = map[string]simplesdf.SDF3{
+	"intersect":    simplesdf.Sphere(3).Intersect(simplesdf.Box(3, 3, 3, 0)),
+	"xor":          simplesdf.Sphere(3).Xor(simplesdf.Box(3, 3, 3, 0)),
+	"smooth_union": simplesdf.Sphere(3).K(0.5).Union(simplesdf.Box(3, 3, 3, 0).Translate(2, 0, 0)),
+	"scale":        simplesdf.Box(4, 3, 2, 0).Scale(1.5),
+	"offset":       simplesdf.Box(4, 3, 2, 0).Offset(0.3),
+	"shell":        simplesdf.Sphere(3).Shell(0.2),
+	"elongate":     simplesdf.Box(2, 2, 2, 0).Elongate(2, 0, 0),
+	"rotate":       simplesdf.Box(4, 3, 2, 0).Rotate(0.6, 0, 0, 1),
+	"rotate_x":     simplesdf.Box(4, 3, 2, 0).RotateX(0.6),
+	"rotate_y":     simplesdf.Box(4, 3, 2, 0).RotateY(0.6),
+	"rotate_z":     simplesdf.Box(4, 3, 2, 0).RotateZ(0.6),
+}
+
+// TestGPUParityOps validates the GPU path for the FULL Lua op surface beyond the
+// glsl-golden corpus. Each op is rendered via the GPU raymarcher and the CPU
+// sphere-tracer at the same size/camera; the mean-abs per-pixel diff must stay
+// under tolerance. A transpile-but-wrong op (the dangerous case) would fail here.
+// Ops that DON'T transpile are not in this map — they are covered by
+// TestUnsupportedOpsFallBack instead.
+func TestGPUParityOps(t *testing.T) {
+	requireGPU(t)
+
+	cp := CameraParams{Azimuth: 0.6, Elevation: 0.4, Zoom: 1}
+	const maxW, maxH, downscale = 128, 128, 1
+	const tol = 0.06
+
+	r, err := NewRenderer(PreviewConfig{})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+
+	// Deterministic order.
+	names := []string{
+		"intersect", "xor", "smooth_union", "scale", "offset", "shell",
+		"elongate", "rotate", "rotate_x", "rotate_y", "rotate_z",
+	}
+	for _, name := range names {
+		s3 := gpuParityOps[name]
+		t.Run(name, func(t *testing.T) {
+			gpuImg, gpuRect, err := r.RenderAngledGPU(s3, "ops_"+name, cp, maxW, maxH, downscale)
+			if err != nil {
+				t.Fatalf("RenderAngledGPU: %v", err)
+			}
+			cpuImg, cpuRect, err := r.RenderAngledScale(s3, "ops_"+name, cp, maxW, maxH, downscale)
+			if err != nil {
+				t.Fatalf("RenderAngledScale: %v", err)
+			}
+			if gpuRect != cpuRect {
+				t.Fatalf("rect mismatch: gpu %v cpu %v", gpuRect, cpuRect)
+			}
+			d := meanAbsDiff(gpuImg, cpuImg)
+			t.Logf("%s: meanAbsDiff=%.4f (tol %.4f)", name, d, tol)
+			if d > tol {
+				if os.Getenv("DUMP_PNG") != "" {
+					writePNG(t, "testdata/parity_op_"+name+"_gpu.png", gpuImg)
+					writePNG(t, "testdata/parity_op_"+name+"_cpu.png", cpuImg)
+				}
+				t.Errorf("%s: meanAbsDiff %.4f exceeds tol %.4f (silent-wrong render?)", name, d, tol)
+			}
+		})
+	}
+}
+
 // litCenter reports whether the center of img is brighter than its corner,
 // i.e. a shape silhouette is present (sanity check that the render produced a
 // real image, not a blank/background frame).

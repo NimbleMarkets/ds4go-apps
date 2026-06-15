@@ -159,6 +159,78 @@ func TestExpandSwizzleWrite(t *testing.T) {
 	}
 }
 
+// TestTranspileMat4Transform locks in mat4 transform support (rotate ops). gsdf
+// emits `mat4 invT=mat4(16 floats); return f(((invT)*vec4(p,0.0)).xyz);`. The
+// transpiler must: map mat4 -> mat4x4<f32>, lower the declaration to `var`, and
+// HOIST the `(...).xyz` swizzle-of-a-parenthesized-expression into a temp because
+// naga's MSL backend miscompiles an inline swizzle off a parenthesized binary
+// expression (it drops the swizzle, yielding a vec4->vec3 conversion error or a
+// silently wrong transform). End-to-end parity is in TestGPUParityOps; this
+// checks the emitted WGSL shape.
+func TestTranspileMat4Transform(t *testing.T) {
+	glsl := "float box(vec3 p){ return length(p)-1.0; }\n" +
+		"float xf(vec3 p){\n" +
+		"mat4 invT=mat4(1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.,0.,0.,0.,0.,1.);\n" +
+		"return box(((invT) * vec4(p,0.0)).xyz);\n" +
+		"}\n"
+	wgsl, err := transpileGLSLToWGSL(glsl)
+	if err != nil {
+		t.Fatalf("transpile: %v", err)
+	}
+	if !strings.Contains(wgsl, "mat4x4<f32>(") {
+		t.Errorf("mat4 not mapped to mat4x4<f32>:\n%s", wgsl)
+	}
+	if !strings.Contains(wgsl, "var invT") {
+		t.Errorf("mat4 declaration not lowered to var:\n%s", wgsl)
+	}
+	// The inline `(...).xyz` must have been hoisted: no `).xyz` remains in the
+	// box() argument, and a `_hs` temp carries the un-swizzled product.
+	if strings.Contains(wgsl, ").xyz)") {
+		t.Errorf("inline swizzle-of-paren survived (naga would miscompile it):\n%s", wgsl)
+	}
+	if !strings.Contains(wgsl, "_hs0") || !strings.Contains(wgsl, "_hs0.xyz") {
+		t.Errorf("expected hoisted temp _hs0 with .xyz swizzle:\n%s", wgsl)
+	}
+}
+
+// TestHoistParenSwizzle covers the swizzle-of-parenthesized-expression hoist in
+// isolation: a grouping `(...)` followed by a 2+ component swizzle is lifted to a
+// temp; function calls, single-component swizzles, and non-matches are left alone.
+func TestHoistParenSwizzle(t *testing.T) {
+	cases := []struct {
+		in          string
+		wantPrelude []string
+		wantStmt    string
+	}{
+		{
+			in:          "return box(((invT) * vec4<f32>(p,0.0)).xyz)",
+			wantPrelude: []string{"var _hs0 = ((invT) * vec4<f32>(p,0.0));"},
+			wantStmt:    "return box(_hs0.xyz)",
+		},
+		// Single-component swizzle: naga handles it; no hoist.
+		{in: "return (a + b).x", wantPrelude: nil, wantStmt: "return (a + b).x"},
+		// Function call paren (preceded by ident): not a grouping paren; no hoist.
+		{in: "return f(p).xyz", wantPrelude: nil, wantStmt: "return f(p).xyz"},
+		// No swizzle at all.
+		{in: "return (a + b)", wantPrelude: nil, wantStmt: "return (a + b)"},
+	}
+	for _, c := range cases {
+		prelude, stmt := hoistParenSwizzle(c.in)
+		if len(prelude) != len(c.wantPrelude) {
+			t.Errorf("hoistParenSwizzle(%q) prelude=%v, want %v", c.in, prelude, c.wantPrelude)
+			continue
+		}
+		for i := range prelude {
+			if prelude[i] != c.wantPrelude[i] {
+				t.Errorf("hoistParenSwizzle(%q) prelude[%d]=%q, want %q", c.in, i, prelude[i], c.wantPrelude[i])
+			}
+		}
+		if stmt != c.wantStmt {
+			t.Errorf("hoistParenSwizzle(%q) stmt=%q, want %q", c.in, stmt, c.wantStmt)
+		}
+	}
+}
+
 func TestNormalizeFloatLiterals(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"length(p)-3.;", "length(p)-3.0;"},
