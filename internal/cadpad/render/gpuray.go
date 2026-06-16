@@ -33,7 +33,16 @@ type gpuCam struct {
 // correctness gate for the transpiler: a WGSL string that naga rejects fails at
 // CreateShaderModule or CreateComputePipeline. The created objects are released
 // before returning; only the error matters.
+//
+// The GPU work runs on the executor goroutine via gpuDo. The inner body calls
+// gogpu directly (never gpuDo, which would deadlock re-entrantly).
 func compileKernel(wgsl string) error {
+	return gpuDo(func() error { return compileKernelOnExec(wgsl) })
+}
+
+// compileKernelOnExec is the raw body of compileKernel; it uses gogpu directly
+// and MUST run on the executor goroutine (inside a gpuDo closure).
+func compileKernelOnExec(wgsl string) error {
 	dev, err := device()
 	if err != nil {
 		return err
@@ -96,6 +105,9 @@ func (p *gpuPipeline) Release() {
 // This is the naga-compile + pipeline-build cost; the result is cacheable and
 // reused across dispatches (different cameras/sizes) of the same geometry.
 // On any error the partially-built objects are released before returning.
+//
+// It calls gogpu directly and MUST run on the executor goroutine (inside a
+// gpuDo closure) — never call it via gpuDo, which would deadlock re-entrantly.
 func buildGPUPipeline(wgsl string) (*gpuPipeline, error) {
 	dev, err := device()
 	if err != nil {
@@ -157,12 +169,20 @@ func dispatchKernel(wgsl string, cam gpuCam, w, h int) (*image.NRGBA, error) {
 		// resize) is a legitimate per-frame input; avoid zero-sized buffers.
 		return image.NewNRGBA(image.Rect(0, 0, max(w, 0), max(h, 0))), nil
 	}
-	p, err := buildGPUPipeline(wgsl)
-	if err != nil {
-		return nil, err
-	}
-	defer p.Release()
-	return dispatchPipeline(p, cam, w, h)
+	// Build + dispatch + Release run as ONE executor closure so they share the
+	// GPU thread and can't interleave with a concurrent Release. The inner
+	// helpers call gogpu directly; they must not call gpuDo themselves.
+	var img *image.NRGBA
+	err := gpuDo(func() error {
+		p, err := buildGPUPipeline(wgsl)
+		if err != nil {
+			return err
+		}
+		defer p.Release()
+		img, err = dispatchPipeline(p, cam, w, h)
+		return err
+	})
+	return img, err
 }
 
 // dispatchPipeline runs a previously-built (and possibly cached) gpuPipeline
@@ -176,6 +196,9 @@ func dispatchKernel(wgsl string, cam gpuCam, w, h int) (*image.NRGBA, error) {
 // Storage buffers are not directly mappable, so the result is copied into a
 // MapRead staging buffer (CopyBufferToBuffer before Finish) and that is mapped
 // for readback — exactly as runComputeDouble does in gpudevice.go.
+//
+// It calls gogpu directly and MUST run on the executor goroutine (inside a
+// gpuDo closure) — never call it via gpuDo, which would deadlock re-entrantly.
 func dispatchPipeline(p *gpuPipeline, cam gpuCam, w, h int) (*image.NRGBA, error) {
 	if w <= 0 || h <= 0 {
 		// A collapsed viewport (e.g. a bubbletea pane at zero size during

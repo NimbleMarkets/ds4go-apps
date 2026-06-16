@@ -66,18 +66,43 @@ func (r *Renderer) RenderAngledGPU(s3 simplesdf.SDF3, name string, cp CameraPara
 		H:          uint32(h),
 	}
 
-	// Get (or build) the cached compute pipeline for this object. The pipeline
-	// only depends on the WGSL (geometry); the camera lives entirely in the
-	// per-dispatch uniform buffer. Re-renders of unchanged geometry skip the
-	// naga WGSL→MSL compile.
-	pipe, err := r.gpuPipelineFor(name, wgsl)
+	// Get-or-build the cached pipeline AND dispatch it inside ONE executor
+	// closure (gpuDo). Bundling them on the single GPU thread is what closes
+	// the use-after-Release window: a concurrent Invalidate/ClearCache enqueues
+	// its Release on the same executor, so it can only run BEFORE or AFTER this
+	// whole build+dispatch, never mid-dispatch.
+	//
+	// The transpile above is pure Go and runs off the executor. The cache map
+	// bookkeeping (gpuPipelineLookup / gpuPipelineStore) takes Renderer.mu but
+	// makes no GPU calls, and crucially we never hold mu across gpuDo — so
+	// there is no lock-order inversion with the executor.
+	var img image.Image
+	err = gpuDo(func() error {
+		// Inside the executor: never call gpuDo again (re-entrant deadlock).
+		// Call the raw build/dispatch helpers directly.
+		pipe, hit := r.gpuPipelineLookup(name, wgsl)
+		if !hit {
+			var berr error
+			pipe, berr = buildGPUPipeline(wgsl)
+			if berr != nil {
+				return fmt.Errorf("build gpu pipeline: %w", berr)
+			}
+			// Publish the freshly built pipeline; gpuPipelineStore returns the
+			// stale entry it displaced (if any), which we Release here on the
+			// executor thread, after it is out of the map.
+			if old := r.gpuPipelineStore(name, wgsl, pipe); old != nil && old != pipe {
+				old.Release()
+			}
+		}
+		di, derr := dispatchPipeline(pipe, gcam, w, h)
+		if derr != nil {
+			return fmt.Errorf("dispatchPipeline: %w", derr)
+		}
+		img = di
+		return nil
+	})
 	if err != nil {
-		return nil, image.Rectangle{}, fmt.Errorf("build gpu pipeline: %w", err)
-	}
-
-	img, err := dispatchPipeline(pipe, gcam, w, h)
-	if err != nil {
-		return nil, image.Rectangle{}, fmt.Errorf("dispatchPipeline: %w", err)
+		return nil, image.Rectangle{}, err
 	}
 	return img, rect, nil
 }
@@ -90,44 +115,45 @@ func (r *Renderer) gpuCompileCount() int {
 	return r.compileCount
 }
 
-// gpuPipelineFor returns the compiled compute pipeline for the named object,
-// building (and caching) one if absent or if the WGSL hash differs from the
-// cached entry. When an entry is replaced because the geometry changed, the old
-// pipeline is Released only after it has been removed from the map, so a
-// subsequent render can never reuse a freed pipeline. compileCount is bumped
-// only on an actual build, which TestPipelineCache asserts on.
-//
-// Renders are sequential today, but the cache is mutex-guarded (matching the
-// mesh cache) so the bookkeeping stays correct if a future task adds a GPU
-// dispatch goroutine.
-func (r *Renderer) gpuPipelineFor(name, wgsl string) (*gpuPipeline, error) {
+// wgslHash returns the cache key hash for a WGSL kernel string.
+func wgslHash(wgsl string) string {
 	sum := sha256.Sum256([]byte(wgsl))
-	hash := hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:])
+}
 
+// gpuPipelineLookup returns the cached pipeline for name when its WGSL hash
+// matches (hit=true). On a miss it bumps compileCount and returns (nil, false),
+// signaling the caller to build. It only touches the cache map under mu and
+// makes no GPU calls, so it is safe to call from inside a gpuDo closure (the
+// caller does) without risking a lock-order inversion — mu is released before
+// any GPU work and never held across gpuDo.
+//
+// compileCount is bumped here (on the miss that schedules a build) rather than
+// after the build so TestPipelineCache's assertions hold; a failed build is not
+// stored, but the count reflects the build attempt as before.
+func (r *Renderer) gpuPipelineLookup(name, wgsl string) (*gpuPipeline, bool) {
+	hash := wgslHash(wgsl)
 	r.mu.Lock()
+	defer r.mu.Unlock()
 	if c, ok := r.gpuPipelines[name]; ok && c.wgslHash == hash {
-		pipe := c.pipe
-		r.mu.Unlock()
-		return pipe, nil
+		return c.pipe, true
 	}
 	r.compileCount++
-	r.mu.Unlock()
+	return nil, false
+}
 
-	// Build outside the lock (CreateShaderModule/CreateComputePipeline are slow
-	// and we don't want to serialize unrelated cache reads behind a compile).
-	pipe, err := buildGPUPipeline(wgsl)
-	if err != nil {
-		return nil, err
-	}
-
+// gpuPipelineStore publishes a freshly built pipeline for name and returns the
+// stale *gpuPipeline it displaced (or nil). The caller Releases the displaced
+// pipeline AFTER it is out of the map (on the executor thread), so a concurrent
+// render can never reuse a freed pipeline. Map-only; no GPU calls.
+func (r *Renderer) gpuPipelineStore(name, wgsl string, pipe *gpuPipeline) *gpuPipeline {
+	hash := wgslHash(wgsl)
 	r.mu.Lock()
-	old := r.gpuPipelines[name]
-	r.gpuPipelines[name] = &cachedGPUPipeline{wgslHash: hash, pipe: pipe}
-	r.mu.Unlock()
-
-	// Release the displaced entry (stale geometry) after it is out of the map.
-	if old != nil && old.pipe != pipe {
-		old.pipe.Release()
+	defer r.mu.Unlock()
+	var old *gpuPipeline
+	if c := r.gpuPipelines[name]; c != nil {
+		old = c.pipe
 	}
-	return pipe, nil
+	r.gpuPipelines[name] = &cachedGPUPipeline{wgslHash: hash, pipe: pipe}
+	return old
 }

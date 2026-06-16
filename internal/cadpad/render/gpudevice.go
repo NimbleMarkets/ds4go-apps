@@ -2,9 +2,7 @@ package render
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"sync"
 	"testing"
 	"unsafe"
 
@@ -24,53 +22,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     data[i] = data[i] * 2.0;
 }`
 
+// gpuDev / gpuErr hold the single gogpu device (or the failure to create one).
+// They are created ONCE, on the executor goroutine, by gpuExecStart (see
+// gpuexec.go) and read-only thereafter, so no further synchronization is needed
+// for reads that happen on the executor thread or after gpuExecReady is closed.
 var (
-	gpuOnce sync.Once
-	gpuDev  *wgpu.Device
-	gpuErr  error
+	gpuDev *wgpu.Device
+	gpuErr error
 )
 
-// device lazily creates a single gogpu device backed by a HARDWARE adapter.
-// It returns an error (never a software-backend device) when no GPU is present.
+// device returns the single gogpu device (or the init error). It is valid to
+// call ONLY from within a gpuDo closure on the executor goroutine, where the
+// device has already been created by gpuExecStart. It performs no creation of
+// its own — that lives on the executor thread (createDevice in gpuexec.go) so
+// every gogpu call, including device creation, runs on one stable OS thread.
 func device() (*wgpu.Device, error) {
-	gpuOnce.Do(func() {
-		// NOTE: GPU calls currently run on whatever goroutine invokes them
-		// (e.g. the test goroutine, and later a bubbletea tea.Cmd goroutine).
-		// The Metal backend tolerates this for the spike. A real GPU-thread
-		// affinity design — funneling all GPU work through one dedicated
-		// LockOSThread'd goroutine — belongs to the render-dispatch task
-		// (Task 2.1), not here. Pinning a random first-caller goroutine with
-		// no UnlockOSThread would be a misleading half-measure, so we don't.
-		inst, err := wgpu.CreateInstance(nil)
-		if err != nil {
-			gpuErr = fmt.Errorf("create instance: %w", err)
-			return
-		}
-		adapter, err := inst.RequestAdapter(&wgpu.RequestAdapterOptions{
-			PowerPreference: wgpu.PowerPreferenceHighPerformance,
-			// Never request a software fallback adapter.
-			ForceFallbackAdapter: false,
-		})
-		if err != nil {
-			gpuErr = fmt.Errorf("request adapter: %w", err)
-			return
-		}
-		if adapter == nil {
-			gpuErr = errors.New("no GPU adapter")
-			return
-		}
-		// Reject the software backend: we want a real GPU, not CPU emulation.
-		if isSoftwareAdapter(adapter) {
-			gpuErr = errors.New("only software adapter available")
-			return
-		}
-		dev, err := adapter.RequestDevice(nil)
-		if err != nil {
-			gpuErr = fmt.Errorf("request device: %w", err)
-			return
-		}
-		gpuDev = dev
-	})
 	return gpuDev, gpuErr
 }
 
@@ -82,9 +48,20 @@ func isSoftwareAdapter(a *wgpu.Adapter) bool {
 	return info.DeviceType == gputypes.DeviceTypeCPU || info.Backend == gputypes.BackendEmpty
 }
 
+// gpuAvailable reports whether a hardware GPU device was created. It triggers
+// (and waits for) device init on the executor goroutine via gpuDo, then checks
+// the resulting device/error. When there is no GPU, createDevice returns an
+// error and this returns false promptly — it never blocks forever.
 func gpuAvailable() bool {
-	d, err := device()
-	return d != nil && err == nil
+	var ok bool
+	// The closure runs on the executor thread, after device init has completed
+	// (gpuDo waits on gpuExecReady first). It only reads the device, no GPU API
+	// calls, so it cannot itself fail.
+	_ = gpuDo(func() error {
+		ok = gpuDev != nil && gpuErr == nil
+		return nil
+	})
+	return ok
 }
 
 func requireGPU(t *testing.T) {
@@ -94,16 +71,32 @@ func requireGPU(t *testing.T) {
 	}
 }
 
-// runComputeDouble runs computeDoubleWGSL over in and returns the result.
+// runComputeDouble runs computeDoubleWGSL over in and returns the result. The
+// GPU work is funneled onto the executor goroutine via gpuDo so it shares the
+// single GPU thread with all other gogpu calls.
+func runComputeDouble(in []float32) ([]float32, error) {
+	if len(in) == 0 {
+		return nil, nil // nothing to dispatch; avoids zero-sized buffers and &in[0] panic
+	}
+	var out []float32
+	err := gpuDo(func() error {
+		var derr error
+		out, derr = runComputeDoubleOnExec(in)
+		return derr
+	})
+	return out, err
+}
+
+// runComputeDoubleOnExec is the raw GPU body of runComputeDouble. It calls
+// device() and uses gogpu objects directly, so it MUST run on the executor
+// goroutine (i.e. only from inside a gpuDo closure); never call it via gpuDo
+// again (that would deadlock).
 //
 // It uploads in to a storage buffer, dispatches the doubling kernel, copies the
 // result into a MapRead staging buffer, and maps that for readback. (Storage
 // buffers are not directly mappable, so a CopyBufferToBuffer staging step is
 // required before Finish.)
-func runComputeDouble(in []float32) ([]float32, error) {
-	if len(in) == 0 {
-		return nil, nil // nothing to dispatch; avoids zero-sized buffers and &in[0] panic
-	}
+func runComputeDoubleOnExec(in []float32) ([]float32, error) {
 	dev, err := device()
 	if err != nil {
 		return nil, err

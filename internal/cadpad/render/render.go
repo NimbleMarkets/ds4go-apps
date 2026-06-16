@@ -323,9 +323,17 @@ func (r *Renderer) ClearCache() {
 	r.gpuPipelines = make(map[string]*cachedGPUPipeline)
 	r.mu.Unlock()
 	// Release the GPU objects after dropping them from the map so no concurrent
-	// render can pick up an entry we are about to free.
-	for _, c := range old {
-		c.pipe.Release()
+	// render can pick up an entry we are about to free. The Release runs on the
+	// executor goroutine via gpuDo, serialized AFTER any in-flight dispatch, so
+	// it can never free a pipeline mid-dispatch (closes the use-after-Release
+	// window). mu is already released here — we never block on gpuDo under mu.
+	if len(old) > 0 {
+		_ = gpuDo(func() error {
+			for _, c := range old {
+				c.pipe.Release()
+			}
+			return nil
+		})
 	}
 }
 
@@ -354,8 +362,14 @@ func (r *Renderer) Invalidate(name string) {
 	old := r.gpuPipelines[name]
 	delete(r.gpuPipelines, name)
 	r.mu.Unlock()
+	// Release on the executor goroutine, serialized after any in-flight
+	// dispatch (closes the use-after-Release window). mu is already released;
+	// we never block on gpuDo while holding mu.
 	if old != nil {
-		old.pipe.Release()
+		_ = gpuDo(func() error {
+			old.pipe.Release()
+			return nil
+		})
 	}
 }
 
