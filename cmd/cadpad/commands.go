@@ -102,13 +102,17 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 			if m.hqRender {
 				// High-quality one-shot: smooth SDF sphere trace at full
 				// resolution (the slow path), for a final look once the
-				// camera is framed.
+				// camera is framed. Deliberately CPU — no render-mode badge.
 				img, rect, err = m.renderer.RenderAngledScale(s, cur, cp, pc*8, pr*16, 1)
 			} else {
-				// Mesh path: the SDF is marched to triangles once (cached by
-				// object name) and the cached mesh is rasterized each frame,
-				// so camera moves are fast regardless of scene complexity.
-				img, rect, err = m.renderer.RenderAngledMesh(s, cur, cp, pc*8, pr*16, 1)
+				// Live auto path: GPU raymarch when available+transpilable,
+				// else CPU mesh-preview fallback. The returned mode drives the
+				// viewport's GPU/CPU badge.
+				var mode render.RenderMode
+				img, rect, mode, err = m.renderer.RenderAngledAuto(s, cur, cp, pc*8, pr*16, 1)
+				ok2 := err == nil
+				m.w.SetPreview(cur, world.Projection(m.proj), rect.Dx(), rect.Dy(), ok2, errStr(err))
+				return previewUpdatedMsg{name: cur, img: img, ok: ok2, err: errStr(err), mode: mode, hasMode: true}
 			}
 		} else {
 			img, rect, err = m.renderer.Render(s, cur, m.proj, pc*8, pr*16)
@@ -116,6 +120,22 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 		ok2 := err == nil
 		m.w.SetPreview(cur, world.Projection(m.proj), rect.Dx(), rect.Dy(), ok2, errStr(err))
 		return previewUpdatedMsg{name: cur, img: img, ok: ok2, err: errStr(err)}
+	}
+}
+
+// warmUpGPUCmd does a one-shot tiny RenderAngledAuto on a throwaway sphere so
+// the first real frame doesn't pay synchronous GPU device + pipeline creation.
+// It runs on a tea.Cmd goroutine (GPU work is serialized on the render
+// package's executor, so this is safe) and discards its output; the device and
+// pipeline caches it primes live in the render package.
+func (m model) warmUpGPUCmd() tea.Cmd {
+	r := m.renderer
+	return func() tea.Msg {
+		cp := render.CameraParams{Zoom: 1}
+		// Small dimensions keep the probe cheap; we only care about the
+		// side-effect of creating the device/pipeline.
+		_, _, _, _ = r.RenderAngledAuto(simplesdf.Sphere(1), "__gpu_warmup__", cp, 8, 8, 1)
+		return gpuWarmedUpMsg{}
 	}
 }
 

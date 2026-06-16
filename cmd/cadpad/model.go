@@ -35,7 +35,21 @@ type previewUpdatedMsg struct {
 	img  image.Image
 	ok   bool
 	err  string
+
+	// mode reports which renderer produced the frame (GPU vs CPU mesh
+	// fallback). It is only meaningful — and hasMode only true — for the live
+	// 3D auto path (RenderAngledAuto); the deliberate CPU paths (Render, the
+	// one-shot RenderAngledScale) leave hasMode false so the badge is not
+	// shown for them. (RenderModeGPU is the zero value, so a plain zero mode
+	// must not be treated as "GPU".)
+	mode    render.RenderMode
+	hasMode bool
 }
+
+// gpuWarmedUpMsg is delivered after the startup GPU warm-up probe completes; it
+// carries no state (the device/pipeline caches live in the render package) and
+// exists only so the first real frame doesn't pay synchronous device creation.
+type gpuWarmedUpMsg struct{}
 
 type toolDoneMsg struct {
 	text      string
@@ -171,6 +185,12 @@ type model struct {
 	// The 'R' key sets it and immediately resets it so camera moves stay on
 	// the fast path.
 	hqRender bool
+
+	// lastRenderMode records which renderer (GPU/CPU) produced the most recent
+	// live 3D frame; showRenderMode gates the viewport badge so it only appears
+	// once a real auto-path frame has reported a mode.
+	lastRenderMode render.RenderMode
+	showRenderMode bool
 
 	// View cache for high-frequency input events
 	cachedView *string
@@ -384,6 +404,7 @@ func (m model) Init() tea.Cmd {
 		tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg {
 			return kittyAutoToggleMsg{}
 		}),
+		m.warmUpGPUCmd(),
 	}
 
 	if m.lib != nil {

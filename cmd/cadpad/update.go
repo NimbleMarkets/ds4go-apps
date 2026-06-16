@@ -85,8 +85,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logger.Printf("engine ready (hasMTP=%v)", msg.HasMTP)
 		}
 
+	case gpuWarmedUpMsg:
+		// Device/pipeline caches are primed in the render package; nothing to
+		// store here. The first live frame is now fast.
+
 	case previewUpdatedMsg:
 		m.renderingPreview = false
+		if msg.hasMode {
+			m.lastRenderMode = msg.mode
+			m.showRenderMode = true
+		}
 		if msg.ok && msg.img != nil {
 			cmds = append(cmds, m.pic.SetImage(msg.img))
 			m.logger.Printf("[PREVIEW] %s ok  bounds=%+v", msg.name, msg.img.Bounds())

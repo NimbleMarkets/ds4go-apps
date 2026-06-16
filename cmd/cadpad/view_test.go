@@ -153,6 +153,62 @@ func TestViewportRenderDirect(t *testing.T) {
 	t.Logf("direct picture content length: %d", len(v.Content))
 }
 
+// TestRenderModeBadge proves the live 3D viewport header shows a GPU/CPU badge
+// driven by the mode reported on previewUpdatedMsg. It constructs the message
+// directly (no actual GPU render) so it runs anywhere, GPU or not.
+func TestRenderModeBadge(t *testing.T) {
+	m := newModel(testApp(log.New(io.Discard, "", 0), ds4log.NewBuffer(10)))
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = m2.(model)
+	m.proj = render.ProjAngle
+
+	// Before any auto-path frame, no badge is shown.
+	if strings.Contains(m.viewportView(80), "·GPU") || strings.Contains(m.viewportView(80), "·CPU") {
+		t.Fatal("render-mode badge shown before any auto frame reported a mode")
+	}
+
+	// A GPU-mode auto frame updates lastRenderMode and shows "3D·GPU".
+	mGPU, _ := m.Update(previewUpdatedMsg{name: "x", ok: true, mode: render.RenderModeGPU, hasMode: true})
+	g := mGPU.(model)
+	if g.lastRenderMode != render.RenderModeGPU {
+		t.Errorf("lastRenderMode = %v, want GPU", g.lastRenderMode)
+	}
+	if !g.showRenderMode {
+		t.Error("expected showRenderMode true after auto frame")
+	}
+	if out := g.viewportView(80); !strings.Contains(out, "3D·GPU") {
+		t.Errorf("3D viewport header missing GPU badge; got header in:\n%s", out)
+	}
+
+	// A CPU-mode auto frame shows "3D·CPU".
+	mCPU, _ := g.Update(previewUpdatedMsg{name: "x", ok: true, mode: render.RenderModeCPU, hasMode: true})
+	c := mCPU.(model)
+	if c.lastRenderMode != render.RenderModeCPU {
+		t.Errorf("lastRenderMode = %v, want CPU", c.lastRenderMode)
+	}
+	if out := c.viewportView(80); !strings.Contains(out, "3D·CPU") {
+		t.Errorf("3D viewport header missing CPU badge; got header in:\n%s", out)
+	}
+
+	// A non-auto frame (hasMode=false) must NOT change the badge — guards
+	// against mislabeling the CPU Render/RenderAngledScale paths as GPU
+	// (RenderModeGPU is the zero value).
+	mNoMode, _ := c.Update(previewUpdatedMsg{name: "x", ok: true})
+	n := mNoMode.(model)
+	if n.lastRenderMode != render.RenderModeCPU {
+		t.Errorf("non-auto frame changed lastRenderMode to %v, want CPU unchanged", n.lastRenderMode)
+	}
+	if out := n.viewportView(80); !strings.Contains(out, "3D·CPU") {
+		t.Errorf("badge changed after a non-auto frame; got:\n%s", out)
+	}
+
+	// The badge is 3D-only: a 2D projection never shows it.
+	n.proj = render.ProjXY
+	if out := n.viewportView(80); strings.Contains(out, "·CPU") || strings.Contains(out, "·GPU") {
+		t.Errorf("render-mode badge leaked into a 2D projection view:\n%s", out)
+	}
+}
+
 func TestMouseNavigation(t *testing.T) {
 	logBuf := ds4log.NewBuffer(10)
 	logger := log.New(io.Discard, "", 0)

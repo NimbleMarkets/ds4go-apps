@@ -193,6 +193,11 @@ func (m model) viewportView(w int) string {
 	projLabel := strings.ToUpper(string(m.proj))
 	if m.proj == render.ProjAngle {
 		projLabel = "3D"
+		// Render-mode badge (GPU/CPU) is meaningful only for the live 3D auto
+		// path, and only once a frame has reported its mode.
+		if m.showRenderMode {
+			projLabel += "·" + m.lastRenderMode.String()
+		}
 	}
 	if m.resIndex > 0 {
 		projLabel += fmt.Sprintf("@%d", resPresets[m.resIndex])
