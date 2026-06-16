@@ -28,40 +28,6 @@ type gpuCam struct {
 	_p3, _p4   uint32
 }
 
-// compileKernel builds a shader module and compute pipeline from the given WGSL
-// on the real device and returns any error, without dispatching. It is the
-// correctness gate for the transpiler: a WGSL string that naga rejects fails at
-// CreateShaderModule or CreateComputePipeline. The created objects are released
-// before returning; only the error matters.
-//
-// The GPU work runs on the executor goroutine via gpuDo. The inner body calls
-// gogpu directly (never gpuDo, which would deadlock re-entrantly).
-func compileKernel(wgsl string) error {
-	return gpuDo(func() error { return compileKernelOnExec(wgsl) })
-}
-
-// compileKernelOnExec is the raw body of compileKernel; it uses gogpu directly
-// and MUST run on the executor goroutine (inside a gpuDo closure).
-func compileKernelOnExec(wgsl string) error {
-	dev, err := device()
-	if err != nil {
-		return err
-	}
-	shader, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{Label: "compilecheck", WGSL: wgsl})
-	if err != nil {
-		return fmt.Errorf("create shader: %w", err)
-	}
-	defer shader.Release()
-	pipe, err := dev.CreateComputePipeline(&wgpu.ComputePipelineDescriptor{
-		Module: shader, EntryPoint: "main",
-	})
-	if err != nil {
-		return fmt.Errorf("create compute pipeline: %w", err)
-	}
-	pipe.Release()
-	return nil
-}
-
 // gpuPipeline holds the geometry-dependent GPU objects produced by compiling a
 // raymarch WGSL string: the shader module, the bind group layout, the pipeline
 // layout, and the compute pipeline. These are expensive to build (naga compiles
@@ -156,33 +122,6 @@ func buildGPUPipeline(wgsl string) (*gpuPipeline, error) {
 		return nil, fmt.Errorf("create compute pipeline: %w", err)
 	}
 	return p, nil
-}
-
-// dispatchKernel runs the given raymarch WGSL over a w*h grid with the supplied
-// camera uniform and returns the rgba8 result as an image.NRGBA. It builds a
-// throwaway pipeline (compiling the WGSL) and releases it after the dispatch;
-// callers that re-render the same geometry should cache a gpuPipeline and call
-// dispatchPipeline directly to skip the recompile (see RenderAngledGPU).
-func dispatchKernel(wgsl string, cam gpuCam, w, h int) (*image.NRGBA, error) {
-	if w <= 0 || h <= 0 {
-		// A collapsed viewport (e.g. a bubbletea pane at zero size during
-		// resize) is a legitimate per-frame input; avoid zero-sized buffers.
-		return image.NewNRGBA(image.Rect(0, 0, max(w, 0), max(h, 0))), nil
-	}
-	// Build + dispatch + Release run as ONE executor closure so they share the
-	// GPU thread and can't interleave with a concurrent Release. The inner
-	// helpers call gogpu directly; they must not call gpuDo themselves.
-	var img *image.NRGBA
-	err := gpuDo(func() error {
-		p, err := buildGPUPipeline(wgsl)
-		if err != nil {
-			return err
-		}
-		defer p.Release()
-		img, err = dispatchPipeline(p, cam, w, h)
-		return err
-	})
-	return img, err
 }
 
 // dispatchPipeline runs a previously-built (and possibly cached) gpuPipeline

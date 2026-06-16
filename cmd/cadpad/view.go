@@ -420,6 +420,9 @@ Viewport focus
   pgup/pgdown   browse previous .lua files
   v             view active .lua source (syntax highlighted)
 
+  The 3D view raymarches the SDF on the GPU when available, else falls back to
+  the CPU mesh preview; the 3D·GPU / 3D·CPU header badge shows which is active.
+
 Box focus (LLM output / lua source / lua output)
   ↑ / ↓         scroll content
   pgup/pgdown   page scroll
