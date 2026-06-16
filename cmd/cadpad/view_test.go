@@ -13,6 +13,34 @@ import (
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
 )
 
+// TestRefreshPreviewCoalesces locks in the event-driven render property the
+// GPU path relies on for ds4 coexistence: previews are requested only on
+// explicit events and a request while one is in flight coalesces (no second
+// render, no busy-loop) — so the viewport never spins the GPU on a timer and
+// never steals cycles from in-progress LLM inference.
+func TestRefreshPreviewCoalesces(t *testing.T) {
+	m := newModel(testApp(log.New(io.Discard, "", 0), ds4log.NewBuffer(10)))
+	if _, err := m.w.Create("ball", "sphere", map[string]float64{"r": 3}); err != nil {
+		t.Fatalf("create object: %v", err)
+	}
+
+	// No render in flight: a request starts one and returns a command.
+	if cmd := m.refreshPreview(); cmd == nil {
+		t.Fatal("first refreshPreview should return a render command")
+	}
+	if !m.renderingPreview {
+		t.Error("renderingPreview should be true after the first request")
+	}
+
+	// Render in flight: a further request coalesces — no command, dirty flag set.
+	if cmd := m.refreshPreview(); cmd != nil {
+		t.Error("refreshPreview should coalesce (nil command) while a render is in flight")
+	}
+	if !m.previewDirty {
+		t.Error("previewDirty should be set when a request coalesces")
+	}
+}
+
 func TestSanitizeForDisplay(t *testing.T) {
 	cases := []struct{ name, in, want string }{
 		{"plain", "hello world", "hello world"},
