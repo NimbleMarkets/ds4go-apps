@@ -123,6 +123,41 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 	}
 }
 
+// refreshPreviewHQCmd re-renders the current angled view at high quality once
+// the camera has settled. It mirrors refreshPreviewCmd's ProjAngle auto path
+// but uses RenderAngledAutoQ with HighGPUQuality (3x3 SSAA + deeper march +
+// zoom-scaled eps), and tags the resulting frame hq=true so the settle handler
+// does not schedule another tick (no render loop). If the renderer falls back
+// to CPU it still produces a frame — harmless, just not the GPU AA pass.
+func (m model) refreshPreviewHQCmd() tea.Cmd {
+	cur := m.w.Current()
+	if cur == "" {
+		names := m.w.Names()
+		if len(names) == 0 {
+			return nil
+		}
+		cur = names[0]
+	}
+	return func() tea.Msg {
+		s, _, ok := m.w.Get(cur)
+		if !ok || s.Shader() == nil {
+			return previewUpdatedMsg{name: cur, ok: false, err: "no sdf", hq: true}
+		}
+		pc, pr := m.viewportInnerSize()
+		cp := render.CameraParams{
+			Azimuth:   m.camAzimuth,
+			Elevation: m.camElevation,
+			Zoom:      m.camZoom,
+			PanX:      m.camPanX,
+			PanY:      m.camPanY,
+		}
+		img, rect, mode, err := m.renderer.RenderAngledAutoQ(s, cur, cp, pc*8, pr*16, 1, render.HighGPUQuality(cp))
+		ok2 := err == nil
+		m.w.SetPreview(cur, world.Projection(m.proj), rect.Dx(), rect.Dy(), ok2, errStr(err))
+		return previewUpdatedMsg{name: cur, img: img, ok: ok2, err: errStr(err), mode: mode, hasMode: true, hq: true}
+	}
+}
+
 // warmUpGPUCmd does a one-shot tiny RenderAngledAuto on a throwaway sphere so
 // the first real frame doesn't pay synchronous GPU device + pipeline creation.
 // It runs on a tea.Cmd goroutine (GPU work is serialized on the render

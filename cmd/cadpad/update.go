@@ -5,6 +5,7 @@ import (
 	"math"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
@@ -106,6 +107,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.previewDirty = false
 			m.renderingPreview = true
 			cmds = append(cmds, m.refreshPreviewCmd())
+		} else if msg.ok && !msg.hq && m.proj == render.ProjAngle &&
+			m.lastRenderMode == render.RenderModeGPU {
+			// Interactive GPU frame applied and the view is now stable (no
+			// pending dirty). Schedule a settle tick; if the camera moves
+			// before it fires, refreshPreview bumps renderEpoch and the tick
+			// is dropped on arrival. An HQ frame never schedules another tick,
+			// so there is no render loop.
+			epoch := m.renderEpoch
+			cmds = append(cmds, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
+				return camSettleMsg{epoch: epoch}
+			}))
+		}
+
+	case camSettleMsg:
+		// Re-render the 3D viewport at high quality once the camera has truly
+		// settled: only if no newer render was requested (epoch matches), no
+		// render is already in flight, and we are still in the angled view.
+		if msg.epoch == m.renderEpoch && !m.renderingPreview && m.proj == render.ProjAngle {
+			m.renderingPreview = true
+			cmds = append(cmds, m.refreshPreviewHQCmd())
 		}
 
 	case toolDoneMsg:
@@ -787,6 +808,11 @@ func (m model) handleMouseWheel(msg tea.MouseWheelMsg) (model, tea.Cmd) {
 // already in flight. The 3D view rasterizes a cached mesh, so camera moves
 // are fast at full resolution and need no progressive/low-res pass.
 func (m *model) refreshPreview() tea.Cmd {
+	// Every render request advances the epoch so any settle tick scheduled for
+	// an earlier frame is recognized as stale and ignored when it fires. This
+	// runs even when we coalesce (return nil below): a camera move during an
+	// in-flight render must still invalidate a pending settle.
+	m.renderEpoch++
 	if m.renderingPreview {
 		m.previewDirty = true
 		return nil

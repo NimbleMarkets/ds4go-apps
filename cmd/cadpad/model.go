@@ -44,7 +44,18 @@ type previewUpdatedMsg struct {
 	// must not be treated as "GPU".)
 	mode    render.RenderMode
 	hasMode bool
+
+	// hq marks a frame produced by the high-quality settle render
+	// (RenderAngledAutoQ at HighGPUQuality). The settle handler uses it to avoid
+	// scheduling another settle tick off an HQ frame (no render loop).
+	hq bool
 }
+
+// camSettleMsg fires ~150ms after the camera last moved. epoch is the
+// renderEpoch captured when the tick was scheduled; if it no longer matches
+// m.renderEpoch (a newer render was requested in the meantime) the tick is
+// stale and ignored, so a re-render only happens once the view truly settled.
+type camSettleMsg struct{ epoch int }
 
 // gpuWarmedUpMsg is delivered after the startup GPU warm-up probe completes; it
 // carries no state (the device/pipeline caches live in the render package) and
@@ -179,6 +190,12 @@ type model struct {
 	// Preview render throttling/coalescing
 	renderingPreview bool
 	previewDirty     bool
+
+	// renderEpoch is bumped every time a preview render is REQUESTED (in
+	// refreshPreview). A settle tick captures the epoch at schedule time and is
+	// only honored if it still matches when it fires — i.e. nothing newer was
+	// requested in the 150ms window, so the camera has genuinely settled.
+	renderEpoch int
 
 	// hqRender is a one-shot flag: when set, the next angle-view render uses
 	// the slow, smooth SDF sphere tracer instead of the fast cached mesh.
