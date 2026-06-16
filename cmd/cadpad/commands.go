@@ -133,7 +133,10 @@ func (m model) warmUpGPUCmd() tea.Cmd {
 	return func() tea.Msg {
 		cp := render.CameraParams{Zoom: 1}
 		// Small dimensions keep the probe cheap; we only care about the
-		// side-effect of creating the device/pipeline.
+		// side-effect of creating the device/pipeline. Evict the throwaway
+		// cache entry afterward so the sentinel name can never shadow a real
+		// object that happens to share it.
+		defer r.Invalidate("__gpu_warmup__")
 		_, _, _, _ = r.RenderAngledAuto(simplesdf.Sphere(1), "__gpu_warmup__", cp, 8, 8, 1)
 		return gpuWarmedUpMsg{}
 	}
