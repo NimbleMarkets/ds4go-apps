@@ -12,9 +12,15 @@ import (
 
 // gpuCam mirrors the WGSL Cam struct layout (std140-ish; each vec3<f32> is
 // 16-byte aligned, so every vec3 is padded to a full vec4 with an explicit
-// trailing float, and the (w,h) pair plus two u32 pads form a final 16-byte
-// block). unsafe.Sizeof(gpuCam{}) must be 80 (a multiple of 16) and match the
-// WGSL struct byte-for-byte, or the uniform upload will be misinterpreted.
+// trailing float). The (w,h) pair shares its 16-byte block with the quality
+// knobs Samples/MaxSteps, and a final 16-byte block carries Eps/FarT plus two
+// pad floats. unsafe.Sizeof(gpuCam{}) must be 96 (6 x 16-byte blocks) and match
+// the WGSL struct byte-for-byte, or the uniform upload will be misinterpreted.
+//
+// Quality fields: Samples is the ordered-grid SSAA side count (1 → 1 ray at the
+// pixel center, 2 → 2x2=4 rays, 3 → 3x3=9 rays). MaxSteps/Eps/FarT are the
+// raymarch step budget, hit epsilon, and far cutoff respectively. The defaults
+// (Samples=1, MaxSteps=80, Eps=0.002, FarT=100) reproduce the original kernel.
 type gpuCam struct {
 	Eye        [3]float32
 	_p0        float32
@@ -25,7 +31,10 @@ type gpuCam struct {
 	Up         [3]float32
 	TanHalfFov float32
 	W, H       uint32
-	_p3, _p4   uint32
+	Samples    uint32
+	MaxSteps   uint32
+	Eps, FarT  float32
+	_q0, _q1   float32
 }
 
 // gpuPipeline holds the geometry-dependent GPU objects produced by compiling a

@@ -287,3 +287,83 @@ func TestPipelineCache(t *testing.T) {
 		t.Errorf("after ClearCache: %d cached pipelines remain, want 0", n)
 	}
 }
+
+// hardHorizTransitions counts pixels along a row whose luma differs from the
+// left neighbour by more than thresh. A hard 1-sample silhouette produces a
+// burst of these (background→lit in a single pixel step); supersampling fills
+// the gap with intermediate-luma pixels, lowering the count.
+func hardHorizTransitions(img image.Image, y int, thresh float64) int {
+	b := img.Bounds()
+	if y < b.Min.Y || y >= b.Max.Y {
+		return 0
+	}
+	n := 0
+	prev := lum(color.NRGBAModel.Convert(img.At(b.Min.X, y)).(color.NRGBA))
+	for x := b.Min.X + 1; x < b.Max.X; x++ {
+		cur := lum(color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA))
+		d := cur - prev
+		if d < 0 {
+			d = -d
+		}
+		if d > thresh {
+			n++
+		}
+		prev = cur
+	}
+	return n
+}
+
+// TestGPUSupersampleSmootherEdges proves the SSAA path actually anti-aliases:
+// a shape rendered at Samples:3 has fewer hard luma transitions along its
+// silhouette rows than the same shape at Samples:1 (which jumps straight from
+// background to fully-lit in a single pixel). It is a behavioral check — that
+// SSAA moves the image toward smoother — not a fixed pixel golden.
+func TestGPUSupersampleSmootherEdges(t *testing.T) {
+	requireGPU(t)
+
+	// A rotated box has long, near-diagonal silhouettes that alias hard at
+	// 1 sample/pixel — an ideal subject for an AA delta.
+	s3 := simplesdf.Box(4, 3, 2, 0).Rotate(0.6, 0, 0, 1)
+	cp := CameraParams{Azimuth: 0.6, Elevation: 0.4, Zoom: 1}
+	const maxW, maxH, downscale = 160, 160, 1
+	const name = "ssaa_box"
+
+	r, err := NewRenderer(PreviewConfig{})
+	if err != nil {
+		t.Fatalf("NewRenderer: %v", err)
+	}
+
+	q1 := GPUQuality{Samples: 1, MaxSteps: 80, Eps: 0.002, FarT: 100}
+	q3 := GPUQuality{Samples: 3, MaxSteps: 80, Eps: 0.002, FarT: 100}
+
+	img1, _, err := r.RenderAngledGPUQ(s3, name, cp, maxW, maxH, downscale, q1)
+	if err != nil {
+		t.Fatalf("render 1x: %v", err)
+	}
+	img3, _, err := r.RenderAngledGPUQ(s3, name, cp, maxW, maxH, downscale, q3)
+	if err != nil {
+		t.Fatalf("render 3x: %v", err)
+	}
+
+	if os.Getenv("DUMP_PNG") != "" {
+		writePNG(t, "testdata/ssaa_box_1x.png", img1)
+		writePNG(t, "testdata/ssaa_box_3x.png", img3)
+	}
+
+	// Sum hard transitions over every row: this captures the full silhouette
+	// and is robust to which exact rows cross an edge.
+	b := img1.Bounds()
+	var hard1, hard3 int
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		hard1 += hardHorizTransitions(img1, y, 0.5)
+		hard3 += hardHorizTransitions(img3, y, 0.5)
+	}
+	t.Logf("hard luma transitions (>0.5): 1x=%d  3x=%d", hard1, hard3)
+
+	if hard1 == 0 {
+		t.Fatalf("1x produced no hard transitions; test subject does not alias as expected")
+	}
+	if hard3 >= hard1 {
+		t.Errorf("SSAA did not smooth edges: 3x hard transitions %d not < 1x %d", hard3, hard1)
+	}
+}

@@ -40,8 +40,14 @@ func (m RenderMode) String() string {
 // live viewport's existing CPU path; its error (a genuine mesh/raster failure)
 // is surfaced, since at that point there is no further fallback.
 func (r *Renderer) RenderAngledAuto(s3 simplesdf.SDF3, name string, cp CameraParams, maxW, maxH, downscale int) (image.Image, image.Rectangle, RenderMode, error) {
+	return r.RenderAngledAutoQ(s3, name, cp, maxW, maxH, downscale, DefaultGPUQuality)
+}
+
+// RenderAngledAutoQ is RenderAngledAuto with an explicit GPUQuality applied to
+// the GPU path. The CPU mesh fallback ignores q (it has no comparable knob).
+func (r *Renderer) RenderAngledAutoQ(s3 simplesdf.SDF3, name string, cp CameraParams, maxW, maxH, downscale int, q GPUQuality) (image.Image, image.Rectangle, RenderMode, error) {
 	if gpuAvailable() {
-		img, rect, err := r.RenderAngledGPU(s3, name, cp, maxW, maxH, downscale)
+		img, rect, err := r.RenderAngledGPUQ(s3, name, cp, maxW, maxH, downscale, q)
 		if err == nil {
 			return img, rect, RenderModeGPU, nil
 		}

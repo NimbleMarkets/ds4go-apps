@@ -44,15 +44,20 @@ func spikeFrontCam(w, h int) gpuCam {
 		TanHalfFov: float32(math.Tan(20 * math.Pi / 180)),
 		W:          uint32(w),
 		H:          uint32(h),
+		Samples:    1,
+		MaxSteps:   80,
+		Eps:        0.002,
+		FarT:       100,
 	}
 }
 
-// TestGPUCamLayout guards the std140-ish uniform layout. WGSL Cam is 80 bytes
-// (5 x 16-byte blocks); a mismatch here is the first suspect for a missing or
-// misplaced sphere.
+// TestGPUCamLayout guards the std140-ish uniform layout. WGSL Cam is 96 bytes
+// (6 x 16-byte blocks: 4 padded vec3 rows, the w/h/samples/maxSteps row, and the
+// eps/farT/pad/pad quality row); a mismatch here is the first suspect for a
+// missing or misplaced sphere.
 func TestGPUCamLayout(t *testing.T) {
-	if got := unsafe.Sizeof(gpuCam{}); got != 80 {
-		t.Fatalf("unsafe.Sizeof(gpuCam{}) = %d, want 80 (must match WGSL Cam, multiple of 16)", got)
+	if got := unsafe.Sizeof(gpuCam{}); got != 96 {
+		t.Fatalf("unsafe.Sizeof(gpuCam{}) = %d, want 96 (must match WGSL Cam, multiple of 16)", got)
 	}
 }
 

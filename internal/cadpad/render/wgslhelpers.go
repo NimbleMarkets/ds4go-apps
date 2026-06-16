@@ -9,7 +9,8 @@ struct Cam {
     fwd: vec3<f32>, _p1: f32,
     right: vec3<f32>, _p2: f32,
     up: vec3<f32>, tanHalfFov: f32,
-    w: u32, h: u32, _p3: u32, _p4: u32,
+    w: u32, h: u32, samples: u32, maxSteps: u32,
+    eps: f32, farT: f32, _q0: f32, _q1: f32,
 };
 @group(0) @binding(0) var<uniform> cam: Cam;
 @group(0) @binding(1) var<storage, read_write> out: array<u32>;
@@ -31,20 +32,20 @@ fn pack(c: vec3<f32>) -> u32 {
     return r | (g<<8u) | (b<<16u) | (255u<<24u);
 }
 
-@compute @workgroup_size(8,8)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    if (gid.x >= cam.w || gid.y >= cam.h) { return; }
-    let u = (2.0*(f32(gid.x)+0.5)/f32(cam.w) - 1.0) * cam.tanHalfFov * f32(cam.w)/f32(cam.h);
-    let v = (1.0 - 2.0*(f32(gid.y)+0.5)/f32(cam.h)) * cam.tanHalfFov;
+// shadeRay marches one primary ray and returns its shaded color. The march
+// parameters (eps/maxSteps/farT) come from the Cam uniform so the host can
+// trade speed for quality; with the default quality (eps=0.002, maxSteps=80,
+// farT=100) this is bit-for-bit identical to the original single-ray body.
+fn shadeRay(u: f32, v: f32) -> vec3<f32> {
     let dir = normalize(cam.fwd + u*cam.right + v*cam.up);
     var t = 0.0;
     var hit = false;
-    for (var i = 0; i < 80; i = i + 1) {
+    for (var i = 0u; i < cam.maxSteps; i = i + 1u) {
         let p = cam.eye + t*dir;
         let d = sdf(p);
-        if (d < 0.002) { hit = true; break; }
+        if (d < cam.eps) { hit = true; break; }
         t = t + d*0.95;
-        if (t > 100.0) { break; }
+        if (t > cam.farT) { break; }
     }
     var col = vec3<f32>(0.098,0.110,0.137); // bg 25,28,35
     if (hit) {
@@ -56,5 +57,28 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let shade = min(0.25 + 0.75*lambert, 1.0);
         col = vec3<f32>(0.85,0.95,1.0) * shade; // teal tint
     }
+    return col;
+}
+
+@compute @workgroup_size(8,8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    if (gid.x >= cam.w || gid.y >= cam.h) { return; }
+    let s = max(cam.samples, 1u);
+    let fs = f32(s);
+    // Ordered-grid supersampling: shoot s*s rays at evenly spaced sub-pixel
+    // offsets and average the shaded color. For s==1 the single offset is
+    // ((0+0.5)/1, (0+0.5)/1) = (0.5, 0.5) — the original pixel-center sample,
+    // and the u/v expressions below are byte-identical to the original body.
+    var acc = vec3<f32>(0.0,0.0,0.0);
+    for (var sy = 0u; sy < s; sy = sy + 1u) {
+        for (var sx = 0u; sx < s; sx = sx + 1u) {
+            let ox = (f32(sx)+0.5)/fs;
+            let oy = (f32(sy)+0.5)/fs;
+            let u = (2.0*(f32(gid.x)+ox)/f32(cam.w) - 1.0) * cam.tanHalfFov * f32(cam.w)/f32(cam.h);
+            let v = (1.0 - 2.0*(f32(gid.y)+oy)/f32(cam.h)) * cam.tanHalfFov;
+            acc = acc + shadeRay(u, v);
+        }
+    }
+    let col = acc / (fs*fs);
     out[gid.y*cam.w + gid.x] = pack(col);
 }`
