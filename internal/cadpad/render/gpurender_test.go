@@ -116,7 +116,13 @@ var gpuParityOps = map[string]simplesdf.SDF3{
 	"intersect":    simplesdf.Sphere(3).Intersect(simplesdf.Box(3, 3, 3, 0)),
 	"xor":          simplesdf.Sphere(3).Xor(simplesdf.Box(3, 3, 3, 0)),
 	"smooth_union": simplesdf.Sphere(3).K(0.5).Union(simplesdf.Box(3, 3, 3, 0).Translate(2, 0, 0)),
-	"scale":        simplesdf.Box(4, 3, 2, 0).Scale(1.5),
+	// smooth_diff / smooth_intersect exercise the smooth-min blend on the other
+	// two booleans; smooth_union_chain nests the smooth-min across two unions.
+	"smooth_diff":      simplesdf.Sphere(3).K(0.5).Diff(simplesdf.Box(2, 2, 2, 0)),
+	"smooth_intersect": simplesdf.Sphere(3).K(0.5).Intersect(simplesdf.Box(2.5, 2.5, 2.5, 0)),
+	"smooth_union_chain": simplesdf.Sphere(2).K(0.4).Union(simplesdf.Box(2, 2, 2, 0)).
+		K(0.4).Union(simplesdf.Sphere(2).Translate(2, 0, 0)),
+	"scale": simplesdf.Box(4, 3, 2, 0).Scale(1.5),
 	"offset":       simplesdf.Box(4, 3, 2, 0).Offset(0.3),
 	"shell":        simplesdf.Sphere(3).Shell(0.2),
 	"elongate":     simplesdf.Box(2, 2, 2, 0).Elongate(2, 0, 0),
@@ -146,7 +152,8 @@ func TestGPUParityOps(t *testing.T) {
 
 	// Deterministic order.
 	names := []string{
-		"intersect", "xor", "smooth_union", "scale", "offset", "shell",
+		"intersect", "xor", "smooth_union", "smooth_diff", "smooth_intersect",
+		"smooth_union_chain", "scale", "offset", "shell",
 		"elongate", "rotate", "rotate_x", "rotate_y", "rotate_z",
 	}
 	for _, name := range names {
