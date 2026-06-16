@@ -326,7 +326,11 @@ func rewriteBody(body string, declared, scope map[string]bool) (string, error) {
 	body = normalizeFloatLiterals(body)
 	// Statement-level rewrites run on GLSL type keywords (`vec3 q`, `const float k`)
 	// BEFORE rewriteTypeKeywords mangles them, so declaration detection sees the
-	// raw `vec3`/`float`/`const` lead tokens.
+	// raw `vec3`/`float`/`const` lead tokens. This ordering is load-bearing: the
+	// paren-swizzle hoist inside rewriteStatements only correctly skips genuine
+	// constructors (`vec4(...)`, ident-prefixed) while types are still GLSL-form;
+	// after rewriteTypeKeywords they become `vec4<f32>(...)` whose `>(` would be
+	// misread as a grouping-paren swizzle. Do not reorder these two calls.
 	body = rewriteStatements(body)
 	body = rewriteTypeKeywords(body)
 	if err := validateIdents(body, declared, scope); err != nil {
