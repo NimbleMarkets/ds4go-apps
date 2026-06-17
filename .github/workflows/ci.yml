@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A newer push to the same branch/PR cancels an in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Full build + test on macOS — the only runner where cadpad's CGO/Metal path
+  # compiles and where the gogpu GPU tests can run against a real device.
+  macos:
+    name: macOS build and test
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Check formatting
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "The following files need gofmt:"
+            echo "$files"
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # gogpu trips the race detector's checkptr and SIGSEGVs on teardown, so the
+      # render package is tested without -race; everything else keeps -race.
+      - name: Test (race, excluding GPU render)
+        run: |
+          # shellcheck disable=SC2046 # intentional word-splitting of the package list
+          go test -race $(go list ./... | grep -v 'internal/cadpad/render')
+
+      - name: Test GPU render (no race)
+        run: go test ./internal/cadpad/render
+
+  # Pure-Go coverage + cross-compile sanity. cadpad (CGO+Metal) and the GPU
+  # render package are excluded — they don't build CGO-off / off-darwin.
+  linux:
+    name: Linux build and cross-compile
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Compute pure-Go package set
+        id: pkgs
+        run: echo "list=$(go list ./... | grep -vE 'cmd/cadpad|internal/cadpad/render' | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: go build ${{ steps.pkgs.outputs.list }}
+
+      - name: Vet
+        run: go vet ${{ steps.pkgs.outputs.list }}
+
+      - name: Test (race)
+        run: go test -race ${{ steps.pkgs.outputs.list }}
+
+      - name: Cross-compile pure-Go apps
+        run: |
+          for osarch in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            export GOOS=${osarch%/*} GOARCH=${osarch#*/}
+            echo "==> $GOOS/$GOARCH"
+            go build -o /dev/null ./cmd/glyphpad ./cmd/svgpad ./cmd/steering
+          done
+
+  # Validate the release config so a broken .goreleaser.yaml is caught on PRs
+  # rather than at tag time.
+  goreleaser:
+    name: Validate release config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: check
