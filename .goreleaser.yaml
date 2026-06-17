@@ -1,9 +1,10 @@
 # ds4go-apps .goreleaser.yaml
 #
 # glyphpad/svgpad/steering are pure-Go (purego, CGO_ENABLED=0) and cross-compile
-# to every platform with the stock toolchain. cadpad links gogpu/wgpu, needs
-# CGO_ENABLED=1, and only builds for darwin/arm64 (Metal) — so the release runs
-# on a macOS runner (see .github/workflows/release.yml).
+# to linux + darwin with the stock toolchain. (Windows is omitted: ds4go's purego
+# path has no Dlsym on Windows.) cadpad links gogpu/wgpu, needs CGO_ENABLED=1, and
+# only builds for darwin/arm64 (Metal) — so the release runs on a macOS runner
+# (see .github/workflows/release.yml).
 version: 2
 
 project_name: ds4go-apps
@@ -17,7 +18,7 @@ builds:
     main: ./cmd/glyphpad
     binary: ds4go-glyphpad
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin, windows]
+    goos: [linux, darwin]
     goarch: [amd64, arm64]
     ldflags: [-s -w]
 
@@ -25,7 +26,7 @@ builds:
     main: ./cmd/svgpad
     binary: ds4go-svgpad
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin, windows]
+    goos: [linux, darwin]
     goarch: [amd64, arm64]
     ldflags: [-s -w]
 
@@ -33,7 +34,7 @@ builds:
     main: ./cmd/steering
     binary: ds4go-steering
     env: [CGO_ENABLED=0]
-    goos: [linux, darwin, windows]
+    goos: [linux, darwin]
     goarch: [amd64, arm64]
     ldflags: [-s -w]
 
@@ -51,19 +52,14 @@ archives:
   - id: glyphpad
     ids: [glyphpad]
     formats: [tar.gz]
-    format_overrides: &winzip
-      - goos: windows
-        formats: [zip]
     name_template: "ds4go-glyphpad_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
   - id: svgpad
     ids: [svgpad]
     formats: [tar.gz]
-    format_overrides: *winzip
     name_template: "ds4go-svgpad_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
   - id: steering
     ids: [steering]
     formats: [tar.gz]
-    format_overrides: *winzip
     name_template: "ds4go-steering_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
   - id: cadpad
     ids: [cadpad]

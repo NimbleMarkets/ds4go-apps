@@ -54,13 +54,12 @@ jobs:
       - name: Test GPU render (no race)
         run: go test ./internal/cadpad/render
 
-  # Pure-Go coverage + cross-compile sanity. cadpad (CGO+Metal) and the GPU
-  # render package are excluded — they don't build CGO-off / off-darwin.
+  # Pure-Go coverage + cross-compile sanity. Anything that transitively imports
+  # gogpu (cadpad's GPU stack) needs cgo + Metal and can't build off-darwin, so
+  # it is excluded here and covered by the macOS job instead.
   linux:
     name: Linux build and cross-compile
     runs-on: ubuntu-latest
-    env:
-      CGO_ENABLED: "0"
     steps:
       - uses: actions/checkout@v6
 
@@ -68,9 +67,17 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Pure-Go set = every package that does NOT transitively import gogpu.
+      # This catches indirect importers (internal/cadpad/{harness,lua,tools}),
+      # which a path grep would miss.
       - name: Compute pure-Go package set
         id: pkgs
-        run: echo "list=$(go list ./... | grep -vE 'cmd/cadpad|internal/cadpad/render' | tr '\n' ' ')" >> "$GITHUB_OUTPUT"
+        run: |
+          list=$(for p in $(go list ./...); do
+            go list -deps "$p" 2>/dev/null | grep -q 'gogpu/wgpu' || echo "$p"
+          done | tr '\n' ' ')
+          echo "pure-Go packages: $list"
+          echo "list=$list" >> "$GITHUB_OUTPUT"
 
       - name: Build
         run: go build ${{ steps.pkgs.outputs.list }}
@@ -78,12 +85,19 @@ jobs:
       - name: Vet
         run: go vet ${{ steps.pkgs.outputs.list }}
 
+      # The race detector requires cgo, so this keeps the default CGO_ENABLED=1
+      # (ubuntu ships gcc); these pure-Go packages don't actually use cgo.
       - name: Test (race)
         run: go test -race ${{ steps.pkgs.outputs.list }}
 
-      - name: Cross-compile pure-Go apps
+      # Release builds the pure-Go apps with CGO disabled; verify they
+      # cross-compile to every shipped target. Windows is intentionally absent:
+      # ds4go's purego path has no Dlsym there (matches the goreleaser goos list).
+      - name: Cross-compile pure-Go apps (CGO disabled)
+        env:
+          CGO_ENABLED: "0"
         run: |
-          for osarch in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+          for osarch in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
             export GOOS=${osarch%/*} GOARCH=${osarch#*/}
             echo "==> $GOOS/$GOARCH"
             go build -o /dev/null ./cmd/glyphpad ./cmd/svgpad ./cmd/steering
