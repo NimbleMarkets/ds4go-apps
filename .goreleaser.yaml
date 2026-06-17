@@ -1,0 +1,143 @@
+# ds4go-apps .goreleaser.yaml
+#
+# glyphpad/svgpad/steering are pure-Go (purego, CGO_ENABLED=0) and cross-compile
+# to every platform with the stock toolchain. cadpad links gogpu/wgpu, needs
+# CGO_ENABLED=1, and only builds for darwin/arm64 (Metal) — so the release runs
+# on a macOS runner (see .github/workflows/release.yml).
+version: 2
+
+project_name: ds4go-apps
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: glyphpad
+    main: ./cmd/glyphpad
+    binary: ds4go-glyphpad
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags: [-s -w]
+
+  - id: svgpad
+    main: ./cmd/svgpad
+    binary: ds4go-svgpad
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags: [-s -w]
+
+  - id: steering
+    main: ./cmd/steering
+    binary: ds4go-steering
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags: [-s -w]
+
+  - id: cadpad
+    main: ./cmd/cadpad
+    binary: ds4go-cadpad
+    env: [CGO_ENABLED=1]
+    goos: [darwin]
+    goarch: [arm64]
+    ldflags: [-s -w]
+
+# One archive per app (single binary each) so the four apps never collide and
+# each Homebrew cask maps to exactly one archive.
+archives:
+  - id: glyphpad
+    ids: [glyphpad]
+    formats: [tar.gz]
+    format_overrides: &winzip
+      - goos: windows
+        formats: [zip]
+    name_template: "ds4go-glyphpad_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: svgpad
+    ids: [svgpad]
+    formats: [tar.gz]
+    format_overrides: *winzip
+    name_template: "ds4go-svgpad_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: steering
+    ids: [steering]
+    formats: [tar.gz]
+    format_overrides: *winzip
+    name_template: "ds4go-steering_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+  - id: cadpad
+    ids: [cadpad]
+    formats: [tar.gz]
+    name_template: "ds4go-cadpad_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+# Sign and notarize the macOS binaries with Apple. Skipped unless MACOS_SIGN_P12
+# is set, so forks and snapshot builds without the secrets still work.
+notarize:
+  macos:
+    - enabled: '{{ isEnvSet "MACOS_SIGN_P12" }}'
+      ids:
+        - glyphpad
+        - svgpad
+        - steering
+        - cadpad
+      sign:
+        certificate: "{{.Env.MACOS_SIGN_P12}}"
+        password: "{{.Env.MACOS_SIGN_PASSWORD}}"
+        entitlements: ./etc/entitlements.plist
+      notarize:
+        issuer_id: "{{.Env.MACOS_NOTARY_ISSUER_ID}}"
+        key_id: "{{.Env.MACOS_NOTARY_KEY_ID}}"
+        key: "{{.Env.MACOS_NOTARY_KEY}}"
+        wait: true
+        timeout: 20m
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+
+release:
+  github:
+    owner: NimbleMarkets
+    name: ds4go-apps
+
+homebrew_casks:
+  - name: ds4go-glyphpad
+    ids: [glyphpad]
+    homepage: https://github.com/NimbleMarkets/ds4go-apps
+    description: "Unicode glyph / ASCII-art scratchpad driven by a local DeepSeek model"
+    repository: &tap
+      owner: NimbleMarkets
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author: &cask_author
+      name: goreleaserbot
+      email: goreleaserbot@nimble.markets
+
+  - name: ds4go-svgpad
+    ids: [svgpad]
+    homepage: https://github.com/NimbleMarkets/ds4go-apps
+    description: "SVG drawing scratchpad driven by a local DeepSeek model"
+    repository: *tap
+    commit_author: *cask_author
+
+  - name: ds4go-steering
+    ids: [steering]
+    homepage: https://github.com/NimbleMarkets/ds4go-apps
+    description: "DeepSeek activation-steering dashboard"
+    repository: *tap
+    commit_author: *cask_author
+
+  - name: ds4go-cadpad
+    ids: [cadpad]
+    homepage: https://github.com/NimbleMarkets/ds4go-apps
+    description: "LLM-driven parametric CAD workbench (macOS/Metal only)"
+    repository: *tap
+    commit_author: *cask_author
