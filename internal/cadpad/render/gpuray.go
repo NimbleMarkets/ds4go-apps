@@ -1,11 +1,10 @@
 package render
 
 import (
-	"context"
 	"fmt"
 	"image"
-	"unsafe"
 
+	"github.com/NimbleMarkets/ds4go-apps/ntgpu"
 	"github.com/gogpu/gputypes"
 	"github.com/gogpu/wgpu"
 )
@@ -143,7 +142,7 @@ func buildGPUPipeline(wgsl string) (*gpuPipeline, error) {
 // The output is an array<u32> storage buffer (one packed rgba8 per pixel).
 // Storage buffers are not directly mappable, so the result is copied into a
 // MapRead staging buffer (CopyBufferToBuffer before Finish) and that is mapped
-// for readback — exactly as runComputeDouble does in gpudevice.go.
+// for readback by ntgpu.DispatchRGBA8.
 //
 // It calls gogpu directly and MUST run on the executor goroutine (inside a
 // gpuDo closure) — never call it via gpuDo, which would deadlock re-entrantly.
@@ -157,91 +156,23 @@ func dispatchPipeline(p *gpuPipeline, cam gpuCam, w, h int) (*image.NRGBA, error
 	if err != nil {
 		return nil, err
 	}
-	q := dev.Queue()
-	npix := w * h
-	outBytes := uint64(npix * 4)
-
-	camBytes := unsafe.Slice((*byte)(unsafe.Pointer(&cam)), int(unsafe.Sizeof(cam)))
-	uni, err := dev.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: "cam", Size: uint64(len(camBytes)),
-		Usage: wgpu.BufferUsageUniform | wgpu.BufferUsageCopyDst,
+	img, err := ntgpu.DispatchRGBA8(dev, ntgpu.ImageDispatch{
+		Label:           "ray",
+		Width:           w,
+		Height:          h,
+		WorkgroupX:      8,
+		WorkgroupY:      8,
+		Uniform:         ntgpu.BytesOf(&cam),
+		BindGroupLayout: p.bgl,
+		Pipeline:        p.pipe,
+		UniformBinding:  0,
+		OutputBinding:   1,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create uniform buffer: %w", err)
+		return nil, err
 	}
-	defer uni.Release()
-
-	out, err := dev.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: "out", Size: outBytes,
-		Usage: wgpu.BufferUsageStorage | wgpu.BufferUsageCopySrc | wgpu.BufferUsageCopyDst,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create output buffer: %w", err)
-	}
-	defer out.Release()
-
-	staging, err := dev.CreateBuffer(&wgpu.BufferDescriptor{
-		Label: "staging", Size: outBytes,
-		Usage: wgpu.BufferUsageMapRead | wgpu.BufferUsageCopyDst,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create staging buffer: %w", err)
-	}
-	defer staging.Release()
-
-	if err := q.WriteBuffer(uni, 0, camBytes); err != nil {
-		return nil, fmt.Errorf("write uniform: %w", err)
-	}
-
-	bg, err := dev.CreateBindGroup(&wgpu.BindGroupDescriptor{
-		Layout: p.bgl,
-		Entries: []wgpu.BindGroupEntry{
-			{Binding: 0, Buffer: uni, Size: uint64(len(camBytes))},
-			{Binding: 1, Buffer: out, Size: outBytes},
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create bind group: %w", err)
-	}
-	defer bg.Release()
-
-	enc, err := dev.CreateCommandEncoder(nil)
-	if err != nil {
-		return nil, fmt.Errorf("create command encoder: %w", err)
-	}
-	pass, err := enc.BeginComputePass(nil)
-	if err != nil {
-		return nil, fmt.Errorf("begin compute pass: %w", err)
-	}
-	pass.SetPipeline(p.pipe)
-	pass.SetBindGroup(0, bg, nil)
-	pass.Dispatch((uint32(w)+7)/8, (uint32(h)+7)/8, 1)
-	if err := pass.End(); err != nil {
-		return nil, fmt.Errorf("end compute pass: %w", err)
-	}
-	enc.CopyBufferToBuffer(out, 0, staging, 0, outBytes)
-	cmd, err := enc.Finish()
-	if err != nil {
-		return nil, fmt.Errorf("finish: %w", err)
-	}
-	if _, err := q.Submit(cmd); err != nil {
-		return nil, fmt.Errorf("submit: %w", err)
-	}
-
-	if err := staging.Map(context.Background(), wgpu.MapModeRead, 0, outBytes); err != nil {
-		return nil, fmt.Errorf("map staging: %w", err)
-	}
-	defer staging.Unmap()
-	rng, err := staging.MappedRange(0, outBytes)
-	if err != nil {
-		return nil, fmt.Errorf("mapped range: %w", err)
-	}
-	defer rng.Release()
-
-	img := image.NewNRGBA(image.Rect(0, 0, w, h))
 	// pack() writes u32 = R | G<<8 | B<<16 | 255<<24; on little-endian targets
 	// (arm64/amd64) that's bytes [R,G,B,A], exactly NRGBA.Pix order. Alpha is a
 	// constant 255, so NRGBA's non-premultiplied contract is satisfied.
-	copy(img.Pix, rng.Bytes())
 	return img, nil
 }

@@ -31,10 +31,11 @@ import (
 type engineReadyMsg engineinit.Result
 
 type previewUpdatedMsg struct {
-	name string
-	img  image.Image
-	ok   bool
-	err  string
+	name  string
+	epoch int
+	img   image.Image
+	ok    bool
+	err   string
 
 	// mode reports which renderer produced the frame (GPU vs CPU mesh
 	// fallback). It is only meaningful — and hasMode only true — for the live

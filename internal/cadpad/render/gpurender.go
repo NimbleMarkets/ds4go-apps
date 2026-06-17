@@ -1,13 +1,12 @@
 package render
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"image"
 	"strings"
 
+	"github.com/NimbleMarkets/ds4go-apps/ntgpu"
 	"github.com/chewxy/math32"
 	"github.com/soypat/gsdf/gleval"
 	"github.com/soypat/gsdf/gsdfaux/simplesdf"
@@ -28,6 +27,22 @@ type GPUQuality struct {
 // constants the original hard-coded kernel used, so a render at this quality is
 // bit-for-bit identical to the pre-SSAA renderer (see TestGPUParityCorpus).
 var DefaultGPUQuality = GPUQuality{Samples: 1, MaxSteps: 80, Eps: 0.002, FarT: 100}
+
+func normalizeGPUQuality(q GPUQuality) GPUQuality {
+	if q.Samples < 1 {
+		q.Samples = DefaultGPUQuality.Samples
+	}
+	if q.MaxSteps < 1 {
+		q.MaxSteps = DefaultGPUQuality.MaxSteps
+	}
+	if q.Eps <= 0 {
+		q.Eps = DefaultGPUQuality.Eps
+	}
+	if q.FarT <= 0 {
+		q.FarT = DefaultGPUQuality.FarT
+	}
+	return q
+}
 
 // HighGPUQuality is the settle-time preset: 3x3 supersampling, a deeper step
 // budget, and a hit epsilon that tightens as the camera zooms in so fine SDF
@@ -109,14 +124,7 @@ func (r *Renderer) RenderAngledGPUQ(s3 simplesdf.SDF3, name string, cp CameraPar
 
 	// Camera: same resolution path as the CPU renderer.
 	cam := cameraFor(bb, cp)
-	samples := q.Samples
-	if samples < 1 {
-		samples = 1
-	}
-	maxSteps := q.MaxSteps
-	if maxSteps < 1 {
-		maxSteps = 1
-	}
+	q = normalizeGPUQuality(q)
 	gcam := gpuCam{
 		Eye:        [3]float32{cam.eye.X, cam.eye.Y, cam.eye.Z},
 		Fwd:        [3]float32{cam.forward.X, cam.forward.Y, cam.forward.Z},
@@ -125,8 +133,8 @@ func (r *Renderer) RenderAngledGPUQ(s3 simplesdf.SDF3, name string, cp CameraPar
 		TanHalfFov: math32.Tan(cam.fov / 2),
 		W:          uint32(w),
 		H:          uint32(h),
-		Samples:    uint32(samples),
-		MaxSteps:   uint32(maxSteps),
+		Samples:    uint32(q.Samples),
+		MaxSteps:   uint32(q.MaxSteps),
 		Eps:        q.Eps,
 		FarT:       q.FarT,
 	}
@@ -175,36 +183,25 @@ func (r *Renderer) RenderAngledGPUQ(s3 simplesdf.SDF3, name string, cp CameraPar
 // gpuCompileCount returns how many times a GPU pipeline has actually been built
 // (cache misses). Read under the cache mutex so tests don't race the render.
 func (r *Renderer) gpuCompileCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.compileCount
+	return r.gpuPipelines.Misses()
 }
 
 // wgslHash returns the cache key hash for a WGSL kernel string.
 func wgslHash(wgsl string) string {
-	sum := sha256.Sum256([]byte(wgsl))
-	return hex.EncodeToString(sum[:])
+	return ntgpu.HashSource(wgsl)
 }
 
 // gpuPipelineLookup returns the cached pipeline for name when its WGSL hash
-// matches (hit=true). On a miss it bumps compileCount and returns (nil, false),
-// signaling the caller to build. It only touches the cache map under mu and
-// makes no GPU calls, so it is safe to call from inside a gpuDo closure (the
-// caller does) without risking a lock-order inversion — mu is released before
-// any GPU work and never held across gpuDo.
+// matches (hit=true). On a miss it bumps the cache miss counter and returns
+// (nil, false), signaling the caller to build. It only touches the ntgpu cache
+// map and makes no GPU calls, so it is safe to call from inside a gpuDo closure.
 //
-// compileCount is bumped here (on the miss that schedules a build) rather than
-// after the build so TestPipelineCache's assertions hold; a failed build is not
-// stored, but the count reflects the build attempt as before.
+// The miss counter is bumped here (on the miss that schedules a build) rather
+// than after the build so TestPipelineCache's assertions hold; a failed build is
+// not stored, but the count reflects the build attempt as before.
 func (r *Renderer) gpuPipelineLookup(name, wgsl string) (*gpuPipeline, bool) {
 	hash := wgslHash(wgsl)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if c, ok := r.gpuPipelines[name]; ok && c.wgslHash == hash {
-		return c.pipe, true
-	}
-	r.compileCount++
-	return nil, false
+	return r.gpuPipelines.Lookup(name, hash)
 }
 
 // gpuPipelineStore publishes a freshly built pipeline for name and returns the
@@ -213,12 +210,9 @@ func (r *Renderer) gpuPipelineLookup(name, wgsl string) (*gpuPipeline, bool) {
 // render can never reuse a freed pipeline. Map-only; no GPU calls.
 func (r *Renderer) gpuPipelineStore(name, wgsl string, pipe *gpuPipeline) *gpuPipeline {
 	hash := wgslHash(wgsl)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	var old *gpuPipeline
-	if c := r.gpuPipelines[name]; c != nil {
-		old = c.pipe
+	old, ok := r.gpuPipelines.Store(name, hash, pipe)
+	if !ok {
+		return nil
 	}
-	r.gpuPipelines[name] = &cachedGPUPipeline{wgslHash: hash, pipe: pipe}
 	return old
 }

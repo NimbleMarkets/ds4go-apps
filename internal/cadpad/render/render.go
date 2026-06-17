@@ -12,6 +12,7 @@ import (
 	"math"
 	"sync"
 
+	"github.com/NimbleMarkets/ds4go-apps/ntgpu"
 	"github.com/chewxy/math32"
 	"github.com/soypat/geometry/ms2"
 	"github.com/soypat/geometry/ms3"
@@ -152,21 +153,8 @@ type Renderer struct {
 	// the SDF/geometry (hashed via wgslHash), so interactive camera moves
 	// reuse it instead of recompiling WGSL→MSL every frame. Entries hold live
 	// GPU objects for the Renderer's lifetime; Invalidate/ClearCache Release
-	// them. Guarded by mu, like the other caches.
-	gpuPipelines map[string]*cachedGPUPipeline
-	// compileCount counts how many times buildGPUPipeline was actually
-	// invoked (i.e. cache misses). Tests assert on this to prove the cache
-	// hits and that geometry edits force a recompile. Guarded by mu.
-	compileCount int
-}
-
-// cachedGPUPipeline is a Renderer cache entry: a compiled GPU pipeline plus the
-// hash of the WGSL it was built from. A render reuses pipe when the freshly
-// transpiled WGSL hashes to the same wgslHash; otherwise the entry is rebuilt
-// (and the old pipe Released).
-type cachedGPUPipeline struct {
-	wgslHash string
-	pipe     *gpuPipeline
+	// them on the shared GPU executor.
+	gpuPipelines *ntgpu.PipelineCache[*gpuPipeline]
 }
 
 // NewRenderer constructs a renderer. A single Renderer should be shared by
@@ -183,12 +171,15 @@ func NewRenderer(cfg PreviewConfig) (*Renderer, error) {
 		return nil, err
 	}
 	return &Renderer{
-		ir:           ir,
-		cfg:          cfg,
-		cache:        make(map[string]cachedSDF2),
-		lastSz:       make(map[string]image.Rectangle),
-		meshCache:    make(map[string][]ms3.Triangle),
-		gpuPipelines: make(map[string]*cachedGPUPipeline),
+		ir:        ir,
+		cfg:       cfg,
+		cache:     make(map[string]cachedSDF2),
+		lastSz:    make(map[string]image.Rectangle),
+		meshCache: make(map[string][]ms3.Triangle),
+		gpuPipelines: ntgpu.NewPipelineCache(gpuExecutor, func(p *gpuPipeline) error {
+			p.Release()
+			return nil
+		}),
 	}, nil
 }
 
@@ -316,25 +307,13 @@ func computeTargetSize(bb ms2.Box, maxW, maxH, maxEdge int) (int, int) {
 // after heavy transform that invalidates assumptions).
 func (r *Renderer) ClearCache() {
 	r.mu.Lock()
-	old := r.gpuPipelines
 	r.cache = make(map[string]cachedSDF2)
 	r.lastSz = make(map[string]image.Rectangle)
 	r.meshCache = make(map[string][]ms3.Triangle)
-	r.gpuPipelines = make(map[string]*cachedGPUPipeline)
 	r.mu.Unlock()
-	// Release the GPU objects after dropping them from the map so no concurrent
-	// render can pick up an entry we are about to free. The Release runs on the
-	// executor goroutine via gpuDo, serialized AFTER any in-flight dispatch, so
-	// it can never free a pipeline mid-dispatch (closes the use-after-Release
-	// window). mu is already released here — we never block on gpuDo under mu.
-	if len(old) > 0 {
-		_ = gpuDo(func() error {
-			for _, c := range old {
-				c.pipe.Release()
-			}
-			return nil
-		})
-	}
+	// GPU resources are removed from their cache before Release is queued on the
+	// executor, so a concurrent render cannot pick a resource being freed.
+	_ = r.gpuPipelines.Clear()
 }
 
 // SetMaxEdge updates the resolution cap and drops size cache.
@@ -357,20 +336,9 @@ func (r *Renderer) Invalidate(name string) {
 		delete(r.lastSz, key)
 	}
 	delete(r.meshCache, name)
-	// Drop the cached GPU pipeline for this object; Release it after unlocking
-	// (and after removing it from the map) so it can't be reused mid-Release.
-	old := r.gpuPipelines[name]
-	delete(r.gpuPipelines, name)
 	r.mu.Unlock()
-	// Release on the executor goroutine, serialized after any in-flight
-	// dispatch (closes the use-after-Release window). mu is already released;
-	// we never block on gpuDo while holding mu.
-	if old != nil {
-		_ = gpuDo(func() error {
-			old.pipe.Release()
-			return nil
-		})
-	}
+	// Release on the executor goroutine, serialized after any in-flight dispatch.
+	_ = r.gpuPipelines.Invalidate(name)
 }
 
 // DefaultColorConv returns a simple high-contrast scheme (black=inside).

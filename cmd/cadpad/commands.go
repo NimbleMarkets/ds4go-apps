@@ -75,6 +75,7 @@ func (m *model) selectObject(delta int) tea.Cmd {
 
 func (m model) refreshPreviewCmd() tea.Cmd {
 	cur := m.w.Current()
+	epoch := m.renderEpoch
 	if cur == "" {
 		names := m.w.Names()
 		if len(names) == 0 {
@@ -85,7 +86,7 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 	return func() tea.Msg {
 		s, _, ok := m.w.Get(cur)
 		if !ok || s.Shader() == nil {
-			return previewUpdatedMsg{name: cur, ok: false, err: "no sdf"}
+			return previewUpdatedMsg{name: cur, epoch: epoch, ok: false, err: "no sdf"}
 		}
 		pc, pr := m.viewportInnerSize()
 		var img image.Image
@@ -112,14 +113,14 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 				img, rect, mode, err = m.renderer.RenderAngledAuto(s, cur, cp, pc*8, pr*16, 1)
 				ok2 := err == nil
 				m.w.SetPreview(cur, world.Projection(m.proj), rect.Dx(), rect.Dy(), ok2, errStr(err))
-				return previewUpdatedMsg{name: cur, img: img, ok: ok2, err: errStr(err), mode: mode, hasMode: true}
+				return previewUpdatedMsg{name: cur, epoch: epoch, img: img, ok: ok2, err: errStr(err), mode: mode, hasMode: true}
 			}
 		} else {
 			img, rect, err = m.renderer.Render(s, cur, m.proj, pc*8, pr*16)
 		}
 		ok2 := err == nil
 		m.w.SetPreview(cur, world.Projection(m.proj), rect.Dx(), rect.Dy(), ok2, errStr(err))
-		return previewUpdatedMsg{name: cur, img: img, ok: ok2, err: errStr(err)}
+		return previewUpdatedMsg{name: cur, epoch: epoch, img: img, ok: ok2, err: errStr(err)}
 	}
 }
 
@@ -131,6 +132,7 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 // to CPU it still produces a frame — harmless, just not the GPU AA pass.
 func (m model) refreshPreviewHQCmd() tea.Cmd {
 	cur := m.w.Current()
+	epoch := m.renderEpoch
 	if cur == "" {
 		names := m.w.Names()
 		if len(names) == 0 {
@@ -141,7 +143,7 @@ func (m model) refreshPreviewHQCmd() tea.Cmd {
 	return func() tea.Msg {
 		s, _, ok := m.w.Get(cur)
 		if !ok || s.Shader() == nil {
-			return previewUpdatedMsg{name: cur, ok: false, err: "no sdf", hq: true}
+			return previewUpdatedMsg{name: cur, epoch: epoch, ok: false, err: "no sdf", hq: true}
 		}
 		pc, pr := m.viewportInnerSize()
 		cp := render.CameraParams{
@@ -154,7 +156,7 @@ func (m model) refreshPreviewHQCmd() tea.Cmd {
 		img, rect, mode, err := m.renderer.RenderAngledAutoQ(s, cur, cp, pc*8, pr*16, 1, render.HighGPUQuality(cp))
 		ok2 := err == nil
 		m.w.SetPreview(cur, world.Projection(m.proj), rect.Dx(), rect.Dy(), ok2, errStr(err))
-		return previewUpdatedMsg{name: cur, img: img, ok: ok2, err: errStr(err), mode: mode, hasMode: true, hq: true}
+		return previewUpdatedMsg{name: cur, epoch: epoch, img: img, ok: ok2, err: errStr(err), mode: mode, hasMode: true, hq: true}
 	}
 }
 

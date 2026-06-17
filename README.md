@@ -178,6 +178,10 @@ steering-only:
   ```bash
   task pre-push
   ```
+- **Run tests:**
+  ```bash
+  task test
+  ```
 - **Reduce VRAM pressure** if you hit OOM:
   ```bash
   task run:svgpad -- --ctx 8192 --power 50

@@ -116,9 +116,14 @@ tasks:
       - touch glyphpad.log svgpad.log cadpad.log && tail -F glyphpad.log svgpad.log cadpad.log
 
   vet:
-    desc: Run go vet
+    desc: Run go vet for maintained app/library packages
     cmds:
-      - go vet ./...
+      - go vet ./cmd/... ./internal/... ./ntgpu
+
+  test:
+    desc: Run Go tests for maintained app/library packages
+    cmds:
+      - go test ./cmd/... ./internal/... ./ntgpu
 
   fmt:
     desc: Format all Go source files
@@ -141,8 +146,9 @@ tasks:
     cmds:
       - go mod tidy
       - task: fmt-check
-      - go build ./...
-      - go vet ./...
+      - task: test
+      - go build ./cmd/... ./internal/... ./ntgpu
+      - task: vet
 
   clean:
     desc: Remove built binaries

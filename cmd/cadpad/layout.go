@@ -112,3 +112,26 @@ func (m model) viewportBounds() (x0, y0, x1, y1 int) {
 	x0 = d.leftW + d.srcW
 	return x0, 1, x0 + d.viewW - 1, d.h
 }
+
+func (m model) sourceBounds() (x0, y0, x1, y1 int, ok bool) {
+	if !m.showSource {
+		return 0, 0, 0, 0, false
+	}
+	d := m.bodyDimensions()
+	if d.srcW <= 0 {
+		return 0, 0, 0, 0, false
+	}
+	x0 = d.leftW
+	return x0, 1, x0 + d.srcW - 1, d.h, true
+}
+
+func (m model) luaOutputBounds() (x0, y0, x1, y1 int, ok bool) {
+	if !m.showLuaOutput {
+		return 0, 0, 0, 0, false
+	}
+	y0 = 1 + m.bodyH()
+	if m.showThinking {
+		y0 += 14 // thinking box height plus separator line
+	}
+	return 0, y0, max(0, m.width-1), y0 + 6, true
+}

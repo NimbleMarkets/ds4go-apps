@@ -300,8 +300,8 @@ func TestMouseNavigation(t *testing.T) {
 	if m.camAzimuth >= baselineAzimuth {
 		t.Error("expected camAzimuth to decrease after drag motion right (inverted axis)")
 	}
-	if m.camElevation == baselineElevation {
-		t.Error("expected camElevation to change after drag motion")
+	if m.camElevation <= baselineElevation {
+		t.Error("expected camElevation to increase after dragging down")
 	}
 
 	// Save baseline panning state
@@ -330,8 +330,8 @@ func TestMouseNavigation(t *testing.T) {
 	if m.camPanX >= baselinePanX {
 		t.Error("expected camPanX to decrease after shift+drag motion right (inverted axis)")
 	}
-	if m.camPanY == baselinePanY {
-		t.Error("expected camPanY to change after shift+drag motion")
+	if m.camPanY <= baselinePanY {
+		t.Error("expected camPanY to increase after shift+dragging down")
 	}
 
 	// 3.5 Feed previewUpdatedMsg. Since previewDirty is true, it should launch the dirty render.
@@ -375,6 +375,42 @@ func TestMouseNavigation(t *testing.T) {
 
 	if m.camZoom == baselineZoom {
 		t.Error("expected camZoom to change after scroll up")
+	}
+}
+
+func TestMouseWheelScrollsLuaOutput(t *testing.T) {
+	m := newModel(testApp(log.New(io.Discard, "", 0), ds4log.NewBuffer(10)))
+	m2, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = m2.(model)
+	m.showLuaOutput = true
+	m.lastLuaOutput = strings.Join([]string{
+		"line 01", "line 02", "line 03", "line 04", "line 05",
+		"line 06", "line 07", "line 08", "line 09", "line 10",
+	}, "\n")
+
+	x0, y0, x1, y1, ok := m.luaOutputBounds()
+	if !ok {
+		t.Fatal("expected lua output bounds")
+	}
+	x := (x0 + x1) / 2
+	y := (y0 + y1) / 2
+
+	m2, cmd := m.Update(tea.MouseWheelMsg{X: x, Y: y, Button: tea.MouseWheelUp})
+	m = m2.(model)
+	if cmd != nil {
+		t.Fatal("lua output wheel scroll should not trigger a render command")
+	}
+	if m.focus != focusLuaOutput {
+		t.Fatalf("focus = %v, want focusLuaOutput", m.focus)
+	}
+	if m.luaScroll == 0 {
+		t.Fatal("expected mouse wheel up over lua output to scroll back")
+	}
+
+	m2, _ = m.Update(tea.MouseWheelMsg{X: x, Y: y, Button: tea.MouseWheelDown})
+	m = m2.(model)
+	if m.luaScroll != 0 {
+		t.Fatalf("luaScroll after wheel down = %d, want 0", m.luaScroll)
 	}
 }
 

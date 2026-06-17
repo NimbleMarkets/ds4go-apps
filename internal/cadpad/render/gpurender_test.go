@@ -280,9 +280,7 @@ func TestPipelineCache(t *testing.T) {
 	// or double-freeing. (No extra GPU dispatch here, to keep teardown pressure
 	// low.) The earlier Invalidate already exercised single-entry Release.
 	r.ClearCache()
-	r.mu.Lock()
-	n := len(r.gpuPipelines)
-	r.mu.Unlock()
+	n := r.gpuPipelines.Len()
 	if n != 0 {
 		t.Errorf("after ClearCache: %d cached pipelines remain, want 0", n)
 	}
@@ -365,5 +363,16 @@ func TestGPUSupersampleSmootherEdges(t *testing.T) {
 	}
 	if hard3 >= hard1 {
 		t.Errorf("SSAA did not smooth edges: 3x hard transitions %d not < 1x %d", hard3, hard1)
+	}
+}
+
+func TestNormalizeGPUQualityDefaults(t *testing.T) {
+	got := normalizeGPUQuality(GPUQuality{})
+	if got != DefaultGPUQuality {
+		t.Fatalf("zero quality normalized to %+v, want %+v", got, DefaultGPUQuality)
+	}
+	custom := normalizeGPUQuality(GPUQuality{Samples: 2, MaxSteps: 24, Eps: 0.01, FarT: 12})
+	if custom.Samples != 2 || custom.MaxSteps != 24 || custom.Eps != 0.01 || custom.FarT != 12 {
+		t.Fatalf("custom quality changed: %+v", custom)
 	}
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"image"
 	"io"
 	"log"
 	"testing"
@@ -132,5 +133,36 @@ func TestRefreshPreviewBumpsEpoch(t *testing.T) {
 	m.refreshPreview()
 	if m.renderEpoch != start+2 {
 		t.Errorf("renderEpoch = %d after coalesced refresh, want %d", m.renderEpoch, start+2)
+	}
+}
+
+func TestStalePreviewResultDoesNotApplyFrame(t *testing.T) {
+	m := settleTestModel(t)
+	m.renderEpoch = 7
+	m.renderingPreview = true
+	m.lastRenderMode = render.RenderModeCPU
+	m.showRenderMode = false
+
+	m2, cmd := m.Update(previewUpdatedMsg{
+		name:    "ball",
+		epoch:   6,
+		ok:      true,
+		img:     image.NewNRGBA(image.Rect(0, 0, 8, 8)),
+		mode:    render.RenderModeGPU,
+		hasMode: true,
+	})
+	m = m2.(model)
+
+	if cmd != nil {
+		t.Fatal("stale preview should not emit SetImage or settle commands")
+	}
+	if m.renderingPreview {
+		t.Error("stale preview should still clear renderingPreview")
+	}
+	if m.showRenderMode {
+		t.Error("stale preview should not reveal render-mode badge")
+	}
+	if m.lastRenderMode != render.RenderModeCPU {
+		t.Errorf("stale preview changed lastRenderMode to %v", m.lastRenderMode)
 	}
 }

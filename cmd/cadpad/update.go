@@ -92,22 +92,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case previewUpdatedMsg:
 		m.renderingPreview = false
-		if msg.hasMode {
-			m.lastRenderMode = msg.mode
-			m.showRenderMode = true
-		}
-		if msg.ok && msg.img != nil {
-			cmds = append(cmds, m.pic.SetImage(msg.img))
-			m.logger.Printf("[PREVIEW] %s ok  bounds=%+v", msg.name, msg.img.Bounds())
-		} else if msg.err != "" {
-			m.lastErr = msg.err
-			m.logger.Printf("[PREVIEW] %s err=%q", msg.name, msg.err)
+		fresh := msg.epoch == 0 || msg.epoch == m.renderEpoch
+		if fresh {
+			if msg.hasMode {
+				m.lastRenderMode = msg.mode
+				m.showRenderMode = true
+			}
+			if msg.ok && msg.img != nil {
+				cmds = append(cmds, m.pic.SetImage(msg.img))
+				m.logger.Printf("[PREVIEW] %s ok  bounds=%+v", msg.name, msg.img.Bounds())
+			} else if msg.err != "" {
+				m.lastErr = msg.err
+				m.logger.Printf("[PREVIEW] %s err=%q", msg.name, msg.err)
+			}
 		}
 		if m.previewDirty {
 			m.previewDirty = false
 			m.renderingPreview = true
 			cmds = append(cmds, m.refreshPreviewCmd())
-		} else if msg.ok && !msg.hq && m.proj == render.ProjAngle &&
+		} else if fresh && msg.ok && !msg.hq && m.proj == render.ProjAngle &&
 			m.lastRenderMode == render.RenderModeGPU {
 			// Interactive GPU frame applied and the view is now stable (no
 			// pending dirty). Schedule a settle tick; if the camera moves
@@ -763,11 +766,11 @@ func (m model) handleMouseMotion(msg tea.MouseMotionMsg) (model, tea.Cmd) {
 	if msg.Mod&tea.ModShift != 0 {
 		// Panning mode: shift + drag
 		m.camPanX -= float32(dx) * 0.25
-		m.camPanY -= float32(dy) * 0.25 // In terminal, Y goes down, but camera panning Y is up
+		m.camPanY += float32(dy) * 0.25
 	} else {
 		// Orbit mode: drag
 		m.camAzimuth -= float32(dx) * 0.05
-		m.camElevation -= float32(dy) * 0.03
+		m.camElevation += float32(dy) * 0.03
 		maxElev := float32(math.Pi/2 - 0.05)
 		if m.camElevation > maxElev {
 			m.camElevation = maxElev
@@ -781,12 +784,34 @@ func (m model) handleMouseMotion(msg tea.MouseMotionMsg) (model, tea.Cmd) {
 }
 
 func (m model) handleMouseWheel(msg tea.MouseWheelMsg) (model, tea.Cmd) {
-	if m.proj != render.ProjAngle {
+	if x0, y0, x1, y1, ok := m.sourceBounds(); ok &&
+		msg.X >= x0 && msg.X <= x1 && msg.Y >= y0 && msg.Y <= y1 {
+		m.focus = focusSource
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			m.scrollSource(3)
+		case tea.MouseWheelDown:
+			m.scrollSource(-3)
+		}
+		m.clearViewCache()
+		return m, nil
+	}
+
+	if x0, y0, x1, y1, ok := m.luaOutputBounds(); ok &&
+		msg.X >= x0 && msg.X <= x1 && msg.Y >= y0 && msg.Y <= y1 {
+		m.focus = focusLuaOutput
+		switch msg.Button {
+		case tea.MouseWheelUp:
+			m.scrollLuaOutput(3)
+		case tea.MouseWheelDown:
+			m.scrollLuaOutput(-3)
+		}
+		m.clearViewCache()
 		return m, nil
 	}
 
 	x0, y0, x1, y1 := m.viewportBounds()
-	if msg.X >= x0 && msg.X <= x1 && msg.Y >= y0 && msg.Y <= y1 {
+	if m.proj == render.ProjAngle && msg.X >= x0 && msg.X <= x1 && msg.Y >= y0 && msg.Y <= y1 {
 		if msg.Button == tea.MouseWheelUp {
 			m.camZoom *= 0.9
 			if m.camZoom < 0.1 {
@@ -802,6 +827,27 @@ func (m model) handleMouseWheel(msg tea.MouseWheelMsg) (model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func (m *model) scrollSource(delta int) {
+	page := m.sourceVisibleLines()
+	maxScroll := max(0, len(m.sourceLines)-page)
+	m.sourceScroll = min(maxScroll, max(0, m.sourceScroll+delta))
+	if m.sourceScroll == 0 {
+		m.status = "lua source: following"
+	} else {
+		m.status = fmt.Sprintf("lua source: %d line(s) from end", m.sourceScroll)
+	}
+}
+
+func (m *model) scrollLuaOutput(delta int) {
+	lines := strings.Split(sanitizeForDisplay(m.lastLuaOutput), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		lines = nil
+	}
+	maxScroll := max(0, len(lines)-4)
+	m.luaScroll = min(maxScroll, max(0, m.luaScroll+delta))
+	m.status = fmt.Sprintf("lua scroll %d", m.luaScroll)
 }
 
 // refreshPreview requests a preview render, coalescing with any render
