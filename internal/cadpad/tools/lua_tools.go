@@ -23,7 +23,7 @@ type LuaDiagnoser interface {
 
 // LuaFileTools holds the dependencies needed for the Lua file manipulation tools.
 type LuaFileTools struct {
-	Workspace   string  // absolute path to the allowed directory for .lua files
+	Workspace   string // absolute path to the allowed directory for .lua files
 	W           *world.World
 	R           *render.Renderer
 	CurrentFile *string      // pointer so closures see updates; filename only (no path)
@@ -88,7 +88,9 @@ func RegisterLuaFileTools(reg *ds4.ToolRegistry, lft LuaFileTools) error {
 		Description: "Read the contents of the active .lua file. Use this to review your code before editing.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"Relative path to .lua file inside workspace"}},"required":["path"]}`),
 	}, func(ctx context.Context, raw json.RawMessage) (string, error) {
-		var p struct{ Path string `json:"path"` }
+		var p struct {
+			Path string `json:"path"`
+		}
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return "", err
 		}
@@ -238,7 +240,9 @@ func RegisterLuaFileTools(reg *ds4.ToolRegistry, lft LuaFileTools) error {
 			"required":["path"]
 		}`),
 	}, func(ctx context.Context, raw json.RawMessage) (string, error) {
-		var p struct{ Path string `json:"path"` }
+		var p struct {
+			Path string `json:"path"`
+		}
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return "", err
 		}

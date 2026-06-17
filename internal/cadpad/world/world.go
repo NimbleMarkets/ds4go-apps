@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/soypat/gsdf/gsdfaux/simplesdf"
 	"github.com/soypat/geometry/ms3"
+	"github.com/soypat/gsdf/gsdfaux/simplesdf"
 )
 
 // Projection identifies a 2D orthographic view of a 3D SDF.
@@ -47,9 +47,9 @@ type OpRecord struct {
 
 // CreateArgs for OpCreate.
 type CreateArgs struct {
-	Name   string                 `json:"name"`
-	Shape  string                 `json:"shape"` // sphere, box, cylinder, torus, ...
-	Params map[string]float64     `json:"params"`
+	Name   string             `json:"name"`
+	Shape  string             `json:"shape"` // sphere, box, cylinder, torus, ...
+	Params map[string]float64 `json:"params"`
 }
 
 // BooleanArgs for OpBoolean.
@@ -88,22 +88,22 @@ type Meta struct {
 type World struct {
 	mu sync.RWMutex
 
-	objs   map[string]simplesdf.SDF3
-	order  []string            // stable insertion/display order
-	meta   map[string]Meta
-	curr   string              // selected object name or ""
-	hist   []OpRecord          // replayable history (excludes transient preview)
+	objs    map[string]simplesdf.SDF3
+	order   []string // stable insertion/display order
+	meta    map[string]Meta
+	curr    string             // selected object name or ""
+	hist    []OpRecord         // replayable history (excludes transient preview)
 	bbCache map[string]ms3.Box // cached bounds; invalidated on replace
 
 	// lastPreview holds the most recent RenderPreview result for TUI consumption.
 	lastPreview struct {
-		Name   string
-		Proj   Projection
-		ImgW   int
-		ImgH   int
-		OK     bool
-		Err    string
-		At     time.Time
+		Name string
+		Proj Projection
+		ImgW int
+		ImgH int
+		OK   bool
+		Err  string
+		At   time.Time
 	}
 }
 
@@ -279,13 +279,13 @@ func (w *World) SetPreview(name string, proj Projection, imgW, imgH int, ok bool
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.lastPreview = struct {
-		Name   string
-		Proj   Projection
-		ImgW   int
-		ImgH   int
-		OK     bool
-		Err    string
-		At     time.Time
+		Name string
+		Proj Projection
+		ImgW int
+		ImgH int
+		OK   bool
+		Err  string
+		At   time.Time
 	}{name, proj, imgW, imgH, ok, errStr, time.Now().UTC()}
 }
 

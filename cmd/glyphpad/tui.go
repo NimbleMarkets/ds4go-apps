@@ -74,7 +74,7 @@ type model struct {
 	logTop       int            // absolute first-visible line; -1 = follow tail
 
 	history    []chatMsg
-	rawBuf     []byte // raw LLM response for the current turn
+	rawBuf     []byte             // raw LLM response for the current turn
 	gen        *bubble.Generation // in-flight generation; nil when idle
 	generating bool
 	statusText string

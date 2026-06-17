@@ -94,8 +94,8 @@ func TestRenderAngledAutoFallsBack(t *testing.T) {
 // and are validated here as the documented fallback set. The full Lua op surface
 // is GPU-clean (see TestGPUParityOps), so the only fallbacks are these.
 var unsupportedOps = map[string]simplesdf.SDF3{
-	"twist":     simplesdf.Box(4, 3, 2, 0).Twist(0.3),              // cos/sin
-	"array":     simplesdf.Sphere(1).Array(2, 2, 2, 3, 3, 3),       // round
+	"twist":     simplesdf.Box(4, 3, 2, 0).Twist(0.3),                         // cos/sin
+	"array":     simplesdf.Sphere(1).Array(2, 2, 2, 3, 3, 3),                  // round
 	"circarray": simplesdf.Box(1, 1, 1, 0).Translate(3, 0, 0).CircArray(6, 6), // atan
 }
 

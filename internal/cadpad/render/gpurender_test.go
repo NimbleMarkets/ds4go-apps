@@ -107,7 +107,7 @@ func TestGPUParityCorpus(t *testing.T) {
 //   - scale, offset, shell, elongate: modifiers.
 //   - rotate / rotate_x/y/z: mat4 transforms — these emit `mat4 invT=mat4(...)`
 //     and `((invT)*vec4(p,0)).xyz`, which the transpiler now supports (mat4 type
-//     + a hoist of the swizzle-of-parenthesized-expr that naga's MSL backend
+//   - a hoist of the swizzle-of-parenthesized-expr that naga's MSL backend
 //     miscompiles). A transposed rotation matrix would show here as a wrongly
 //     oriented box and fail parity; ~0.002 diffs confirm correct orientation.
 //
@@ -122,14 +122,14 @@ var gpuParityOps = map[string]simplesdf.SDF3{
 	"smooth_intersect": simplesdf.Sphere(3).K(0.5).Intersect(simplesdf.Box(2.5, 2.5, 2.5, 0)),
 	"smooth_union_chain": simplesdf.Sphere(2).K(0.4).Union(simplesdf.Box(2, 2, 2, 0)).
 		K(0.4).Union(simplesdf.Sphere(2).Translate(2, 0, 0)),
-	"scale": simplesdf.Box(4, 3, 2, 0).Scale(1.5),
-	"offset":       simplesdf.Box(4, 3, 2, 0).Offset(0.3),
-	"shell":        simplesdf.Sphere(3).Shell(0.2),
-	"elongate":     simplesdf.Box(2, 2, 2, 0).Elongate(2, 0, 0),
-	"rotate":       simplesdf.Box(4, 3, 2, 0).Rotate(0.6, 0, 0, 1),
-	"rotate_x":     simplesdf.Box(4, 3, 2, 0).RotateX(0.6),
-	"rotate_y":     simplesdf.Box(4, 3, 2, 0).RotateY(0.6),
-	"rotate_z":     simplesdf.Box(4, 3, 2, 0).RotateZ(0.6),
+	"scale":    simplesdf.Box(4, 3, 2, 0).Scale(1.5),
+	"offset":   simplesdf.Box(4, 3, 2, 0).Offset(0.3),
+	"shell":    simplesdf.Sphere(3).Shell(0.2),
+	"elongate": simplesdf.Box(2, 2, 2, 0).Elongate(2, 0, 0),
+	"rotate":   simplesdf.Box(4, 3, 2, 0).Rotate(0.6, 0, 0, 1),
+	"rotate_x": simplesdf.Box(4, 3, 2, 0).RotateX(0.6),
+	"rotate_y": simplesdf.Box(4, 3, 2, 0).RotateY(0.6),
+	"rotate_z": simplesdf.Box(4, 3, 2, 0).RotateZ(0.6),
 }
 
 // TestGPUParityOps validates the GPU path for the FULL Lua op surface beyond the
