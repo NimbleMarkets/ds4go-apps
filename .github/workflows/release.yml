@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # Guard: ensure the tagged commit builds and vets cleanly before releasing.
+  check:
+    name: Build and verify
+    runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go mod tidy && git diff --exit-code go.mod go.sum
+      - name: Build and vet pure-Go apps
+        run: |
+          pkgs="./cmd/glyphpad ./cmd/svgpad ./cmd/steering"
+          # shellcheck disable=SC2086 # intentional word-splitting of the package list
+          go build $pkgs
+          # shellcheck disable=SC2086 # intentional word-splitting of the package list
+          go vet $pkgs
+
+  # Build archives, publish the GitHub Release, and update the Homebrew casks.
+  # Runs on macOS so cadpad's cgo darwin/arm64 binary builds natively while the
+  # pure-Go apps cross-compile (CGO_ENABLED=0) to all platforms in the same run.
+  release:
+    name: Release
+    needs: check
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT with write access to NimbleMarkets/homebrew-tap.
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # Apple signing + notarization. When unset (e.g. forks), GoReleaser
+          # skips notarization via the isEnvSet gate in .goreleaser.yaml.
+          MACOS_SIGN_P12: ${{ secrets.MACOS_SIGN_P12 }}
+          MACOS_SIGN_PASSWORD: ${{ secrets.MACOS_SIGN_PASSWORD }}
+          MACOS_NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
