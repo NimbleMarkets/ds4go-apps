@@ -44,15 +44,26 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # gogpu trips the race detector's checkptr and SIGSEGVs on teardown, so the
-      # render package is tested without -race; everything else keeps -race.
-      - name: Test (race, excluding GPU render)
+      # The race detector is incompatible with gogpu — its Metal objc bridge
+      # triggers checkptr violations and teardown SIGSEGVs. So ONLY the pure-Go
+      # packages run under -race; every gogpu-dependent package (cmd/cadpad and
+      # internal/cadpad/{render,harness,lua,tools}) is tested without it. Split
+      # by actual dependency, not by path, to catch indirect importers.
+      - name: Test pure-Go packages (race)
         run: |
-          # shellcheck disable=SC2046 # intentional word-splitting of the package list
-          go test -race $(go list ./... | grep -v 'internal/cadpad/render')
+          pkgs=$(for p in $(go list ./...); do
+            go list -deps "$p" 2>/dev/null | grep -q 'gogpu/wgpu' || echo "$p"
+          done)
+          # shellcheck disable=SC2086 # intentional word-splitting of the package list
+          go test -race $pkgs
 
-      - name: Test GPU render (no race)
-        run: go test ./internal/cadpad/render
+      - name: Test gogpu packages (no race)
+        run: |
+          pkgs=$(for p in $(go list ./...); do
+            go list -deps "$p" 2>/dev/null | grep -q 'gogpu/wgpu' && echo "$p"
+          done)
+          # shellcheck disable=SC2086 # intentional word-splitting of the package list
+          go test $pkgs
 
   # Pure-Go coverage + cross-compile sanity. Anything that transitively imports
   # gogpu (cadpad's GPU stack) needs cgo + Metal and can't build off-darwin, so
