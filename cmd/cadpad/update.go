@@ -199,6 +199,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "generating with driver..."
 		m.logger.Printf("[GEN] started")
 		cmds = append(cmds, spinnerTick(), bubble.Wait(m.genCh))
+		// Auto-showing the LLM-output box shrinks bodyH(); refit the viewport.
+		if cmd := m.resizeViewport(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	case driverEventMsg:
 		m = m.handleDriverEvent(msg, &cmds)
@@ -227,6 +231,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+// resizeViewport recomputes the viewport's inner cell budget and pushes it to
+// the picture widget. Call after any layout change that alters the viewport
+// panel's size (the source-panel toggle, or the bottom boxes that change
+// bodyH()) so the 3D image refits immediately instead of staying at the stale
+// size until the next WindowSizeMsg. Returns the widget's re-encode Cmd (nil
+// unless in Kitty mode with an image set).
+func (m *model) resizeViewport() tea.Cmd {
+	pc, pr := m.viewportInnerSize()
+	return m.pic.SetSize(pc, pr)
 }
 
 func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
@@ -331,7 +346,9 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 			state = "shown"
 		}
 		m.status = "LLM output box " + state
-		return m, nil
+		// The box changes bodyH(), so the viewport panel resizes; refit the
+		// picture now rather than waiting for the next terminal resize.
+		return m, m.resizeViewport()
 	case key.Matches(msg, key.NewBinding(key.WithKeys("v"))):
 		wasShown := m.showSource
 		m.toggleSourceView()
@@ -364,7 +381,9 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 			state = "shown"
 		}
 		m.status = "lua output box " + state
-		return m, nil
+		// The box changes bodyH(), so the viewport panel resizes; refit the
+		// picture now rather than waiting for the next terminal resize.
+		return m, m.resizeViewport()
 	case key.Matches(msg, key.NewBinding(key.WithKeys("s"))):
 		_ = m.w.Save("cadpad-session.cad.json")
 		m.logger.Printf("[SAVE] cadpad-session.cad.json")
