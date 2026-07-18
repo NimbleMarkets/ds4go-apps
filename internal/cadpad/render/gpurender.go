@@ -125,6 +125,18 @@ func (r *Renderer) RenderAngledGPUQ(s3 simplesdf.SDF3, name string, cp CameraPar
 	// Camera: same resolution path as the CPU renderer.
 	cam := cameraFor(bb, cp)
 	q = normalizeGPUQuality(q)
+
+	// Far cutoff: GPUQuality.FarT is only a floor. The eye sits ~diag*1.5*zoom
+	// from the model center, so the back face is ~2*diag away (more when zoomed
+	// out). A fixed FarT would clip the back of any model larger than ~FarT/2
+	// units. Scale with the scene exactly like the CPU sphere tracer's
+	// maxT = diag*3 (raycast.go) so GPU and CPU framing agree; the static floor
+	// keeps small models (and the parity-golden corpus) byte-identical.
+	farT := q.FarT
+	if sceneFar := cam.diag * 3; sceneFar > farT {
+		farT = sceneFar
+	}
+
 	gcam := gpuCam{
 		Eye:        [3]float32{cam.eye.X, cam.eye.Y, cam.eye.Z},
 		Fwd:        [3]float32{cam.forward.X, cam.forward.Y, cam.forward.Z},
@@ -136,7 +148,7 @@ func (r *Renderer) RenderAngledGPUQ(s3 simplesdf.SDF3, name string, cp CameraPar
 		Samples:    uint32(q.Samples),
 		MaxSteps:   uint32(q.MaxSteps),
 		Eps:        q.Eps,
-		FarT:       q.FarT,
+		FarT:       farT,
 	}
 
 	// Get-or-build the cached pipeline AND dispatch it inside ONE executor
