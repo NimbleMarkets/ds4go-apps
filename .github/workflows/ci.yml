@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
   pull_request:
     branches: [main]
 
@@ -12,10 +12,57 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Fast feedback on every branch push: lint + build only, Linux-only, no tests
+  # and no macOS minutes. The full suite below (macOS GPU tests, cross-compile,
+  # goreleaser) is gated to PRs and main so work-in-progress pushes stay cheap.
+  # Skipped on main pushes, where the full suite covers the same ground.
+  validate:
+    name: Validate (lint + build)
+    if: github.event_name == 'push' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Check formatting
+        run: |
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "The following files need gofmt:"
+            echo "$files"
+            exit 1
+          fi
+
+      # Pure-Go set = packages that do NOT transitively import gogpu, which needs
+      # cgo + Metal and only builds on darwin. Same computation as the linux job.
+      - name: Compute pure-Go package set
+        id: pkgs
+        run: |
+          list=$(for p in $(go list ./...); do
+            go list -deps "$p" 2>/dev/null | grep -q 'gogpu/wgpu' || echo "$p"
+          done | tr '\n' ' ')
+          echo "pure-Go packages: $list"
+          echo "list=$list" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: go build ${{ steps.pkgs.outputs.list }}
+
+      - name: Vet
+        run: go vet ${{ steps.pkgs.outputs.list }}
+
   # Full build + test on macOS — the only runner where cadpad's CGO/Metal path
   # compiles and where the gogpu GPU tests can run against a real device.
   macos:
     name: macOS build and test
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
@@ -70,6 +117,7 @@ jobs:
   # it is excluded here and covered by the macOS job instead.
   linux:
     name: Linux build and cross-compile
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -118,6 +166,7 @@ jobs:
   # rather than at tag time.
   goreleaser:
     name: Validate release config
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
