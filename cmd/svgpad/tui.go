@@ -1412,6 +1412,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if errors.Is(genErr, ds4.ErrContextFull) || genErr.Error() == "ds4go: session context full" {
 				m.statusText = "Ready · Context full"
 				m.errText = "Session context capacity reached. Press 'c' to continue or 'n' for a new prompt."
+			} else if errors.Is(genErr, errRunaway) {
+				// Non-nil genErr, so the auto-correct gate below is skipped:
+				// retrying a marker-looping model just loops again.
+				m.statusText = "Ready · stopped (runaway output)"
+				m.errText = "Generation stopped: the model looped on tool-call markers. Try again or use a stronger quant."
 			} else {
 				m.errText = genErr.Error()
 				m.statusText = "Error"
@@ -1655,19 +1660,35 @@ func (m model) runTurn(ctx context.Context, ch chan<- tea.Msg) {
 		m.logger.Printf("[PROMPT] tools=%q", toolsSection)
 	}
 
+	// genCtx lets the runaway guard abort a single degenerate generation
+	// (a tool-marker loop) without disturbing the outer turn context, which
+	// the user owns via `x`. The guard counts tool-call open markers per
+	// round; a healthy round emits a few and stops at the tool-block close,
+	// a runaway loops the marker to fill the whole token budget.
+	genCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	guard := newRunawayGuard()
+	runaway := false
+
 	driver := bubble.NewGenerationDriver(bubble.DriverOptions{
 		Engine:    m.engine,
 		Session:   m.session,
 		Tools:     m.tools,
 		ThinkMode: m.thinkMode,
 		MaxRounds: m.maxToolRounds + 1, // tool rounds plus the final answer turn
-		MaxTokens: 8192,
+		// Auto-correct retries run on a smaller budget so a degenerate retry
+		// fails fast and three of them cannot fill the session context.
+		MaxTokens: turnMaxTokens(m.autoCorrectCount),
 		ExecuteTools: func(ctx context.Context, calls []ds4.ToolCall) ([]ds4.ChatMessage, error) {
 			return m.tools.ExecuteToolCalls(ctx, calls)
 		},
 		OnEvent: func(e bubble.Event) {
 			switch ev := e.(type) {
 			case bubble.TokenEvent:
+				if !runaway && guard.feed(ev.Text) {
+					runaway = true
+					cancel() // stop the looping generation early
+				}
 				select {
 				case ch <- bubble.TokenMsg(ev.Text):
 				default:
@@ -1677,6 +1698,7 @@ func (m model) runTurn(ctx context.Context, ch chan<- tea.Msg) {
 			case bubble.StreamEvent:
 				ch <- bubble.StreamEventMsg{Event: ev.Event}
 			case bubble.RoundStartedEvent:
+				guard.reset()
 				ch <- roundStartedMsg{round: ev.Round}
 			case bubble.ToolCallsEvent:
 				ch <- toolCallsMsg{calls: ev.Calls}
@@ -1688,7 +1710,13 @@ func (m model) runTurn(ctx context.Context, ch chan<- tea.Msg) {
 		},
 	})
 
-	res, err := driver.RunWithPrompt(ctx, m.systemPrompt(), m.history)
+	res, err := driver.RunWithPrompt(genCtx, m.systemPrompt(), m.history)
+	if runaway {
+		// The guard canceled genCtx, so the driver returns context.Canceled;
+		// translate it to errRunaway so the turn handler reports it as a
+		// runaway (not a user abort) and skips auto-correction.
+		err = errRunaway
+	}
 	// The session can be nil when a turn starts against a released engine
 	// (e.g. an auto-correct restart racing an `x` release); the driver
 	// already reported the error, so just skip the position read.
