@@ -9,6 +9,10 @@ vars:
 env:
   MODEL: '{{.MODEL | default ""}}'
   LIB: '{{.LIB | default ""}}'
+  # Make the Go runtime re-raise fatal signals (e.g. the gogpu/Metal teardown
+  # SIGSEGV) and abort instead of exiting cleanly, so a core dump is produced
+  # when `ulimit -c` is non-zero. Use GOTRACEBACK=crash for full stacks + core.
+  GOTRACEBACK: '{{.GOTRACEBACK | default "crash"}}'
 
 tasks:
   default:
