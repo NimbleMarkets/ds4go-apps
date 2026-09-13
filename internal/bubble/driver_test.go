@@ -54,6 +54,73 @@ func decodeAsEvents(text string, onEvent func(dsml.StreamEvent)) {
 	}
 }
 
+func TestDriverExecutesToolsWithEngineSyntax(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		think      ds4.ThinkMode
+		completion string
+	}{
+		{"deepseek41", ds4.ThinkLevel(0), `<｜DSML｜ calls><｜DSML｜ invoke name="svg_append"><｜DSML｜ parameter name="chunk" string="true"><svg/></｜DSML｜ parameter></｜DSML｜ invoke></｜DSML｜ calls>`},
+		{"glm", ds4.ThinkNone, `<tool_call>svg_append<arg_key>chunk</arg_key><arg_value><svg/></arg_value></tool_call>`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lib, ctl := ds4api.NewMockLibraryWithControls()
+			ctl.SetDeepSeek41(tc.name == "deepseek41")
+			ctl.SetGLM(tc.name == "glm")
+			eng, err := lib.NewEngine(ds4.EngineOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(eng.Close)
+			sess, err := eng.NewSession(256)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(sess.Close)
+			reg := ds4.NewToolRegistry()
+			calls := 0
+			err = reg.RegisterFunc(ds4.ToolSchema{
+				Name: "svg_append", Description: "Append SVG",
+				Parameters: json.RawMessage(`{"type":"object","properties":{"chunk":{"type":"string"}}}`),
+			}, func(_ context.Context, args json.RawMessage) (string, error) {
+				var got struct {
+					Chunk string `json:"chunk"`
+				}
+				if err := json.Unmarshal(args, &got); err != nil {
+					return "", err
+				}
+				if got.Chunk != "<svg/>" {
+					t.Errorf("chunk = %q", got.Chunk)
+				}
+				calls++
+				return "ok", nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			turn := 0
+			d := NewGenerationDriver(DriverOptions{
+				Engine: eng, Session: sess, Tools: reg, ThinkMode: tc.think,
+				ExecuteTools: reg.ExecuteToolCalls,
+				CompleteTurn: func(_ *ds4.Tokens, _ ds4.GenerateOptions, _ func(dsml.StreamEvent)) (string, error) {
+					turn++
+					if turn == 1 {
+						return tc.completion, nil
+					}
+					return "done", nil
+				},
+			})
+			res, err := d.RunWithPrompt(context.Background(), "Draw SVG", []ds4.ChatMessage{{Role: "user", Content: "draw"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != 1 || res.ToolRounds != 1 || res.Assistant.Content != "done" {
+				t.Fatalf("calls = %d, result = %+v", calls, res)
+			}
+		})
+	}
+}
+
 func TestDriverStreamsEventsAndExecutesTools(t *testing.T) {
 	eng, sess, reg := mockDriverEnv(t)
 

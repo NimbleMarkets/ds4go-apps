@@ -55,7 +55,9 @@ func (l *Lane) Rewind(pos int) error {
 		return fmt.Errorf("lane %s session is closed", l.ID)
 	}
 
-	l.Session.Rewind(pos)
+	if err := l.Session.RewindSynced(pos); err != nil {
+		return fmt.Errorf("rewind lane %s: %w", l.ID, err)
+	}
 
 	// Keep only steps where Step.Pos < pos
 	var newSteps []Step

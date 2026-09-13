@@ -70,7 +70,7 @@ func (d *GenerationDriver) BuildPrompt(system string, history []ds4.ChatMessage)
 
 // ParseAssistant wraps parsing and emits an AssistantMessageEvent.
 func (d *GenerationDriver) ParseAssistant(text string) (ds4.ChatMessage, error) {
-	msg, err := d.opts.Tools.ParseAssistant(text, d.opts.ThinkMode != ds4.ThinkNone)
+	msg, err := d.opts.Tools.ParseAssistantSyntax(ds4.ToolSyntax(d.opts.Engine), text, d.opts.Engine.ThinkModeEnabled(d.opts.ThinkMode))
 	if err != nil {
 		d.opts.OnEvent(ErrorEvent{Err: err})
 		return ds4.ChatMessage{}, err
@@ -165,7 +165,7 @@ func (d *GenerationDriver) RunWithPrompt(ctx context.Context, system string, his
 			Session:   d.opts.Session,
 			Tools:     d.opts.Tools,
 			ThinkMode: d.opts.ThinkMode,
-			Thinking:  d.opts.ThinkMode != ds4.ThinkNone,
+			Thinking:  d.opts.Engine.ThinkModeEnabled(d.opts.ThinkMode),
 		}
 		completeTurn = loop.CompleteTurn
 	}
@@ -225,7 +225,7 @@ func (d *GenerationDriver) RunWithPrompt(ctx context.Context, system string, his
 				d.opts.OnEvent(MalformedRetryEvent{Reason: assistant.MalformedReason})
 				working = append(working, ds4.ChatMessage{
 					Role:    "tool",
-					Content: dsml.ToolSyntaxErrorMessage(assistant.MalformedReason),
+					Content: dsml.ToolSyntaxErrorMessageSyntax(ds4.ToolSyntax(d.opts.Engine), assistant.MalformedReason),
 				})
 				d.opts.OnEvent(RoundCompletedEvent{Round: round})
 				continue

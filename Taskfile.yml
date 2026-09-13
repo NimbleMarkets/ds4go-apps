@@ -2,11 +2,15 @@ version: "3"
 
 vars:
   CTX: '{{.CTX | default "32768"}}'
-  BACKEND: '{{.BACKEND | default "metal"}}'
+  BACKEND: '{{.BACKEND | default "auto"}}'
   DEBUG: '{{.DEBUG | default ""}}'
   POWER: '{{.POWER | default ""}}'
 
 env:
+  # goffi's Linux/ARM64 dynamic-import stubs cannot use the CGO linker path.
+  # Share purego's FFI runtime with goffi instead of linking two copies.
+  CGO_ENABLED: '{{if eq OS "linux"}}0{{else}}{{.CGO_ENABLED | default "1"}}{{end}}'
+  GOFLAGS: '{{.GOFLAGS | default ""}}{{if eq OS "linux"}} -tags=nofakecgo{{end}}'
   MODEL: '{{.MODEL | default ""}}'
   LIB: '{{.LIB | default ""}}'
   # Make the Go runtime re-raise fatal signals (e.g. the gogpu/Metal teardown

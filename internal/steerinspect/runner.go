@@ -116,7 +116,12 @@ func (r *Runner) BranchLane(parentID string, pos int) (string, error) {
 	}
 
 	// Rewind parent to pos, save the snapshot at pos, then restore parent.
-	parentLane.Session.Rewind(pos)
+	if err := parentLane.Session.RewindSynced(pos); err != nil {
+		if restoreErr := parentLane.Session.LoadSnapshot(parentSnap); restoreErr != nil {
+			return "", fmt.Errorf("rewind parent: %w; restore parent: %v", err, restoreErr)
+		}
+		return "", fmt.Errorf("rewind parent: %w", err)
+	}
 	branchSnap, err := parentLane.Session.SaveSnapshot()
 	if err != nil {
 		_ = parentLane.Session.LoadSnapshot(parentSnap)

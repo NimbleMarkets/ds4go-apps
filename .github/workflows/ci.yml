@@ -112,9 +112,8 @@ jobs:
           # shellcheck disable=SC2086 # intentional word-splitting of the package list
           go test $pkgs
 
-  # Pure-Go coverage + cross-compile sanity. Anything that transitively imports
-  # gogpu (cadpad's GPU stack) needs cgo + Metal and can't build off-darwin, so
-  # it is excluded here and covered by the macOS job instead.
+  # Race coverage for non-GPU packages plus no-CGO Linux CAD build coverage.
+  # Actual GPU rendering is tested on macOS and manually on a Linux/CUDA host.
   linux:
     name: Linux build and cross-compile
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
@@ -148,6 +147,19 @@ jobs:
       # (ubuntu ships gcc); these pure-Go packages don't actually use cgo.
       - name: Test (race)
         run: go test -race ${{ steps.pkgs.outputs.list }}
+
+      # Linux CAD shares purego's FFI runtime with goffi. Building test binaries
+      # also catches missing runtime symbols in isolated GPU packages.
+      - name: Compile all Linux apps and tests
+        env:
+          CGO_ENABLED: "0"
+          GOFLAGS: "-tags=nofakecgo"
+        run: |
+          for arch in amd64 arm64; do
+            export GOARCH="$arch"
+            go build ./cmd/... ./internal/... ./ntgpu
+            go test -exec=true ./cmd/... ./internal/... ./ntgpu
+          done
 
       # Release builds the pure-Go apps with CGO disabled; verify they
       # cross-compile to every shipped target. Windows is intentionally absent:

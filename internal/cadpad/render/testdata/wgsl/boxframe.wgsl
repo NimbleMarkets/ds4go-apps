@@ -4,9 +4,9 @@ var dims = vec3<f32>(x,y,z);
 p = abs(p)-dims;
 var q = abs(p+thick)-thick;
 return min(min(
-      length(max(vec3<f32>(p.x,q.y,q.z),0.0))+min(max(p.x,max(q.y,q.z)),0.0),
-      length(max(vec3<f32>(q.x,p.y,q.z),0.0))+min(max(q.x,max(p.y,q.z)),0.0)),
-      length(max(vec3<f32>(q.x,q.y,p.z),0.0))+min(max(q.x,max(q.y,p.z)),0.0));
+      length(max(vec3<f32>(p.x,q.y,q.z),vec3<f32>(0.0)))+min(max(p.x,max(q.y,q.z)),0.0),
+      length(max(vec3<f32>(q.x,p.y,q.z),vec3<f32>(0.0)))+min(max(q.x,max(p.y,q.z)),0.0)),
+      length(max(vec3<f32>(q.x,q.y,p.z),vec3<f32>(0.0)))+min(max(q.x,max(q.y,p.z)),0.0));
 
 }
 fn boxframe4p3p2p0p150000006(p: vec3<f32>) -> f32 {

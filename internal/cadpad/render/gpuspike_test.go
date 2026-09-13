@@ -191,22 +191,14 @@ func compileKernel(wgsl string) error {
 // compileKernelOnExec is the raw body of compileKernel; it uses gogpu directly
 // and MUST run on the executor goroutine (inside a gpuDo closure).
 func compileKernelOnExec(wgsl string) error {
-	dev, err := device()
+	// Use the raymarch kernel's real bindings. A nil layout happened to work
+	// on Metal, but Vulkan requires the uniform/storage descriptor layout and
+	// the NVIDIA driver may crash when the shader accesses missing bindings.
+	p, err := buildGPUPipeline(wgsl)
 	if err != nil {
 		return err
 	}
-	shader, err := dev.CreateShaderModule(&wgpu.ShaderModuleDescriptor{Label: "compilecheck", WGSL: wgsl})
-	if err != nil {
-		return fmt.Errorf("create shader: %w", err)
-	}
-	defer shader.Release()
-	pipe, err := dev.CreateComputePipeline(&wgpu.ComputePipelineDescriptor{
-		Module: shader, EntryPoint: "main",
-	})
-	if err != nil {
-		return fmt.Errorf("create compute pipeline: %w", err)
-	}
-	pipe.Release()
+	p.Release()
 	return nil
 }
 

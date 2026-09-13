@@ -190,7 +190,7 @@ func transpileFunction(f glslFunc, declared map[string]bool) (string, error) {
 		scope[name] = true
 	}
 
-	body, err := rewriteBody(f.body, declared, scope)
+	body, err := rewriteBody(splatVectorBounds(f.body, f.params), declared, scope)
 	if err != nil {
 		return "", fmt.Errorf("transpile %s: %w", f.name, err)
 	}

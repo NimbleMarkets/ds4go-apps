@@ -21,10 +21,14 @@ This repository contains a family of Bubble Tea TUI tools that run DeepSeek-fami
 
 These apps require `ds4go` to be installed, with a `ds4` dynamic library and associated model downloaded.  `ds4` requires 128G or more of GPU memory.
 
-On Ubuntu, **cadpad** requires the OpenGL development library to be installed:
-```bash
-sudo apt install --no-install-recommends libgl1-mesa-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev libxxf86vm-dev
-```
+The apps use **ds4go v0.7.0**, which requires libds4 **v0.5.20260910** or
+newer. DeepSeek V4.1 and think levels require **v0.6.20260912**; DGX Spark
+(GB10) requires the **v0.6.20260913** `linux-arm64-gb10-cuda` library asset.
+
+On Linux, cadpad uses Vulkan for its GPU viewport. The Taskfile builds with
+`CGO_ENABLED=0` and `-tags=nofakecgo`, sharing purego's FFI runtime with goffi;
+OpenGL development headers are not needed for this build. A Vulkan-capable
+graphics driver is required for GPU rendering.
 
 ---
 
@@ -46,6 +50,15 @@ task build:steering
 ```
 
 Binaries are written to `./bin/`.
+
+For a direct Linux CAD build without Task:
+
+```bash
+CGO_ENABLED=0 go build -tags=nofakecgo -o bin/ds4go-cadpad ./cmd/cadpad
+```
+
+Task run commands select the inference backend automatically; use
+`BACKEND=cuda`, `BACKEND=metal`, or `BACKEND=cpu` to override it.
 
 ---
 

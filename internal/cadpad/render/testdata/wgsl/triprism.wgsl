@@ -16,7 +16,7 @@ fn extrusion_circle2p(p: vec3<f32>) -> f32 {
 var h=2.0;
 var d=circle2p(p.xy);
 var w = vec2<f32>( d, abs(p.z) - h );
-return min(max(w.x,w.y),0.0) + length(max(w,0.0));
+return min(max(w.x,w.y),0.0) + length(max(w,vec2<f32>(0.0)));
 
 }
 fn sdf(p: vec3<f32>) -> f32 { return extrusion_circle2p(p); }

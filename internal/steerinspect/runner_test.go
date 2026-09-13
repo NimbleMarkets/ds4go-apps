@@ -153,6 +153,10 @@ func TestRunnerMockWorkflow(t *testing.T) {
 
 	// 3. Branching
 	branchPos := lane.InitialPos + 1
+	// Advance past the branch point so branching must restore a checkpoint.
+	if _, err := runner.GenerateOne(rootID, nil); err != nil {
+		t.Fatalf("GenerateOne before branch: %v", err)
+	}
 	branchID, err := runner.BranchLane(rootID, branchPos)
 	if err != nil {
 		t.Fatalf("BranchLane: %v", err)
@@ -176,6 +180,9 @@ func TestRunnerMockWorkflow(t *testing.T) {
 	if len(branchedLane.Steps) != 2 {
 		t.Errorf("expected branched lane to have 2 steps, got %d", len(branchedLane.Steps))
 	}
+	if _, err := runner.GenerateOne(rootID, nil); err != nil {
+		t.Fatalf("GenerateOne on restored parent: %v", err)
+	}
 
 	// 4. Rewinding
 	err = runner.ApplyManualSteering(rootID, nil)
@@ -190,5 +197,8 @@ func TestRunnerMockWorkflow(t *testing.T) {
 
 	if len(lane.Steps) != 0 {
 		t.Errorf("expected lane steps to be truncated, got %d", len(lane.Steps))
+	}
+	if _, err := runner.GenerateOne(rootID, nil); err != nil {
+		t.Fatalf("GenerateOne after rewind: %v", err)
 	}
 }
