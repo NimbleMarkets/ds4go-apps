@@ -1663,15 +1663,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Headless one-shot: a failed turn or a turn with nothing saved ends
 		// the run here; a saved file waits for the metadata pass to finish
-		// (the metadataDoneMsg handler quits).
+		// (the metadataDoneMsg handler quits). The quit must ride WITH the
+		// pending cmds, not replace them: a turn can both save and fail
+		// (review interrupted by the context budget), and the save's
+		// metadata dispatch has already registered with metadataWG — drop
+		// it and main.go deadlocks on Wait(). main's shutdown cancels
+		// metadataCtx, so the carried dispatch exits promptly.
 		if m.oneShot.Enabled() {
 			switch {
 			case genErr != nil:
 				m.oneShotErr = genErr
-				return m, tea.Quit
+				return m, tea.Batch(append(cmds, tea.Quit)...)
 			case m.oneShotPath == "":
 				m.oneShotErr = errors.New("turn completed without a saved SVG (empty response or save failure)")
-				return m, tea.Quit
+				return m, tea.Batch(append(cmds, tea.Quit)...)
 			}
 		}
 

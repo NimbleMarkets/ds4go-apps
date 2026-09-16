@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	ds4 "github.com/NimbleMarkets/ds4go"
@@ -130,6 +131,45 @@ func TestOneShotQuitsAfterMetadataDone(t *testing.T) {
 	}
 	if !cmdYieldsQuit(t, cmd) {
 		t.Error("no tea.Quit after metadata; a headless run would hang")
+	}
+}
+
+// A turn can both SAVE and error (visual review interrupted by the context
+// budget). The save dispatches metadata enrichment, which registers with the
+// shutdown WaitGroup at construction — quitting must not drop that command,
+// or main.go deadlocks on metadataWG.Wait() (PH-vision run, 2026-09-15).
+func TestOneShotErrorAfterSaveReleasesMetadataWaitGroup(t *testing.T) {
+	m := testModel()
+	dir := t.TempDir()
+	m.workDir = dir
+	m.oneShot = oneShotOptions{Prompt: "draw", Outfile: "exp.svg"}
+	m.generating = true
+	m.metadataWG = &sync.WaitGroup{}
+	m.history = []ds4.ChatMessage{{Role: "user", Content: "draw"}}
+	if err := os.WriteFile(filepath.Join(dir, "draft.svg"), []byte(oneShotTestSVG), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	next, cmd := m.Update(turnDoneMsg{
+		result: bubble.RunResult{Assistant: ds4.ChatMessage{Role: "assistant"}, History: m.history},
+		err:    bubble.ErrContextBudget,
+	})
+	m = next.(model)
+
+	if m.oneShotErr == nil {
+		t.Error("oneShotErr = nil, want the generation error recorded")
+	}
+	if !cmdYieldsQuit(t, cmd) {
+		t.Error("no tea.Quit on post-save error")
+	}
+	// cmdYieldsQuit executed every returned command, including the metadata
+	// dispatch; its WaitGroup registration must now be balanced.
+	done := make(chan struct{})
+	go func() { m.metadataWG.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("metadataWG.Wait() blocked: the enrichment command was dropped and main would deadlock")
 	}
 }
 
