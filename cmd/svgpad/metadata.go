@@ -15,7 +15,7 @@ import (
 )
 
 // metadataSessionCtx is the per-session context budget for the metadata
-// pass. The prompt template + a typical SVG + the model's reply fit well
+// pass. The prompt template + a typical SVG/preview + the model's reply fit well
 // inside this without competing with the main session's context.
 const metadataSessionCtx = 8192
 
@@ -36,15 +36,17 @@ var metadataSystemPrompt string
 // stamped into the saved metadata block. Errors are non-fatal because
 // the SVG itself is already saved and valid.
 type metadataDoneMsg struct {
-	filename    string
-	title       string
-	desc        string
-	keywords    string
-	model       string
-	generatedAt time.Time
-	genTime     time.Duration
-	toolCalls   []toolCallEntry
-	err         error
+	filename       string
+	title          string
+	desc           string
+	keywords       string
+	model          string
+	generatedAt    time.Time
+	genTime        time.Duration
+	toolCalls      []toolCallEntry
+	vision         bool
+	previewWarning string
+	err            error
 }
 
 // parseLLMMetadata tolerantly extracts <title>, <desc>, and <keywords>
@@ -369,7 +371,35 @@ func spliceMetadataIntoSVG(svg, block string) string {
 	return svg[:closeTag+1] + "\n" + block + "\n" + svg[closeTag+1:]
 }
 
+// The markup remains useful context, but a vision model also sees the actual
+// saved drawing. A rendering failure leaves a usable text-only message.
+func metadataUserMessage(prompt string, svgData []byte, vision bool) (ds4.ChatMessage, error) {
+	msg := ds4.ChatMessage{Role: "user", Content: fmt.Sprintf("Original prompt:\n%s\n\nSVG markup:\n%s", prompt, svgData)}
+	if !vision {
+		return msg, nil
+	}
+	if _, err := inspectSVGDocument(string(svgData), false); err != nil {
+		return msg, fmt.Errorf("metadata preview: %w", err)
+	}
+	img, err := renderVisualPreview(svgData)
+	if err != nil {
+		return msg, err
+	}
+	msg.Parts = []ds4.ContentPart{
+		{Text: msg.Content + "\n\nThe attached image is this SVG rendered on white. Describe the visible result; the original prompt is context, not proof that a requested element is present."},
+		{Image: &img},
+	}
+	return msg, nil
+}
+
 func enrichMetadataCmd(ctx context.Context, wg *sync.WaitGroup, eng *ds4.Engine, modelName, filename, prompt string, svgData []byte, genTime time.Duration, toolCalls []toolCallEntry, think string) tea.Cmd {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// The UI can begin another request while enrichment runs. Snapshot inputs
+	// before it reuses its draft/tool slices.
+	svgData = append([]byte(nil), svgData...)
+	toolCalls = append([]toolCallEntry(nil), toolCalls...)
 	if wg != nil {
 		wg.Add(1)
 	}
@@ -377,47 +407,44 @@ func enrichMetadataCmd(ctx context.Context, wg *sync.WaitGroup, eng *ds4.Engine,
 		if wg != nil {
 			defer wg.Done()
 		}
-		if ctx != nil && ctx.Err() != nil {
-			return metadataDoneMsg{filename: filename, err: ctx.Err()}
+		base := metadataDoneMsg{filename: filename, model: modelName}
+		fail := func(err error) metadataDoneMsg { base.err = err; return base }
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		if eng == nil {
+			return fail(fmt.Errorf("metadata requires a loaded engine"))
 		}
 		sess, err := eng.NewSession(metadataSessionCtx)
 		if err != nil {
-			return metadataDoneMsg{filename: filename, err: fmt.Errorf("metadata session: %w", err)}
+			return fail(fmt.Errorf("metadata session: %w", err))
 		}
 		defer sess.Close()
 
-		tokens, err := eng.NewTokens(nil)
+		userMsg, previewErr := metadataUserMessage(prompt, svgData, eng.HasVision())
+		if previewErr != nil {
+			base.previewWarning = previewErr.Error()
+		}
+		var images *ds4.ImageEncoder
+		base.vision = len(userMsg.Parts) > 0
+		if base.vision {
+			images = ds4.NewImageEncoder(eng)
+			defer images.SetLimits(0, 0) // release embeddings before WG.Done permits engine shutdown
+		}
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		input, err := ds4.BuildChatPromptMultimodal(eng, images, metadataSystemPrompt, nil, []ds4.ChatMessage{userMsg}, ds4.ThinkNone)
 		if err != nil {
-			return metadataDoneMsg{filename: filename, err: err}
+			return fail(err)
 		}
-		defer tokens.Free()
-
-		userMsg := fmt.Sprintf("Original prompt:\n%s\n\nSVG markup:\n%s",
-			prompt, string(svgData))
-
-		for _, step := range []func() error{
-			func() error { return eng.ChatBegin(tokens) },
-			func() error { return eng.ChatAppendMessage(tokens, "system", metadataSystemPrompt) },
-			func() error { return eng.ChatAppendMessage(tokens, "user", userMsg) },
-			func() error { return eng.ChatAppendAssistantPrefix(tokens, ds4.ThinkNone) },
-		} {
-			if ctx != nil && ctx.Err() != nil {
-				return metadataDoneMsg{filename: filename, err: ctx.Err()}
-			}
-			if err := step(); err != nil {
-				return metadataDoneMsg{filename: filename, err: err}
-			}
-		}
+		defer input.Free()
 
 		var buf []byte
-		genCtx := context.Background()
-		if ctx != nil {
-			genCtx = ctx
-		}
 		opts := ds4.GenerateOptions{
 			MaxTokens: metadataMaxTokens,
 			StopOnEOS: true,
-			Context:   genCtx,
+			Context:   ctx,
 		}
 		opts.OnToken = func(token int) {
 			if text, err := eng.TokenText(token); err == nil {
@@ -425,27 +452,22 @@ func enrichMetadataCmd(ctx context.Context, wg *sync.WaitGroup, eng *ds4.Engine,
 			}
 		}
 		gen := ds4.Generator{Engine: eng, Session: sess}
-		if _, err := gen.GenerateTokens(tokens, opts); err != nil {
-			return metadataDoneMsg{filename: filename, err: err}
+		if _, err := gen.GeneratePrompt(input, opts); err != nil {
+			return fail(err)
+		}
+		if err := ctx.Err(); err != nil {
+			return fail(err)
 		}
 
 		title, desc, keywords := parseLLMMetadata(string(buf))
 		if title == "" && desc == "" {
-			return metadataDoneMsg{filename: filename, model: modelName, err: fmt.Errorf("no <title>/<desc> in model output")}
+			return fail(fmt.Errorf("no <title>/<desc> in model output"))
 		}
 		generatedAt := time.Now()
 		block := buildMetadataBlock(title, desc, keywords, prompt, modelName, generatedAt, genTime, toolCalls, think)
 
-		base := metadataDoneMsg{
-			filename:    filename,
-			title:       title,
-			desc:        desc,
-			keywords:    keywords,
-			model:       modelName,
-			generatedAt: generatedAt,
-			genTime:     genTime,
-			toolCalls:   toolCalls,
-		}
+		base.title, base.desc, base.keywords = title, desc, keywords
+		base.generatedAt, base.genTime, base.toolCalls = generatedAt, genTime, toolCalls
 		data, err := os.ReadFile(filename)
 		if err != nil {
 			base.err = err

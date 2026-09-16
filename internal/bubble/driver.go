@@ -18,6 +18,7 @@ type DriverOptions struct {
 	Engine    *ds4.Engine
 	Session   *ds4.Session
 	Tools     *ds4.ToolRegistry
+	Images    *ds4.ImageEncoder // required when history or tool results contain images
 	ThinkMode ds4.ThinkMode
 	MaxRounds int
 
@@ -25,11 +26,23 @@ type DriverOptions struct {
 	// think-recovery resumes inside ds4go). Values <= 0 default to 1024.
 	MaxTokens int
 
+	// Temperature, TopP, and Seed configure sampling for every turn.
+	// Temperature <= 0 keeps ds4go's argmax (greedy) decoding; when > 0,
+	// ds4go's tool loop still forces greedy inside tool-call markup via
+	// its own SampleControl, so only free content is sampled.
+	Temperature float32
+	TopP        float32
+	Seed        uint64
+
 	// CompleteTurn overrides the per-turn generation path. When nil the
-	// driver uses ds4.ToolLoop.CompleteTurn — stream-driven generation with
+	// driver uses ds4.ToolLoop.CompletePrompt — stream-driven generation with
 	// early stop at tool-block close and live think recovery. Primarily a
 	// test seam, mirroring ds4.ToolLoop.CompleteFunc.
 	CompleteTurn func(prompt *ds4.Tokens, opts ds4.GenerateOptions, onEvent func(dsml.StreamEvent)) (string, error)
+
+	// CompletePrompt overrides generation with access to image spans. It takes
+	// precedence over CompleteTurn; the driver retains ownership of the prompt.
+	CompletePrompt func(prompt *ds4.Prompt, opts ds4.GenerateOptions, onEvent func(dsml.StreamEvent)) (string, error)
 
 	// OnEvent is called for every interesting thing that happens during
 	// generation. This is the primary hook for rich logging into UI boxes,
@@ -42,6 +55,21 @@ type DriverOptions struct {
 	// This is critical for cadpad: the app can run lua_* tools, update
 	// its World, populate luaRuntimeLog, etc., then return the tool results.
 	ExecuteTools func(ctx context.Context, calls []ds4.ToolCall) ([]ds4.ChatMessage, error)
+
+	// PrepareHistory optionally trims observations or adds host guidance before
+	// each model round. round is zero-based; maxRounds includes the final turn.
+	// It must not mutate its input; its result becomes the retained history.
+	PrepareHistory func(history []ds4.ChatMessage, round, maxRounds int) []ds4.ChatMessage
+
+	// ContextFeedback optionally adds guidance based on the rendered prompt.
+	// Its message is appended and the prompt is rebuilt before the capacity
+	// check and ContextUsageEvent, so the notice's own tokens are counted too.
+	ContextFeedback func(ContextUsageEvent) string
+
+	// MinResponseTokens opts into preflight protection: stop before generation
+	// if fewer tokens remain, plus the runtime's required spare position.
+	// Zero disables the check for hosts that manage their own context policy.
+	MinResponseTokens int
 }
 
 // GenerationDriver provides observable, controllable tool-calling generation
@@ -158,8 +186,16 @@ func (d *GenerationDriver) RunWithPrompt(ctx context.Context, system string, his
 		maxTokens = 1024
 	}
 
-	completeTurn := d.opts.CompleteTurn
-	if completeTurn == nil {
+	completePrompt := d.opts.CompletePrompt
+	if completePrompt == nil && d.opts.CompleteTurn != nil {
+		completePrompt = func(p *ds4.Prompt, opts ds4.GenerateOptions, onEvent func(dsml.StreamEvent)) (string, error) {
+			if len(p.Images) > 0 {
+				return "", ds4.ErrCompleteFuncCannotCarryImages
+			}
+			return d.opts.CompleteTurn(p.Tokens, opts, onEvent)
+		}
+	}
+	if completePrompt == nil {
 		loop := ds4.ToolLoop{
 			Engine:    d.opts.Engine,
 			Session:   d.opts.Session,
@@ -167,53 +203,83 @@ func (d *GenerationDriver) RunWithPrompt(ctx context.Context, system string, his
 			ThinkMode: d.opts.ThinkMode,
 			Thinking:  d.opts.Engine.ThinkModeEnabled(d.opts.ThinkMode),
 		}
-		completeTurn = loop.CompleteTurn
+		completePrompt = loop.CompletePrompt
 	}
 
 	working := append([]ds4.ChatMessage(nil), history...)
 	toolRounds := 0
 	syntaxRetried := false
+	var lastAssistant ds4.ChatMessage
+	partial := func() RunResult {
+		return RunResult{History: working, ToolRounds: toolRounds, Assistant: lastAssistant}
+	}
 
 	for round := 0; ; round++ {
 		if ctx != nil {
 			if err := ctx.Err(); err != nil {
 				d.opts.OnEvent(ErrorEvent{Err: err})
-				return RunResult{}, err
+				return partial(), err
 			}
 		}
 
 		d.opts.OnEvent(RoundStartedEvent{Round: round})
+		if d.opts.PrepareHistory != nil {
+			working = d.opts.PrepareHistory(working, round, maxRounds)
+		}
 
-		prompt, err := d.BuildPrompt(system, working)
+		prompt, err := d.opts.Tools.BuildPromptMultimodal(d.opts.Engine, d.opts.Images, system, working, d.opts.ThinkMode)
 		if err != nil {
 			d.opts.OnEvent(ErrorEvent{Err: err})
-			return RunResult{}, err
+			return partial(), err
+		}
+		usage := ContextUsageEvent{PromptTokens: prompt.Tokens.Len(), Capacity: d.opts.Session.Ctx()}
+		if d.opts.ContextFeedback != nil {
+			if note := d.opts.ContextFeedback(usage); note != "" {
+				prompt.Free()
+				working = append(working, ds4.ChatMessage{Role: "user", ToolCallID: ContextFeedbackID, Content: note})
+				prompt, err = d.opts.Tools.BuildPromptMultimodal(d.opts.Engine, d.opts.Images, system, working, d.opts.ThinkMode)
+				if err != nil {
+					d.opts.OnEvent(ErrorEvent{Err: err})
+					return partial(), err
+				}
+				usage.PromptTokens = prompt.Tokens.Len()
+			}
+		}
+		d.opts.OnEvent(usage)
+		if d.opts.MinResponseTokens > 0 && usage.Remaining() <= d.opts.MinResponseTokens {
+			prompt.Free()
+			d.opts.OnEvent(ErrorEvent{Err: ErrContextBudget})
+			return partial(), ErrContextBudget
 		}
 
 		genOpts := ds4.GenerateOptions{
-			MaxTokens: maxTokens,
-			StopOnEOS: true,
-			Context:   ctx,
+			MaxTokens:   maxTokens,
+			Temperature: d.opts.Temperature,
+			TopP:        d.opts.TopP,
+			Seed:        d.opts.Seed,
+			StopOnEOS:   true,
+			Context:     ctx,
 			OnToken: func(token int) {
 				if part, e := d.opts.Engine.TokenText(token); e == nil {
 					d.opts.OnEvent(TokenEvent{Text: part})
 				}
 			},
 		}
-		text, err := completeTurn(prompt, genOpts, func(ev dsml.StreamEvent) {
+		text, err := completePrompt(prompt, genOpts, func(ev dsml.StreamEvent) {
 			d.opts.OnEvent(StreamEvent{Event: ev})
 		})
 		prompt.Free()
 		if err != nil {
 			d.opts.OnEvent(ErrorEvent{Err: err})
-			return RunResult{}, err
+			return partial(), err
 		}
 
 		assistant, err := d.ParseAssistant(text)
 		if err != nil {
-			return RunResult{}, err
+			return partial(), err
 		}
 		working = append(working, assistant)
+		lastAssistant = assistant
 
 		if len(assistant.ToolCalls) == 0 {
 			// Same contract as ds4.ToolLoop.Run: a turn that degraded to
@@ -247,7 +313,7 @@ func (d *GenerationDriver) RunWithPrompt(ctx context.Context, system string, his
 		// Delegate execution to host (cadpad will run registry.Execute + side effects + Emit logs)
 		results, err := d.ExecuteToolCalls(ctx, assistant.ToolCalls)
 		if err != nil {
-			return RunResult{}, err
+			return partial(), err
 		}
 		working = append(working, results...)
 		toolRounds++

@@ -7,6 +7,10 @@ docs
 # Build output
 /bin/
 
+# Local workspaces for co-developing ds4go
+/go.work
+/go.work.sum
+
 # Stray binaries built into the repo root
 /ds4go-toy-cadpad
 /ds4go-toy-glyphpad

@@ -32,18 +32,56 @@ tasks:
 
   build:
     desc: Build all TUI binaries to ./bin/
-    deps: [tidy]
     cmds:
       - task: build:glyphpad
       - task: build:steering
       - task: build:svgpad
       - task: build:cadpad
 
-  build:glyphpad:
+  # Shared directives; each public build task gets its own checksum.
+  build:glyphpad: &app-build
     desc: Build glyphpad binary
-    deps: [tidy]
+    requires:
+      vars:
+        - name: APP
+          enum: [glyphpad, steering, svgpad, cadpad]
+    method: checksum
+    sources:
+      - Taskfile.yml
+      - go.mod
+      - go.sum
+      - go.work
+      - go.work.sum
+      - '{{.DS4GO_SOURCE_DIR}}/**/*.go'
+      - '{{.DS4GO_SOURCE_DIR}}/go.mod'
+      - '{{.DS4GO_SOURCE_DIR}}/go.sum'
+      - 'cmd/{{.APP}}/**/*'
+      - 'internal/**/*'
+      - 'ntgpu/**/*'
+    generates:
+      - 'bin/ds4go-{{.APP}}'
+      - '.task/build/{{.APP}}.config'
+    vars:
+      APP: glyphpad
+      DS4GO_SOURCE_DIR: &ds4go-source-dir
+        sh: go list -m -f '{{"{{.Dir}}"}}' github.com/NimbleMarkets/ds4go
+      BUILD_CONFIG: &build-config
+        sh: |
+          set -eu
+          build_env=$(go env -json GOOS GOARCH GOAMD64 GOARM GOARM64 GO386 GOPPC64 GORISCV64 GOMIPS GOMIPS64 GOWASM CGO_ENABLED GOFLAGS GOEXPERIMENT GOVERSION GOTOOLCHAIN GOROOT GOWORK GOENV CC CXX CGO_CFLAGS CGO_CPPFLAGS CGO_CXXFLAGS CGO_FFLAGS CGO_LDFLAGS PKG_CONFIG)
+          build_revision=$(git rev-parse HEAD 2>/dev/null || true)
+          build_status=clean
+          if [ -n "$(git status --porcelain 2>/dev/null || true)" ]; then build_status=dirty; fi
+          printf '%s\n' "$build_env" "$build_revision" "$build_status" | cksum
+    # Sources alone cannot detect a changed target, toolchain, flags, or VCS
+    # stamp. Compare with the configuration of the binary actually in bin/.
+    status:
+      - 'test -x bin/ds4go-{{.APP}}'
+      - 'test "{{.BUILD_CONFIG}}" = "$(cat .task/build/{{.APP}}.config)"'
     cmds:
-      - go build -o ./bin/ds4go-glyphpad ./cmd/glyphpad
+      - mkdir -p bin .task/build
+      - go build -mod=readonly -o bin/ds4go-{{.APP}} ./cmd/{{.APP}}
+      - "printf '%s\\n' '{{.BUILD_CONFIG}}' > .task/build/{{.APP}}.config"
 
   run:glyphpad:
     desc: Run the glyphpad TUI
@@ -58,16 +96,12 @@ tasks:
         ./bin/ds4go-glyphpad $args
 
   build:steering:
+    <<: *app-build
     desc: Build the steering binary
-    deps: [tidy]
-    sources:
-      - "**/*.go"
-      - go.mod
-      - go.sum
-    generates:
-      - bin/ds4go-steering
-    cmds:
-      - go build -o bin/ds4go-steering ./cmd/steering
+    vars:
+      BUILD_CONFIG: *build-config
+      DS4GO_SOURCE_DIR: *ds4go-source-dir
+      APP: steering
 
   run:steering:
     desc: Run the steering TUI
@@ -82,10 +116,12 @@ tasks:
         ./bin/ds4go-steering $args
 
   build:svgpad:
+    <<: *app-build
     desc: Build svgpad binary
-    deps: [tidy]
-    cmds:
-      - go build -o ./bin/ds4go-svgpad ./cmd/svgpad
+    vars:
+      BUILD_CONFIG: *build-config
+      DS4GO_SOURCE_DIR: *ds4go-source-dir
+      APP: svgpad
 
   run:svgpad:
     desc: Run the svgpad TUI
@@ -97,13 +133,15 @@ tasks:
         if [ -n "{{.LIB}}" ]; then args="$args --lib {{.LIB}}"; fi
         if [ -n "{{.DEBUG}}" ]; then args="$args --debug"; fi
         if [ -n "{{.POWER}}" ]; then args="$args --power {{.POWER}}"; fi
-        ./bin/ds4go-svgpad $args
+        ./bin/ds4go-svgpad $args {{.CLI_ARGS}}
 
   build:cadpad:
+    <<: *app-build
     desc: Build cadpad binary
-    deps: [tidy]
-    cmds:
-      - go build -o ./bin/ds4go-cadpad ./cmd/cadpad
+    vars:
+      BUILD_CONFIG: *build-config
+      DS4GO_SOURCE_DIR: *ds4go-source-dir
+      APP: cadpad
 
   run:cadpad:
     desc: Run the cadpad TUI (add NO_ENGINE=1 for pure geometry mode)
@@ -161,4 +199,4 @@ tasks:
   clean:
     desc: Remove built binaries
     cmds:
-      - rm -f ./bin/ds4go-glyphpad ./bin/ds4go-steering ./bin/ds4go-svgpad
+      - rm -f ./bin/ds4go-glyphpad ./bin/ds4go-steering ./bin/ds4go-svgpad ./bin/ds4go-cadpad

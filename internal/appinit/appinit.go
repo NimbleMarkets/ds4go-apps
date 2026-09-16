@@ -29,18 +29,19 @@ type Defaults struct {
 
 // Flags holds the shared pad flag values populated by fs.Parse.
 type Flags struct {
-	Model   string
-	Lib     string
-	Ctx     int
-	Backend string
-	MTP     string
-	Debug   bool
-	Power   int
+	Model        string
+	Lib          string
+	Ctx          int
+	Backend      string
+	MTP          string
+	Debug        bool
+	Power        int
+	SSDStreaming bool
 
 	app string // app name, used for log naming and help text
 }
 
-// RegisterFlags registers the seven shared pad flags on fs with per-app
+// RegisterFlags registers the shared pad flags on fs with per-app
 // defaults. Apps register their own extra flags before calling fs.Parse.
 func RegisterFlags(fs *pflag.FlagSet, app string, d Defaults) *Flags {
 	if d.Ctx <= 0 {
@@ -50,13 +51,14 @@ func RegisterFlags(fs *pflag.FlagSet, app string, d Defaults) *Flags {
 		d.Power = 100
 	}
 	f := &Flags{app: app}
-	fs.StringVarP(&f.Model, "model", "m", "", "path to GGUF model file (default: $DS4_DIR/models/ds4flash.gguf)")
+	fs.StringVarP(&f.Model, "model", "m", "", "installed model alias or GGUF file path (default: $DS4_DIR/models/ds4flash.gguf)")
 	fs.StringVar(&f.Lib, "lib", "", "path to libds4 shared library (optional, uses default search)")
 	fs.IntVar(&f.Ctx, "ctx", d.Ctx, "context window size in tokens; lower to 16384 or 8192 if VRAM is tight")
 	fs.StringVar(&f.Backend, "backend", "", "inference backend: metal, cuda, cpu (default: auto)")
 	fs.StringVar(&f.MTP, "mtp", "none", "path to MTP companion GGUF model (default: none, empty or non-existent falls back to auto)")
 	fs.BoolVarP(&f.Debug, "debug", "d", false, fmt.Sprintf("log raw LLM traffic and tee libds4 diagnostics to %s.log", app))
 	fs.IntVar(&f.Power, "power", d.Power, "GPU power duty-cycle throttle percentage (1..100)")
+	fs.BoolVar(&f.SSDStreaming, "ssd-streaming", false, "enable SSD streaming of experts")
 	return f
 }
 
@@ -107,7 +109,8 @@ func resolveMTP(mtp string) string {
 }
 
 type config struct {
-	noEngine bool
+	noEngine            bool
+	allowModelSelection bool
 }
 
 // Option customizes Bootstrap.
@@ -117,6 +120,21 @@ type Option func(*config)
 // given explicitly). Used by cadpad's --no-engine mode.
 func WithoutEngine(noEngine bool) Option {
 	return func(c *config) { c.noEngine = noEngine }
+}
+
+// AllowModelSelection lets a host start with an unresolved model and choose one
+// in its UI. EngineOpts.ModelPath is empty in that case; the host must select a
+// model before opening an engine. Library loading and other validation still run.
+func AllowModelSelection() Option {
+	return func(c *config) { c.allowModelSelection = true }
+}
+
+func resolveStartupModel(value string, allowSelection bool) (string, error) {
+	path, err := resolveModelPath(value)
+	if err != nil && allowSelection {
+		return "", nil
+	}
+	return path, err
 }
 
 // App bundles everything Bootstrap sets up. Each pad's model constructor
@@ -155,8 +173,10 @@ func Bootstrap(f *Flags, opts ...Option) (*App, error) {
 	}
 	needEngine := !cfg.noEngine
 	if needEngine {
-		if st, err := os.Stat(modelPath); err != nil || st.IsDir() || st.Size() == 0 {
-			return nil, fmt.Errorf("model not found at %s\nRun: ds4go model download q2-imatrix", modelPath)
+		var err error
+		modelPath, err = resolveStartupModel(f.Model, cfg.allowModelSelection)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -208,6 +228,7 @@ func Bootstrap(f *Flags, opts ...Option) (*App, error) {
 		Backend:      selectBackend(f.Backend, f.Lib),
 		WarmWeights:  true,
 		PowerPercent: f.Power,
+		SSDStreaming: f.SSDStreaming,
 	}
 	if app.EngineOpts.MTPPath != "" {
 		ds4.ApplyMTPDefaults(&app.EngineOpts)
@@ -221,8 +242,8 @@ func Bootstrap(f *Flags, opts ...Option) (*App, error) {
 		modelLabel = info.Alias
 	}
 
-	logger.Printf("=== %s start  model=%s backend=%s ctx=%d debug=%v ===",
-		f.app, modelLabel, backendName(app.EngineOpts.Backend), f.Ctx, f.Debug)
+	logger.Printf("=== %s start  model=%s backend=%s ctx=%d debug=%v ssd-streaming=%v ===",
+		f.app, modelLabel, backendName(app.EngineOpts.Backend), f.Ctx, f.Debug, f.SSDStreaming)
 	return app, nil
 }
 

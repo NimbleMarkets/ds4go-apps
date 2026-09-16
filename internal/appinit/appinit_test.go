@@ -40,17 +40,20 @@ func TestRegisterFlagsFallbackDefaults(t *testing.T) {
 	if f.Power != 100 {
 		t.Errorf("Power = %d, want 100", f.Power)
 	}
+	if f.SSDStreaming {
+		t.Error("SSD streaming should default to disabled")
+	}
 }
 
 func TestRegisterFlagsParse(t *testing.T) {
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	f := RegisterFlags(fs, "svgpad", Defaults{})
-	err := fs.Parse([]string{"-m", "model.gguf", "--ctx", "8192", "-d", "--backend", "cpu", "--lib", "libds4.dylib", "--mtp", "", "--power", "50"})
+	err := fs.Parse([]string{"-m", "model.gguf", "--ctx", "8192", "-d", "--backend", "cpu", "--lib", "libds4.dylib", "--mtp", "", "--power", "50", "--ssd-streaming"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if f.Model != "model.gguf" || f.Ctx != 8192 || !f.Debug || f.Backend != "cpu" ||
-		f.Lib != "libds4.dylib" || f.MTP != "" || f.Power != 50 {
+		f.Lib != "libds4.dylib" || f.MTP != "" || f.Power != 50 || !f.SSDStreaming {
 		t.Errorf("parsed Flags = %+v", f)
 	}
 }
@@ -111,7 +114,7 @@ func TestBootstrapRejectsBadPower(t *testing.T) {
 
 func TestBootstrapNoEngine(t *testing.T) {
 	t.Chdir(t.TempDir())
-	f := &Flags{app: "testapp", Backend: "cpu", MTP: "none", Power: 100, Ctx: 4096}
+	f := &Flags{app: "testapp", Backend: "cpu", MTP: "none", Power: 100, Ctx: 4096, SSDStreaming: true}
 	app, err := Bootstrap(f, WithoutEngine(true))
 	if err != nil {
 		t.Fatal(err)
@@ -124,6 +127,9 @@ func TestBootstrapNoEngine(t *testing.T) {
 	}
 	if app.EngineOpts.PowerPercent != 100 || !app.EngineOpts.WarmWeights {
 		t.Errorf("EngineOpts = %+v", app.EngineOpts)
+	}
+	if !app.EngineOpts.SSDStreaming {
+		t.Error("SSD streaming was not passed to engine options")
 	}
 	if app.EngineOpts.MTPPath != "" {
 		t.Errorf("MTPPath = %q, want empty for --mtp none", app.EngineOpts.MTPPath)
@@ -142,7 +148,7 @@ func TestBootstrapNoEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(data)
-	for _, want := range []string{"=== testapp start", "backend=cpu", "error: boom", "=== testapp end ==="} {
+	for _, want := range []string{"=== testapp start", "backend=cpu", "ssd-streaming=true", "error: boom", "=== testapp end ==="} {
 		if !strings.Contains(s, want) {
 			t.Errorf("testapp.log missing %q\nlog:\n%s", want, s)
 		}

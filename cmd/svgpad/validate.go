@@ -6,9 +6,7 @@
 package main
 
 import (
-	"encoding/xml"
 	"fmt"
-	"io"
 	"regexp"
 	"strings"
 
@@ -28,24 +26,8 @@ func validateSVG(data []byte) string {
 	if len(data) == 0 {
 		return "empty"
 	}
-	trim := strings.TrimSpace(string(data))
-	if !strings.HasPrefix(trim, "<svg") {
-		return "missing <svg root"
-	}
-	decoder := xml.NewDecoder(strings.NewReader(trim))
-	for {
-		tok, err := decoder.Token()
-		if err != nil {
-			return "parse error: " + err.Error()
-		}
-		if tok == nil {
-			break
-		}
-		if _, ok := tok.(xml.EndElement); ok {
-			if decoder.InputOffset() >= int64(len(trim))-10 {
-				break
-			}
-		}
+	if _, err := inspectSVGDocument(string(data), false); err != nil {
+		return "parse error: " + err.Error()
 	}
 	if _, err := svg.RasterizeSVG(data, renderCheckEdge, renderCheckEdge); err != nil {
 		return "render error: " + err.Error()
@@ -58,54 +40,17 @@ func validateSVG(data []byte) string {
 // numbers in the report match svg_read output and svg_replace_lines
 // arguments.
 func validateSVGDetailed(svgStr string) string {
-	svgStr = strings.TrimSpace(svgStr)
-	if svgStr == "" {
+	if strings.TrimSpace(svgStr) == "" {
 		return "Error: empty SVG string"
 	}
-
 	var issues []string
-
-	if !strings.HasPrefix(svgStr, "<svg") {
-		issues = append(issues, "Missing <svg root element. The document must start with <svg.")
-	}
-	hasNS := strings.Contains(svgStr, `xmlns="http://www.w3.org/2000/svg"`) || strings.Contains(svgStr, `xmlns='http://www.w3.org/2000/svg'`)
-	if !hasNS {
-		issues = append(issues, `Missing xmlns="http://www.w3.org/2000/svg" attribute on the root <svg> element.`)
-	}
-
-	decoder := xml.NewDecoder(strings.NewReader(svgStr))
-	var depth int
-	for {
-		tok, err := decoder.Token()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			line := errorLine(err.Error())
-			if line == 0 {
-				line = lineOfOffset(svgStr, int(decoder.InputOffset()))
-			}
-			issues = append(issues, fmt.Sprintf("XML parse error at line %d: %v\n%s",
-				line, err, numberedSnippet(svgStr, line)))
-			break
+	if _, err := inspectSVGDocument(svgStr, false); err != nil {
+		line := errorLine(err.Error())
+		if line == 0 {
+			line = 1
 		}
-		if tok == nil {
-			break
-		}
-		switch t := tok.(type) {
-		case xml.StartElement:
-			depth++
-		case xml.EndElement:
-			depth--
-			if depth < 0 {
-				line := lineOfOffset(svgStr, int(decoder.InputOffset()))
-				issues = append(issues, fmt.Sprintf("Unexpected closing tag </%s> at line %d\n%s",
-					t.Name.Local, line, numberedSnippet(svgStr, line)))
-			}
-		}
-	}
-	if depth != 0 {
-		issues = append(issues, fmt.Sprintf("Unclosed tags: depth=%d at end of document", depth))
+		issues = append(issues, fmt.Sprintf("XML parse error at line %d: %v\n%s",
+			line, err, numberedSnippet(svgStr, line)))
 	}
 
 	// Only consult the rasterizer once the XML is clean; renderer output

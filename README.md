@@ -34,6 +34,15 @@ graphics driver is required for GPU rendering.
 
 ## Build
 
+This working tree uses new ds4go public model APIs that are not yet in v0.7.0.
+Until the next ds4go release, build alongside the updated `../ds4-go` checkout:
+
+```bash
+# One-time local workspace setup (go.work is ignored).
+go work init . ../ds4-go
+# If you already have a go.work, use: go work use . ../ds4-go
+```
+
 Build everything at once:
 
 ```bash
@@ -43,11 +52,22 @@ task build
 Or build individual apps:
 
 ```bash
-task build:glyhpad
+task build:glyphpad
 task build:svgpad
 task build:cadpad
 task build:steering
 ```
+
+Builds use `-mod=readonly` and do not run `go mod tidy`; run `task tidy`
+explicitly when updating dependencies. Task's `sources`, `generates`, and
+`method: checksum` directives skip unchanged apps entirely, including the build
+command. Sources include embedded assets, workspace files, and the selected
+ds4go module's Go sources and module files (including a local checkout).
+A `status` check also detects changes
+to the Go environment, target platform, toolchain, and Git revision/status.
+Each app retains its previous binary if compilation fails. Use `task --force
+build` to bypass these checks, for example after changing an external local
+module replacement other than ds4go. State lives in the ignored `.task/` directory.
 
 Binaries are written to `./bin/`.
 
@@ -81,6 +101,181 @@ task run:svgpad
 ```
 
 Describe an image (e.g., *“a blue circle inside a rounded rectangle”*) and the model emits SVG markup rendered live in the terminal. The engine is lazily loaded, so you can sketch offline and summon the LLM only when needed.
+
+Drafting tools reject appends after the outer SVG root closes, preserving the draft and directing the model to edit inside the existing root. Validation reports content outside the root at the earlier closing line, so a misplaced `</svg>` can be corrected without repeatedly adding or deleting closing tags at the end of the file.
+
+With a vision model, svgpad also reviews its rendered output: **generate → render PNG → inspect → edit → render again**. The model checks labels, clipping, spacing, contrast, and composition after the normal drafting loop. Reviews use the same renderer as the viewer, preserve the canvas proportions, and composite transparency onto white. This is model feedback, not a guarantee of visual correctness.
+
+Visual review defaults to `auto`: it runs when the loaded engine has vision and otherwise reports that only syntax/render validation is available. The matching installed encoder is discovered through ds4go's model catalog. To require vision explicitly using the Vision-Exp model installed on a Linux/CUDA host:
+
+```bash
+task build:svgpad
+./bin/ds4go-svgpad \
+  --model vision-q2 \
+  --visual-review on --visual-rounds 3
+```
+
+All apps accept installed catalog aliases or GGUF paths with `--model`. Alias
+resolution uses ds4go's public API; a missing catalog model gets its own download
+command.
+
+In SVGPad, press **Ctrl+O** while idle to choose a different installed model.
+Type to search by alias or family, use **↑/↓**, then **Enter** to load it;
+**Esc** cancels. The picker shows model size and vision encoder availability.
+It refreshes the catalog each time it opens and does not download models or
+change the CLI's default model.
+
+Press **Ctrl+R** to cycle reasoning while typing, without moving the prompt
+cursor. The settings strip above the prompt keeps reasoning, model, vision mode,
+review rounds, and tool rounds visible. A reasoning change during generation is
+marked **next**; the active request and its automatic retries retain their
+original setting. **F1** opens help while typing. The footer shows the focused
+panel and available actions, fitting whole shortcuts onto one line.
+
+**F2** opens run settings from the prompt or any panel: reasoning, visual-review
+mode, review passes, tool rounds, and whether context is preserved between new
+prompts. Use **↑/↓** to select, **←/→** to change, and **Esc** to close. Changes
+last for the app session. Review and tool budgets are locked during generation,
+enrichment, and engine loading; reasoning and context can be set for the next
+request. Settings are read-only during model switching or engine release.
+If vision is not loaded, close settings and use **Ctrl+O** to choose a vision
+model; selecting the current model can reload it with its installed encoder.
+
+**F3** opens a searchable saved-drawing browser while idle. Type to filter by
+title, prompt, filename, or keywords, then press **Enter** to inspect a drawing.
+Browsing preserves your pending prompt, cursor, and working `draft.svg`;
+**c** continues the working draft. **Page Up/Down** now scroll or pan the focused
+panel, and **j/k** scroll down/up when the prompt is not focused. **Tab** and
+**Shift+Tab** cycle the visible panels and prompt.
+
+**Ctrl+Y** copies the focused pane: prompt text, SVG source, activity text, or
+Tool panel content. It copies the full pane content, including scrolled-off
+lines, without terminal styling. The SVG source follows the selected drawing
+or live preview, rather than reading a potentially different working draft.
+The same shortcut copies logs, help, or model details when those dialogs are
+open. Copying preserves focus, cursor, and scroll position; empty panes leave
+the clipboard unchanged. A footer notice reports the clipboard request.
+This uses OSC 52, so your terminal must allow clipboard writes; over SSH it
+targets the local terminal's clipboard.
+
+Help, settings, model details, drawings, and logs close with **Esc**; ordinary
+letters no longer dismiss help or model details. Help and model details support
+scrolling. **Ctrl+N** opens logs even during model loading; **F1** and **F2** also
+remain available. Shortcut routing, availability, footer hints, and help share
+an action registry in `internal/editmode`, ready for reuse by other apps.
+
+Starting with `--visual-review on` automatically opens the picker when the
+startup model is missing, is text-only, or has no selected vision encoder.
+Canceling keeps the app open; submitting reopens the picker until a suitable
+model is selected. `--vision-review on` is accepted as an alias.
+
+Switching closes the old engine before loading the new one. It keeps the prompt
+and `draft.svg`, replaces the old model's transcript with a draft checkpoint,
+and preserves backend, context size, power, SSD streaming, and review budgets.
+After loading, press **Esc**, then **c** to continue the existing draft, or enter
+a new prompt. Vision and MTP companions are selected afresh for the new model;
+an explicit companion path from startup is not reused across models. With
+`--visual-review on`, selection requires an installed matching vision encoder.
+Switching is available only when generation/enrichment is idle. A load failure keeps the
+draft available; choose another model or retry loading.
+
+The reusable Bubble Tea widget lives in `internal/modelpicker`; it reports a
+`SelectedMsg` so each app can own its engine lifecycle. SVGPad is its first user.
+
+For DeepSeek V4.1 Q2 on a Mac with SSD streaming:
+
+```bash
+./bin/ds4go-svgpad --model v41-q2 --backend metal --ssd-streaming \
+  --visual-review on --visual-rounds 3 --tool-rounds 20
+# Or build and run through Task:
+task run:svgpad -- --model v41-q2 --backend metal --ssd-streaming --visual-review on
+```
+
+The installed `v41-vision` encoder is selected automatically. `--ssd-streaming`
+passes through to the engine's expert streaming mode and defaults to off.
+
+With `--model glm53-q2`, the installed `glm53-vision` encoder is also selected
+automatically. To select an encoder explicitly, `--vision` accepts an installed
+alias (such as `glm53-vision`) or a GGUF path.
+
+Use `--visual-review off` to disable image review. This requires a vision-capable libds4 runtime and a compatible model/encoder pair; upgrading the Go package alone does not add vision to a text-only model. Extra flags also work with `task run:svgpad -- --visual-review off`.
+
+The default budget is three automatic image review passes per request (`--visual-rounds 1..5`), shared across syntax-correction retries. An unchanged draft ends review early. If the final pass changes the drawing, the status reports that the automatic review limit was reached after edits. Each pass retains text feedback and sends only the latest review image, limiting image context growth. Cancellation and context exhaustion keep the draft available for recovery.
+
+In the TUI, press **Esc** to leave prompt editing, then **`[` / `]`** to decrease/increase the review limit while idle. The footer shows `reviews:N`; `?` shows the shortcut and `m` shows the limit and review mode. Adjustments last for the current app session; `--visual-rounds` sets the startup value. This controls image review passes, each of which can include several edit-tool calls. It does not change the separate syntax-correction limit.
+
+The model can also call `svg_preview()` to inspect the current complete draft
+while working. The tool returns a PNG using the same renderer and white
+background as automatic review, or text diagnostics for an invalid/empty draft.
+It leaves the SVG unchanged. It requires a vision model with its encoder loaded
+and visual review set to `auto` or `on`; otherwise it returns an explanation.
+
+`--tool-rounds` sets the tool-round limit for each drafting or review phase
+(default **20**, minimum 1). A round is one assistant tool-call batch; multiple
+calls can share it, and syntax-repair retries consume the same budget. An extra
+model turn is reserved for a final answer without tools. For example, add
+`--tool-rounds 30` to give a complex drawing more room. The `m` info panel shows
+the configured limit.
+
+`--temp` sets the sampling temperature (default **0.7**; `--temp 0` restores
+greedy decoding), with `--top-p` (default 0.95) applied when sampling. Tool-call
+markup is always decoded greedily regardless, so sampling only shapes free
+content. Greedy decoding is deterministic but can loop on tool-call markers and
+makes auto-correct retries replay the identical failure. `--seed` pins the
+sampler for reproducible turns; the default (0) draws a fresh random seed each
+turn so regeneration and retries explore.
+
+`--prompt "..."` runs headless: no TUI, the full drafting/auto-correct/review
+pipeline executes once, the saved SVG path prints to stdout, and the exit code
+reports success. `--outfile out.svg` names the result instead of the timestamped
+`svgpad.<timestamp>.svg`. All other flags compose, e.g.
+`ds4go-svgpad --prompt "a red fox" --outfile fox.svg --model vision-q2 --visual-review on`.
+
+Before each model turn, SVGPad measures the rendered context, including tool
+definitions and image tokens, and tells the model how much space remains.
+Warnings become stronger around 75% and 90% usage (or sooner when little
+response space remains). The context meter and `[CONTEXT]` log entries refresh
+at these checks. Drafting and review phases share this capacity even when their
+tool-round budgets reset.
+
+SVGPad pauses before a turn that cannot fit at least 1,024 response tokens plus
+one spare position. A long individual response can still hit the runtime limit.
+After either context stop, press **Esc**, then **`c`** to keep your requests and
+`draft.svg`, discard the previous assistant/tool transcript and review images,
+and continue by inspecting the existing drawing. This recovery does not generate
+a summary: prior plans and review conclusions are discarded, so the model must
+check the artifact again. If the preserved requests themselves are too large,
+shorten the prompt or restart with a larger `--ctx`.
+
+The system prompt includes the configured limit and actual vision availability.
+Application messages report remaining rounds before each model turn, ask the
+model to finish when three remain, and require a final response at zero. These
+messages do not replace the user's prompt in saved metadata. The hard cap still
+applies if the model ignores the guidance.
+
+Preview calls use the normal tool-round budget, independently of
+`--visual-rounds`, and automatic review still runs after drafting. Only the latest
+preview or automatic-review image is retained in model context; earlier tool
+observations and critiques remain as text. The tool panel and log show the
+preview result summary.
+
+After saving, metadata enrichment generates the title, screen-reader description,
+and keywords in a separate session. If the loaded engine has vision, that session
+receives a rendered preview alongside the original prompt and SVG markup, and
+uses the visible result to describe the image. Text-only engines use markup;
+a rendering failure falls back to markup and is logged. This follows the loaded
+engine's vision capability independently of the automatic-review budget. The
+`[META]` log records `vision=true` or `vision=false`. Failed enrichment preserves
+the already-saved SVG.
+
+An optional test exercises live image inference and SVG editing without a terminal (ordinary tests use mocks):
+
+```bash
+SVG_VISION_MODEL="$HOME/.ds4/models/DeepSeek-V4-Flash-Vision-Exp-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8.gguf" \
+  go test ./cmd/svgpad -run TestVisualReviewLive -v -count=1 -timeout=10m
+```
+
+On Linux, also set `CGO_ENABLED=0 GOFLAGS=-tags=nofakecgo` as described above. `SVG_VISION_ENCODER` and `SVG_VISION_LIB` override the companion and runtime paths for this test.
 
 ### cadpad — CAD Workbench
 

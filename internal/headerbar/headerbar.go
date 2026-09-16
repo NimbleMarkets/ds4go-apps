@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // Layout composes the one-line header bar within exactly width cells.
@@ -89,17 +90,6 @@ func truncateCells(s string, n int) string {
 	if n == 1 {
 		return "…"
 	}
-	target := n - 1
-	var b strings.Builder
-	w := 0
-	for _, r := range s {
-		cw := lipgloss.Width(string(r))
-		if w+cw > target {
-			break
-		}
-		b.WriteRune(r)
-		w += cw
-	}
-	b.WriteRune('…')
-	return b.String()
+	// Preserve color sequences and whole graphemes in animated status text.
+	return ansi.Truncate(s, n, "…")
 }

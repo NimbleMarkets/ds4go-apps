@@ -103,6 +103,95 @@ func TestToolResultsReconcileMissingEntries(t *testing.T) {
 	}
 }
 
+// Resizing used to reload a saved entry's tool panel while generation kept
+// indices into the longer live panel. Eleven entries replaced by four, followed
+// by a streamed call, produced pendingCalls[5-11] (the reported index -6).
+func TestResizeDuringToolRoundPreservesLivePanel(t *testing.T) {
+	for _, when := range []string{"before stream", "during stream", "before results"} {
+		t.Run(when, func(t *testing.T) {
+			m := testModel()
+			m.generating = true
+			m.workDir = t.TempDir()
+			m.toolCalls = make([]toolCallEntry, 11)
+			m.entries = []svgEntry{{prompt: "saved prompt", toolCalls: make([]toolCallEntry, 4)}}
+			m.entryIndex = 0
+			m = update(t, m, roundStartedMsg{round: 1})
+			resize := func() {
+				m = update(t, m, tea.WindowSizeMsg{Width: 166, Height: 49})
+				// Also cover a deferred load queued before generation began.
+				m = update(t, m, loadEntryMsg{})
+			}
+			if when == "before stream" {
+				resize()
+			}
+			m = update(t, m, bubble.StreamEventMsg{Event: dsml.StreamEvent{Type: dsml.EventToolCallStart, Index: 0, Name: "svg_read"}})
+			if when == "during stream" {
+				resize()
+			}
+			m = update(t, m, bubble.StreamEventMsg{Event: dsml.StreamEvent{Type: dsml.EventToolCallArgumentsDelta, Index: 0, Delta: `{}`}})
+			m = update(t, m, bubble.StreamEventMsg{Event: dsml.StreamEvent{Type: dsml.EventToolCallEnd, Index: 0, Arguments: `{}`}})
+			m = update(t, m, toolCallsMsg{calls: []ds4.ToolCall{{ID: "read", Name: "svg_read", Arguments: `{}`}}})
+			if when == "before results" {
+				resize()
+			}
+			m = update(t, m, toolResultsMsg{results: []ds4.ChatMessage{{Role: "tool", ToolCallID: "read", Content: "draft contents"}}})
+			if len(m.toolCalls) != 12 || m.roundCallStart != 11 || m.toolCalls[11].result != "draft contents" {
+				t.Fatalf("live panel lost: start=%d calls=%+v", m.roundCallStart, m.toolCalls)
+			}
+			if m.input.Value() == "saved prompt" {
+				t.Fatal("resize replaced live prompt")
+			}
+		})
+	}
+}
+
+func TestToolResultsRecoverInvalidPanelOffset(t *testing.T) {
+	for _, offset := range []int{-1, 11} {
+		m := testModel()
+		m.workDir = t.TempDir()
+		m.toolCalls = []toolCallEntry{{name: "saved", result: "old"}}
+		m.roundCallStart = offset
+		m.liveCalls = []int{9}
+		m.pendingCalls = []ds4.ToolCall{{ID: "read", Name: "svg_read", Arguments: `{}`}}
+		m = update(t, m, toolResultsMsg{results: []ds4.ChatMessage{{Role: "tool", ToolCallID: "read", Content: "current"}}})
+		if len(m.toolCalls) != 2 || m.roundCallStart != 1 || m.toolCalls[0].result != "old" || m.toolCalls[1].result != "current" || len(m.liveCalls) != 0 {
+			t.Fatalf("offset %d: reconciliation lost results: %+v", offset, m.toolCalls)
+		}
+	}
+}
+
+func TestStreamEventsIgnoreInvalidPanelIndices(t *testing.T) {
+	for _, tc := range []struct{ index, entry int }{{-1, 0}, {1, 0}, {0, -1}, {0, 9}} {
+		m := testModel()
+		m.toolCalls = []toolCallEntry{{name: "svg_append", args: "unchanged"}}
+		m.liveCalls = []int{tc.entry}
+		for _, kind := range []dsml.StreamEventType{dsml.EventToolCallArgumentsDelta, dsml.EventToolCallEnd} {
+			m.applyStreamEvent(dsml.StreamEvent{Type: kind, Index: tc.index, Delta: "bad", Arguments: `{"chunk":"<rect/>"}`})
+		}
+		if m.toolCalls[0].args != "unchanged" || len(m.previewPending) != 0 {
+			t.Fatalf("invalid mapping %+v changed a live entry", tc)
+		}
+	}
+}
+
+func TestPanelNavigationDoesNotChangeDrawing(t *testing.T) {
+	m := testModel()
+	m.generating = true
+	m.entries = []svgEntry{{prompt: "first"}, {prompt: "second"}, {prompt: "third"}}
+	m.entryIndex = 1
+	for _, key := range []tea.KeyPressMsg{{Code: 'k', Text: "k"}, {Code: 'j', Text: "j"}, {Code: tea.KeyPgUp}, {Code: tea.KeyPgDown}} {
+		m = update(t, m, key)
+		if m.entryIndex != 1 || m.input.Value() != "" {
+			t.Fatalf("%s switched entries during generation", key.String())
+		}
+	}
+	m.generating = false
+	m = update(t, m, tea.KeyPressMsg{Code: 'j', Text: "j"})
+	if m.entryIndex != 1 || m.input.Value() != "" {
+		t.Fatal("panel navigation changed the saved drawing")
+	}
+}
+
 func TestAppendChunkUpdatesLivePreview(t *testing.T) {
 	m := testModel()
 	m.generating = true

@@ -25,9 +25,9 @@ import (
 	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
 	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
-	"github.com/NimbleMarkets/ds4go-apps/internal/editmode"
 	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
 	"github.com/NimbleMarkets/ds4go-apps/internal/headerbar"
+	"github.com/NimbleMarkets/ds4go-apps/internal/modelpicker"
 	svg "github.com/NimbleMarkets/ntcharts-svg/svg"
 	"github.com/NimbleMarkets/ntcharts/v2/picture"
 	"github.com/charmbracelet/x/ansi"
@@ -36,6 +36,7 @@ import (
 const (
 	headerH      = 1
 	footerH      = 1
+	settingsH    = 1
 	inputH       = 3 // 1 content line + 2 border chars
 	defaultThink = 8
 	minThink     = 2
@@ -77,6 +78,7 @@ type turnDoneMsg struct {
 	result bubble.RunResult
 	err    error
 	ctxPos int
+	visual visualReport
 }
 
 // engineReadyMsg is delivered from the goroutine that opens the ds4 engine
@@ -217,6 +219,11 @@ const (
 )
 
 type model struct {
+	modelPicker                                      modelpicker.Model
+	switchingModel, releasingEngine, quitAfterSwitch bool
+	resumeDraft, mtpEnabled                          bool
+	switchStarted                                    time.Time
+
 	width, height int
 
 	engine        *ds4.Engine // nil until engineReadyMsg
@@ -248,19 +255,31 @@ type model struct {
 	statusText       string
 	errText          string
 
-	svgWidget svg.Model
+	svgWidget    svg.Model
+	displayedSVG string
+	copyNotice   string
 
 	input textinput.Model
 
-	showThinking    bool
-	thinkBoxH       int
-	thinkBoxW       int // width of the thinking panel (divider position)
-	thinkText       string
-	thinkMode       ds4.ThinkMode
-	thinkScroll     int
-	thinkAutoScroll bool // when true, scroll follows new content
+	showThinking     bool
+	thinkBoxH        int
+	thinkBoxW        int // width of the thinking panel (divider position)
+	thinkText        string
+	thinkMode        ds4.ThinkMode
+	requestThinkMode ds4.ThinkMode
+	requestThinkSet  bool
+	thinkScroll      int
+	thinkAutoScroll  bool // when true, scroll follows new content
 
-	showHelp bool
+	showHelp      bool
+	showSettings  bool
+	settingsIndex int
+	settingsNote  string
+	showDrawings  bool
+	drawingQuery  string
+	drawingCursor int
+	helpScroll    int
+	entryLoaded   bool
 
 	panelFocus   panelFocus
 	toolScroll   int
@@ -300,7 +319,16 @@ type model struct {
 
 	autoCorrectCount int
 	maxAutoCorrect   int
+	visual           visualOptions
+	visualPasses     int
+	sampling         samplingOptions
 	lastErr          error
+
+	// Headless one-shot mode (--prompt): main reads the outcome fields from
+	// the final model after the program quits.
+	oneShot     oneShotOptions
+	oneShotErr  error  // terminal failure to surface as the exit error
+	oneShotPath string // absolute path of the saved SVG, "" if none
 
 	// metrics
 	genStart       time.Time
@@ -399,6 +427,7 @@ func newModel(app *appinit.App) model {
 
 	draftPath := filepath.Join(wd, "draft.svg")
 	reg := ds4.NewToolRegistry()
+	reg.MustRegister(svgPreviewTool(draftPath))
 
 	reg.RegisterFunc(ds4.ToolSchema{
 		Name:        "svg_clear",
@@ -448,7 +477,7 @@ func newModel(app *appinit.App) model {
 
 	reg.RegisterFunc(ds4.ToolSchema{
 		Name:        "svg_append",
-		Description: "Append markup to the end of the draft SVG file.",
+		Description: "Append markup while the SVG root is open. Close the root exactly once, after all drawing elements. Once closed, use replacement tools to edit inside it; appending after a closed root is refused without changing the draft.",
 		Parameters:  json.RawMessage(`{"type":"object","properties":{"chunk":{"type":"string","description":"Markup to append"}},"required":["chunk"]}`),
 	}, func(ctx context.Context, args json.RawMessage) (string, error) {
 		var params struct {
@@ -457,15 +486,7 @@ func newModel(app *appinit.App) model {
 		if err := json.Unmarshal(args, &params); err != nil {
 			return "", err
 		}
-		f, err := os.OpenFile(draftPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-			return fmt.Sprintf("Error opening draft file: %v", err), nil
-		}
-		defer f.Close()
-		if _, err := f.WriteString(params.Chunk); err != nil {
-			return fmt.Sprintf("Error appending to draft: %v", err), nil
-		}
-		return "Chunk appended successfully.", nil
+		return appendSVGChunk(draftPath, params.Chunk)
 	})
 
 	reg.RegisterFunc(ds4.ToolSchema{
@@ -574,6 +595,7 @@ func newModel(app *appinit.App) model {
 	return model{
 		lib:            lib,
 		engOpts:        engOpts,
+		mtpEnabled:     app.Flags.MTP != "none",
 		lifecycle:      engineLifecycle{status: engineinit.StatusDormant},
 		modelPath:      modelPath,
 		modelInfo:      app.ModelInfo,
@@ -588,6 +610,7 @@ func newModel(app *appinit.App) model {
 		logBuf:         logBuf,
 		logTop:         -1, // follow the tail by default
 		svgWidget:      svgWidget,
+		displayedSVG:   placeholderSVG,
 		showThinking:   true,
 		showImageInfo:  true,
 		thinkBoxH:      defaultThink,
@@ -595,8 +618,9 @@ func newModel(app *appinit.App) model {
 		thinkMode:      ds4.ThinkNone,
 		cache:          newWidgetCache(50),
 		tools:          reg,
-		maxToolRounds:  10,
+		maxToolRounds:  defaultToolRounds,
 		maxAutoCorrect: 3, // automatically trigger correction turns via svg_validate tool calls
+		visual:         visualOptions{Mode: "auto", MaxPasses: 3},
 		toolCallCounts: make(map[string]int),
 		panelFocus:     focusThinking,
 		entries:        existing,
@@ -614,12 +638,23 @@ func (m model) Init() tea.Cmd {
 	// Dormant: the viewer panel and entry navigation work without any
 	// model loaded.
 	var cmds []tea.Cmd
-	cmds = append(cmds, m.svgWidget.Init())
-	cmds = append(cmds, tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg {
-		return kittyAutoToggleMsg{}
-	}))
+	if m.needsVisionModelSelection() {
+		cmds = append(cmds, func() tea.Msg { return startupModelSelectionMsg{} })
+	}
+	if !m.oneShot.Enabled() {
+		// The svg widget's Init and the Kitty auto-probe write escape
+		// queries to stdout; in headless one-shot mode stdout carries only
+		// the saved SVG path, and nothing renders anyway.
+		cmds = append(cmds, m.svgWidget.Init())
+		cmds = append(cmds, tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg {
+			return kittyAutoToggleMsg{}
+		}))
+	}
 	if m.entryIndex < 0 {
-		cmds = append(cmds, m.svgWidget.SetSVGData("placeholder.svg", []byte(placeholderSVG)))
+		cmds = append(cmds, m.setPreviewSVG("placeholder.svg", []byte(placeholderSVG)))
+	}
+	if m.oneShot.Enabled() {
+		cmds = append(cmds, func() tea.Msg { return oneShotStartMsg{} })
 	}
 	return tea.Batch(cmds...)
 }
@@ -628,6 +663,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case startupModelSelectionMsg:
+		if m.needsVisionModelSelection() && !m.modelPicker.IsOpen() {
+			cmd := m.chooseRequiredVisionModel()
+			return m, cmd
+		}
+		return m, nil
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -635,8 +676,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m = m.resize()
 		cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
 		m.logger.Printf("[SIZE] width=%d height=%d entries=%d", m.width, m.height, len(m.entries))
-		// Defer entry loading so SetSize completes first.
-		if len(m.entries) > 0 {
+		// Defer entry loading so SetSize completes first. During generation
+		// keep the live draft and tool panel; SetSize resizes that widget.
+		if !m.entryLoaded && !m.generating && len(m.entries) > 0 {
 			cmds = append(cmds, tea.Tick(50*time.Millisecond, func(time.Time) tea.Msg {
 				return loadEntryMsg{}
 			}))
@@ -649,51 +691,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case loadEntryMsg:
-		if len(m.entries) > 0 {
+		if !m.entryLoaded && len(m.entries) > 0 {
+			value, cursor := m.input.Value(), m.input.Position()
 			cmd := m.loadEntryCmd()
+			if value != "" {
+				m.input.SetValue(value)
+				m.input.SetCursor(cursor)
+			}
 			if cmd != nil {
 				cmds = append(cmds, cmd)
 			}
 		}
 
 	case tea.KeyPressMsg:
-		// Log overlay has its own scrollable input handling — only esc
-		// (or quit) leaves it; the rest of the key set scrolls. Info and
-		// help stay "any-key-dismisses" since they're not scrollable.
-		if m.showLog {
-			switch msg.String() {
-			case "ctrl+c", "ctrl+q":
-				return m, tea.Quit
-			case "esc":
-				m.showLog = false
-				m.logTop = -1 // reset to follow next time
-			case "up":
-				m.logTop = m.logScrollBy(-1)
-			case "down":
-				m.logTop = m.logScrollBy(1)
-			case "pgup":
-				m.logTop = m.logScrollBy(-m.logPageSize())
-			case "pgdown":
-				m.logTop = m.logScrollBy(m.logPageSize())
+		m.copyNotice = ""
+		if handled, cmd := m.dialogKey(msg); handled {
+			return m, cmd
+		}
+		actionKey := msg.String()
+		if action, ok := m.actions(m.input.Focused()).Match(actionKey); ok {
+			if action.Disabled != "" {
+				m.statusText = action.Disabled
+				return m, nil
 			}
+			actionKey = action.ID
+		}
+		if actionKey == "copy" {
+			cmd := m.copyActivePane()
+			return m, cmd
+		}
+		if m.switchingModel {
 			return m, nil
 		}
-		if m.showInfo || m.showHelp {
-			if s := msg.String(); s == "ctrl+c" || s == "ctrl+q" {
-				return m, tea.Quit
-			}
-			m.showInfo = false
-			m.showHelp = false
+		switch actionKey {
+		case "ctrl+r":
+			m.cycleReasoning()
 			return m, nil
-		}
-
-		// Keys that work in BOTH modes.
-		switch msg.String() {
-		case "ctrl+c", "ctrl+q":
-			return m, tea.Quit
-
-		case "ctrl+n": // libds4 log overlay
-			m.showLog = true
+		case "ctrl+o":
+			cmd := m.openModelPicker()
+			return m, cmd
+		case "f3":
+			m.showDrawings, m.drawingQuery, m.drawingCursor = true, "", 0
 			return m, nil
 
 		case "esc":
@@ -704,13 +742,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.input.Focused() {
 				m.input.Blur()
-				m.panelFocus = focusThinking
+				m.panelFocus = m.defaultPanelFocus()
 			}
 			return m, nil
 
 		case "enter":
-			if !m.input.Focused() || m.generating {
+			if !m.input.Focused() || m.generating || m.releasingEngine {
 				return m, tea.Batch(cmds...)
+			}
+			if m.needsVisionModelSelection() {
+				cmd := m.chooseRequiredVisionModel()
+				return m, cmd
 			}
 			text := strings.TrimSpace(m.input.Value())
 			if text == "" {
@@ -724,7 +766,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case actionGenerate:
 				// Engine ready — start the turn as before.
 				m.input.Blur()
-				m.panelFocus = focusThinking
+				m.panelFocus = m.defaultPanelFocus()
 				m.yoloCount = 0
 				cmds = append(cmds, func() tea.Msg { return submitMsg{text} })
 			case actionOpen:
@@ -736,20 +778,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case actionNone:
 				// Already Opening — submit is queued.
 				m.statusText = "opening engine… (will submit when ready)"
-			}
-			return m, tea.Batch(cmds...)
-
-		case "ctrl+plus", "ctrl+=":
-			if m.showThinking {
-				m.thinkBoxH++
-				cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
-			}
-			return m, tea.Batch(cmds...)
-
-		case "ctrl+minus", "ctrl+-":
-			if m.showThinking && m.thinkBoxH > minThink {
-				m.thinkBoxH--
-				cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
 			}
 			return m, tea.Batch(cmds...)
 
@@ -794,7 +822,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.panelFocus = focusSVG
 					m.input.Blur()
 				case focusSVG:
-					m.panelFocus = focusThinking
+					m.panelFocus = m.defaultPanelFocus()
 				case focusThinking:
 					m.panelFocus = focusTools
 				case focusTools:
@@ -823,7 +851,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.panelFocus = focusTools
 					m.input.Blur()
 				case focusTools:
-					m.panelFocus = focusThinking
+					m.panelFocus = m.defaultPanelFocus()
 				case focusThinking:
 					m.panelFocus = focusSVG
 				case focusSVG:
@@ -845,63 +873,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Batch(cmds...)
 
-		case "pgup", "k":
+		case "pgup", "pgdown":
 			if !m.input.Focused() {
-				if len(m.entries) > 0 && m.entryIndex > 0 {
-					m.entryIndex--
-					if cmd := m.loadEntryCmd(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
+				delta := max(1, m.thinkBoxH-1)
+				if actionKey == "pgup" {
+					delta = -delta
 				}
-				return m, tea.Batch(cmds...)
+				return m.scrollPanel(delta)
 			}
 
-		case "pgdown", "j":
+		case "up", "down":
 			if !m.input.Focused() {
-				if len(m.entries) > 0 && m.entryIndex < len(m.entries)-1 {
-					m.entryIndex++
-					if cmd := m.loadEntryCmd(); cmd != nil {
-						cmds = append(cmds, cmd)
-					}
+				delta := 1
+				if actionKey == "up" {
+					delta = -1
 				}
-				return m, tea.Batch(cmds...)
-			}
-
-		case "up":
-			// Panel-aware scroll. When the input owns focus, fall through
-			// to textinput handling below so its cursor history still works.
-			switch m.panelFocus {
-			case focusThinking:
-				if m.thinkScroll > 0 {
-					m.thinkScroll--
-					m.thinkAutoScroll = false
-				}
-				return m, nil
-			case focusTools:
-				if m.toolScroll > 0 {
-					m.toolScroll--
-				}
-				return m, nil
-			case focusSVG:
-				var cmd tea.Cmd
-				m.svgWidget, cmd = m.svgWidget.Update(msg)
-				cmds = append(cmds, cmd)
-				return m, tea.Batch(cmds...)
-			}
-
-		case "down":
-			switch m.panelFocus {
-			case focusThinking:
-				m.thinkScroll++
-				return m, nil
-			case focusTools:
-				m.toolScroll++
-				return m, nil
-			case focusSVG:
-				var cmd tea.Cmd
-				m.svgWidget, cmd = m.svgWidget.Update(msg)
-				cmds = append(cmds, cmd)
-				return m, tea.Batch(cmds...)
+				return m.scrollPanel(delta)
 			}
 		}
 
@@ -914,14 +901,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// Command mode: bare-letter commands.
-		switch msg.String() {
+		switch actionKey {
 		case "e":
-			if !m.generating {
+			if !m.switchingModel {
 				m.panelFocus = focusInput
 				cmds = append(cmds, m.input.Focus())
 			}
 
 		case "n":
+			if m.generating {
+				return m, nil
+			}
+			m.resumeDraft = false
 			m.input.SetValue("")
 			m.thinkText = ""
 			m.outputText = ""
@@ -930,25 +921,49 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errText = ""
 			m.panelFocus = focusInput
 			m.entryIndex = -1
+			m.entryLoaded = true
 			cmds = append(cmds, m.input.Focus())
-			cmds = append(cmds, m.svgWidget.SetSVGData("placeholder.svg", []byte(placeholderSVG)))
+			cmds = append(cmds, m.setPreviewSVG("placeholder.svg", []byte(placeholderSVG)))
 
 		case "c":
-			if m.generating {
+			if m.generating || m.releasingEngine || m.lifecycle.status == engineinit.StatusOpening {
 				return m, nil
 			}
-			isTruncated := false
+			if m.needsVisionModelSelection() {
+				cmd := m.chooseRequiredVisionModel()
+				return m, cmd
+			}
+			if m.resumeDraft && m.engine == nil {
+				m.switchingModel = true
+				m.switchStarted = time.Now()
+				m.spinnerFrame = 0
+				m.lifecycle = engineLifecycle{status: engineinit.StatusOpening}
+				m.statusText = "Opening engine to resume draft…"
+				return m, tea.Batch(openEngineCmd(m.lib, m.engOpts, m.ctxSize), switchSpinnerTick(m.switchStarted))
+			}
+			m.captureRequestReasoning()
+			isTruncated := m.resumeDraft
 			if m.lastErr != nil {
-				if errors.Is(m.lastErr, ds4.ErrContextFull) || m.lastErr.Error() == "ds4go: session context full" || errors.Is(m.lastErr, context.Canceled) {
+				if contextLimited(m.lastErr) || errors.Is(m.lastErr, context.Canceled) {
 					isTruncated = true
 				}
 			}
 			if isTruncated {
-				// The stream-driven turn cannot resume raw logits; rerun the
-				// turn after trimming the truncated assistant tail.
-				if len(m.history) > 0 && m.history[len(m.history)-1].Role == "assistant" {
-					m.history = m.history[:len(m.history)-1]
+				m.resumeDraft = false
+				if contextLimited(m.lastErr) {
+					history, err := checkpointSVGHistory(m.history, filepath.Join(m.workDir, "draft.svg"))
+					if err != nil {
+						m.errText = err.Error()
+						return m, nil
+					}
+					m.logger.Printf("[CONTEXT] checkpoint messages=%d -> %d; draft preserved", len(m.history), len(history))
+					m.history = history
 				}
+				// The driver retains completed messages only. Syncing this
+				// history replaces any truncated native-session tail.
+				m.liveCalls = nil
+				m.pendingCalls = nil
+				m.roundCallStart = len(m.toolCalls)
 				m.generating = true
 				m.statusText = fmt.Sprintf("Continue [%d/%d]...", m.toolRounds, m.maxToolRounds)
 				m.errText = ""
@@ -992,7 +1007,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.previewPending = nil
 					m.previewTick = 0
 					feedback := fmt.Sprintf("Your output was invalid: %s. Please output ONLY a corrected, complete SVG.", v)
-					m.history = append(m.history, ds4.ChatMessage{Role: "user", Content: feedback})
+					m.history = append(m.history, ds4.ChatMessage{Role: "user", ToolCallID: svgCorrectionID, Content: feedback})
 					cmds = append(cmds, spinnerTick())
 					var waitCmd tea.Cmd
 					m.gen, waitCmd = bubble.Start(m.runTurn)
@@ -1003,9 +1018,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "m":
 			m.showInfo = true
+			m.helpScroll = 0
 
-		case "?", "h":
+		case "f1":
 			m.showHelp = true
+			m.helpScroll = 0
 
 		case "t":
 			m.showThinking = !m.showThinking
@@ -1018,16 +1035,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.showImageInfo = !m.showImageInfo
 			cmds = append(cmds, m.svgWidget.SetSize(m.svgWidth(), m.svgHeight()))
 
-		case "r":
-			switch m.thinkMode {
-			case ds4.ThinkNone:
-				m.thinkMode = ds4.ThinkHigh
-			case ds4.ThinkHigh:
-				m.thinkMode = ds4.ThinkMax
-			default:
-				m.thinkMode = ds4.ThinkNone
+		case "[", "]":
+			// A running request owns a snapshot of its review budget,
+			// including any automatic syntax-correction restarts.
+			if m.generating {
+				m.statusText = "Stop or finish generation before changing the review limit"
+				return m, nil
 			}
-			m.logger.Printf("[REASONING] %s", m.thinkModeLabel())
+			delta := 1
+			if msg.String() == "[" {
+				delta = -1
+			}
+			m.visual.MaxPasses = max(1, min(maxVisualPasses, m.visual.MaxPasses+delta))
+			m.statusText = fmt.Sprintf("Visual review limit: %d passes per request (mode: %s)", m.visual.MaxPasses, m.visual.Mode)
+			m.logger.Printf("[VISUAL] limit=%d", m.visual.MaxPasses)
+			return m, nil
 
 		case "g":
 			cmds = append(cmds, m.svgWidget.ToggleRenderMode())
@@ -1039,6 +1061,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if action == actionRelease {
 				eng, sess := m.engine, m.session
 				m.engine, m.session = nil, nil
+				m.releasingEngine = true
 				m.statusText = "Engine released"
 				return m, releaseEngineCmd(eng, sess)
 			}
@@ -1128,6 +1151,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case metadataDoneMsg:
 		base := filepath.Base(msg.filename)
+		m.logger.Printf("[META] %s vision=%t", base, msg.vision)
+		if msg.previewWarning != "" {
+			m.logger.Printf("[META] %s using markup without preview: %s", base, msg.previewWarning)
+		}
 		if msg.err != nil {
 			m.logger.Printf("[META] %s failed: %v", base, msg.err)
 			if !m.generating {
@@ -1171,23 +1198,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.outputText = entryText(m.entries[m.entryIndex])
 		}
 		m.metadataInFlight = false
+		if m.oneShot.Enabled() && !m.generating {
+			// Enrichment already rewrote the saved file (or failed, which
+			// only costs the metadata); the one-shot job is complete.
+			return m, tea.Quit
+		}
 		var action engineAction
 		m.lifecycle, action = m.lifecycle.onWorkDone(m.generating)
 		if action == actionRelease {
 			eng, sess := m.engine, m.session
 			m.engine, m.session = nil, nil
+			m.releasingEngine = true
 			m.statusText = "Engine released"
 			return m, releaseEngineCmd(eng, sess)
 		}
 		return m, nil
 
+	case modelpicker.LoadedMsg:
+		var cmd tea.Cmd
+		m.modelPicker, cmd = m.modelPicker.Update(msg)
+		return m, cmd
+
+	case modelpicker.SelectedMsg:
+		return m.switchModel(msg.Model)
+
 	case engineReadyMsg:
+		m.switchingModel = false
 		if msg.Err != nil {
 			m.lifecycle, _ = m.lifecycle.onEngineOpened(false)
 			m.engineErr = msg.Err
 			m.statusText = "Error"
 			m.errText = msg.Err.Error()
 			m.logger.Printf("[ENGINE] open failed: %v", msg.Err)
+			if m.quitAfterSwitch {
+				return m, tea.Quit
+			}
+			if m.oneShot.Enabled() {
+				// Headless: nobody can retry from the Error state.
+				m.oneShotErr = msg.Err
+				return m, tea.Quit
+			}
 			return m, nil
 		}
 		// On success the engine/session are owned by us until release.
@@ -1196,9 +1246,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.hasMTP = msg.HasMTP
 		m.mtpDraft = msg.MTPDraft
 		m.ctxSize = msg.Session.Ctx()
+		m.engineErr = nil
+		if m.quitAfterSwitch {
+			return m, tea.Quit
+		}
 		var action engineAction
 		m.lifecycle, action = m.lifecycle.onEngineOpened(true)
 		m.statusText = "Ready"
+		if m.resumeDraft {
+			m.statusText = "Ready · Esc then c to continue the existing draft"
+		}
+		if w := visionWarning(m.visual.Mode, m.engine.HasVision()); w != "" {
+			m.errText = w
+			m.logger.Printf("[VISION] %s", w)
+		}
 		m.logger.Printf("[ENGINE] ready  mtp=%v mtpDraft=%d ctx=%d",
 			m.hasMTP, m.mtpDraft, m.ctxSize)
 
@@ -1211,31 +1272,57 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				text = defaultPrompt
 			}
 			m.input.Blur()
-			m.panelFocus = focusThinking
+			m.panelFocus = m.defaultPanelFocus()
 			m.yoloCount = 0
 			return m, func() tea.Msg { return submitMsg{text} }
 		case actionRelease:
 			// Queued release — give the lock back immediately.
 			eng, sess := m.engine, m.session
 			m.engine, m.session = nil, nil
+			m.releasingEngine = true
 			m.statusText = "Engine released"
 			return m, releaseEngineCmd(eng, sess)
 		}
 		return m, nil
 
 	case engineReleasedMsg:
+		m.releasingEngine = false
 		m.lifecycle = m.lifecycle.onEngineReleased()
 		m.statusText = "Engine released"
 		m.logger.Printf("[ENGINE] released")
 		return m, nil
 
+	case oneShotStartMsg:
+		// Headless stand-in for the Enter keypress: queue the submit and
+		// open the engine. engineReadyMsg fires submitMsg from the input.
+		m.input.SetValue(m.oneShot.Prompt)
+		var action engineAction
+		m.lifecycle, action = m.lifecycle.onSubmit()
+		switch action {
+		case actionGenerate:
+			return m, func() tea.Msg { return submitMsg{m.oneShot.Prompt} }
+		case actionOpen:
+			m.statusText = "opening engine…"
+			return m, openEngineCmd(m.lib, m.engOpts, m.ctxSize)
+		}
+		return m, nil
+
 	case submitMsg:
+		if m.switchingModel || m.releasingEngine || m.modelPicker.IsOpen() {
+			return m, nil
+		}
+		if m.needsVisionModelSelection() {
+			cmd := m.chooseRequiredVisionModel()
+			return m, cmd
+		}
+		m.resumeDraft = false
 		m.logger.Printf("[USER] %s", msg.text)
 		_ = os.Remove(filepath.Join(m.workDir, "draft.svg"))
 		if !m.preserveContext {
 			m.history = nil
 		}
 		m.history = append(m.history, ds4.ChatMessage{Role: "user", Content: msg.text})
+		m.captureRequestReasoning()
 		m.thinkText = ""
 		m.outputText = ""
 		m.toolCalls = m.toolCalls[:0]
@@ -1251,8 +1338,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.thinkScroll = 0
 		m.toolScroll = 0
 		m.thinkAutoScroll = true
-		m.panelFocus = focusThinking
+		m.panelFocus = m.defaultPanelFocus()
 		m.autoCorrectCount = 0
+		m.visualPasses = 0
 		m.generating = true
 		m.statusText = fmt.Sprintf("Generate [0/%d]...", m.maxToolRounds)
 		m.errText = ""
@@ -1268,6 +1356,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.gen, waitCmd = bubble.Start(m.runTurn)
 		cmds = append(cmds, waitCmd)
 
+	case bubble.ContextUsageEvent:
+		m.ctxPos, m.ctxSize = msg.PromptTokens, msg.Capacity
+		m.logger.Printf("[CONTEXT] prompt=%d/%d remaining=%d", msg.PromptTokens, msg.Capacity, msg.Remaining())
+		cmds = append(cmds, m.gen.Wait())
+
 	case bubble.TokenMsg:
 		// Metrics cadence only — the panels and preview are fed by
 		// StreamEventMsg.
@@ -1276,6 +1369,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.tokenCount++
 		cmds = append(cmds, m.gen.Wait())
+
+	case switchSpinnerTickMsg:
+		if m.switchingModel && msg.started.Equal(m.switchStarted) {
+			m.spinnerFrame++
+			cmds = append(cmds, switchSpinnerTick(m.switchStarted))
+		}
 
 	case bubble.SpinnerTickMsg:
 		if m.generating {
@@ -1300,7 +1399,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// this tick was scheduled and when it fired (e.g., user pressed
 		// `x` mid-turn). Re-arming would crash submitMsg with a nil
 		// session.
-		if m.yoloMode && !m.generating && m.yoloCount < 20 && m.lifecycle.status == engineinit.StatusReady {
+		if m.yoloMode && !m.generating && !m.modelPicker.IsOpen() && !m.showSettings && !m.showDrawings && m.yoloCount < 20 && m.lifecycle.status == engineinit.StatusReady {
 			m.history = nil
 			cmds = append(cmds, func() tea.Msg { return submitMsg{msg.text} })
 		}
@@ -1347,6 +1446,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Reconcile panel entries: stream events created entries for
 		// decoder-validated blocks; a truncation-repaired block executed
 		// without ever streaming, so create what is missing.
+		if m.roundCallStart < 0 || m.roundCallStart > len(m.toolCalls) {
+			m.logger.Printf("[TOOL] repairing panel offset start=%d entries=%d", m.roundCallStart, len(m.toolCalls))
+			m.roundCallStart = len(m.toolCalls)
+			m.liveCalls = nil
+		}
 		for len(m.toolCalls)-m.roundCallStart < len(m.pendingCalls) {
 			call := m.pendingCalls[len(m.toolCalls)-m.roundCallStart]
 			m.toolCalls = append(m.toolCalls, toolCallEntry{
@@ -1359,7 +1463,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			var res string
 			for _, r := range msg.results {
 				if r.ToolCallID == call.ID {
-					res = r.Content
+					res = svgToolResultText(r)
 					break
 				}
 			}
@@ -1377,7 +1481,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if data, err := os.ReadFile(filepath.Join(m.workDir, "draft.svg")); err == nil && len(data) > 0 {
 			m.previewBase = string(data)
 			if inc := extractIncrementalSVG(string(data)); inc != nil {
-				cmds = append(cmds, m.svgWidget.SetSVGData("incremental.svg", inc))
+				cmds = append(cmds, m.setPreviewSVG("incremental.svg", inc))
 			}
 		}
 		cmds = append(cmds, m.gen.Wait())
@@ -1387,7 +1491,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.logger.Printf("[DSML] malformed tool call: %s", msg.reason)
 		cmds = append(cmds, m.gen.Wait())
 
+	case visualReviewMsg:
+		m.statusText = fmt.Sprintf("Inspecting SVG image [%d/%d]...", msg.pass, msg.limit)
+		m.thinkText = ""
+		m.outputText = ""
+		m.logger.Printf("[VISUAL] inspecting pass=%d limit=%d", msg.pass, msg.limit)
+		cmds = append(cmds, m.gen.Wait())
+
 	case turnDoneMsg:
+		m.visualPasses = msg.visual.Passes
 		m.generating = false
 		m.lastErr = msg.err
 		if m.gen.Canceled() {
@@ -1409,9 +1521,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			genErr = nil
 		}
 		if genErr != nil && genErr != context.Canceled {
-			if errors.Is(genErr, ds4.ErrContextFull) || genErr.Error() == "ds4go: session context full" {
-				m.statusText = "Ready · Context full"
-				m.errText = "Session context capacity reached. Press 'c' to continue or 'n' for a new prompt."
+			if contextLimited(genErr) {
+				m.statusText = "Ready · Context limit"
+				m.errText = "Context limit reached; draft preserved. Press 'c' to free context and continue from the draft, or 'n' for a new prompt. If it repeats immediately, shorten the prompt or restart with a larger --ctx."
 			} else if errors.Is(genErr, errRunaway) {
 				// Non-nil genErr, so the auto-correct gate below is skipped:
 				// retrying a marker-looping model just loops again.
@@ -1442,7 +1554,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			svgData = extractSVG(content)
 		}
-		outputText := extractOutputText(content, m.thinkMode != ds4.ThinkNone)
+		outputText := extractOutputText(content, m.activeReasoning() != ds4.ThinkNone)
 		nextPrompt := extractPrompt(content)
 		if outputText != "" {
 			m.outputText = outputText
@@ -1474,7 +1586,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.autoCorrectCount++
 				m.logger.Printf("[AUTOCORRECT] #%d error=%q", m.autoCorrectCount, v)
 				feedback := autoCorrectFeedback(v, svgData, svgFromDraft)
-				m.history = append(m.history, ds4.ChatMessage{Role: "user", Content: feedback})
+				m.history = append(m.history, ds4.ChatMessage{Role: "user", ToolCallID: svgCorrectionID, Content: feedback})
 				// Restart: per-segment state reset (the old ToolRoundMsg
 				// duties) and a fresh driver run.
 				m.generating = true
@@ -1504,7 +1616,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Feed the completed SVG to the widget, validate, and auto-save.
 		var fname string
 		if len(svgData) > 0 {
-			cmds = append(cmds, m.svgWidget.SetSVGData("output.svg", svgData))
+			cmds = append(cmds, m.setPreviewSVG("output.svg", svgData))
 			v := validateSVG(svgData)
 			if genErr == nil && !errors.Is(msg.err, bubble.ErrMaxRounds) {
 				if v == "valid" {
@@ -1514,14 +1626,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.logger.Printf("[SVG] %s (%d bytes)", v, len(svgData))
+			if msg.visual.Status != "" {
+				m.statusText += " · " + msg.visual.Status
+				m.logger.Printf("[VISUAL] %s", msg.visual.Status)
+			}
 
 			fname = fmt.Sprintf("svgpad.%s.svg", time.Now().Format("20060102_150405"))
+			if m.oneShot.Outfile != "" {
+				fname = m.oneShot.Outfile
+			}
 			path := filepath.Join(m.workDir, fname)
+			if filepath.IsAbs(fname) {
+				path = fname
+			}
 			if err := os.WriteFile(path, svgData, 0644); err != nil {
 				m.statusText += " · save failed"
 				m.logger.Printf("[SAVE] failed: %v", err)
 				fname = ""
 			} else {
+				m.oneShotPath = path
 				m.statusText += " · saved " + fname
 				m.logger.Printf("[SAVE] %s (%d bytes)", fname, len(svgData))
 				// Fire the second LLM pass: write <title>/<desc>/<metadata>
@@ -1535,6 +1658,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.metadataCtx, m.metadataCancel = context.WithCancel(context.Background())
 				cmds = append(cmds, enrichMetadataCmd(
 					m.metadataCtx, m.metadataWG, m.engine, m.modelDisplayName(), path, currentPrompt, svgData, m.genTime(), m.toolCalls, m.thinkText))
+			}
+		}
+
+		// Headless one-shot: a failed turn or a turn with nothing saved ends
+		// the run here; a saved file waits for the metadata pass to finish
+		// (the metadataDoneMsg handler quits).
+		if m.oneShot.Enabled() {
+			switch {
+			case genErr != nil:
+				m.oneShotErr = genErr
+				return m, tea.Quit
+			case m.oneShotPath == "":
+				m.oneShotErr = errors.New("turn completed without a saved SVG (empty response or save failure)")
+				return m, tea.Quit
 			}
 		}
 
@@ -1574,6 +1711,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if releaseAction == actionRelease {
 			eng, sess := m.engine, m.session
 			m.engine, m.session = nil, nil
+			m.releasingEngine = true
 			m.statusText = "Engine released"
 			cmds = append(cmds, releaseEngineCmd(eng, sess))
 		}
@@ -1611,7 +1749,7 @@ func (m *model) applyStreamEvent(ev dsml.StreamEvent) tea.Cmd {
 			m.previewTick++
 			if strings.Contains(ev.Delta, "\n") || m.previewTick%15 == 0 {
 				if inc := extractIncrementalSVG(m.outputText); inc != nil {
-					return m.svgWidget.SetSVGData("incremental.svg", inc)
+					return m.setPreviewSVG("incremental.svg", inc)
 				}
 			}
 		}
@@ -1624,27 +1762,38 @@ func (m *model) applyStreamEvent(ev dsml.StreamEvent) tea.Cmd {
 		m.liveCalls = append(m.liveCalls, len(m.toolCalls)-1)
 
 	case dsml.EventToolCallArgumentsDelta:
-		if ev.Index < len(m.liveCalls) {
-			entry := m.liveCalls[ev.Index]
-			m.toolCalls[entry].args = truncateJSON(m.toolCalls[entry].args+ev.Delta, 120)
+		if entry := m.liveToolCall(ev.Index); entry != nil {
+			entry.args = truncateJSON(entry.args+ev.Delta, 120)
 		}
 
 	case dsml.EventToolCallEnd:
-		if ev.Index >= len(m.liveCalls) {
+		entry := m.liveToolCall(ev.Index)
+		if entry == nil {
 			break
 		}
-		entry := m.liveCalls[ev.Index]
-		m.toolCalls[entry].args = truncateJSON(ev.Arguments, 120)
-		if m.toolCalls[entry].name == "svg_append" {
+		entry.args = truncateJSON(ev.Arguments, 120)
+		if entry.name == "svg_append" {
 			if chunk := chunkFromArgs(ev.Arguments); chunk != "" {
 				m.previewPending = append(m.previewPending, chunk)
 			}
 			if inc := previewSVG(m.previewBase, m.previewPending); inc != nil {
-				return m.svgWidget.SetSVGData("incremental.svg", inc)
+				return m.setPreviewSVG("incremental.svg", inc)
 			}
 		}
 	}
 	return nil
+}
+
+// Stale or malformed stream indices must not index into a replaced panel.
+func (m *model) liveToolCall(index int) *toolCallEntry {
+	if index < 0 || index >= len(m.liveCalls) {
+		return nil
+	}
+	entry := m.liveCalls[index]
+	if entry < 0 || entry >= len(m.toolCalls) {
+		return nil
+	}
+	return &m.toolCalls[entry]
 }
 
 // runTurn executes one full multi-round tool-calling turn through the
@@ -1669,21 +1818,42 @@ func (m model) runTurn(ctx context.Context, ch chan<- tea.Msg) {
 	defer cancel()
 	guard := newRunawayGuard()
 	runaway := false
+	promptPos := 0
+	vision := m.visual.Mode != "off" && m.engine != nil && m.engine.HasVision()
+	if m.visual.Mode == "on" && !vision {
+		ch <- turnDoneMsg{err: fmt.Errorf("visual review requires a vision-capable model with its encoder loaded; check --model and --vision")}
+		return
+	}
+	var images *ds4.ImageEncoder
+	if vision {
+		images = ds4.NewImageEncoder(m.engine)
+		defer images.SetLimits(0, 0) // release cached embeddings before the engine can close
+	}
 
 	driver := bubble.NewGenerationDriver(bubble.DriverOptions{
 		Engine:    m.engine,
 		Session:   m.session,
 		Tools:     m.tools,
-		ThinkMode: m.thinkMode,
+		Images:    images,
+		ThinkMode: m.activeReasoning(),
 		MaxRounds: m.maxToolRounds + 1, // tool rounds plus the final answer turn
 		// Auto-correct retries run on a smaller budget so a degenerate retry
 		// fails fast and three of them cannot fill the session context.
-		MaxTokens: turnMaxTokens(m.autoCorrectCount),
+		MaxTokens:   turnMaxTokens(m.autoCorrectCount),
+		Temperature: m.sampling.Temp,
+		TopP:        m.sampling.TopP,
+		Seed:        m.sampling.effectiveSeed(),
 		ExecuteTools: func(ctx context.Context, calls []ds4.ToolCall) ([]ds4.ChatMessage, error) {
-			return m.tools.ExecuteToolCalls(ctx, calls)
+			return executeSVGTools(ctx, m.tools, calls, vision)
 		},
+		PrepareHistory:    prepareSVGHistory,
+		ContextFeedback:   svgContextFeedback,
+		MinResponseTokens: svgMinResponseTokens,
 		OnEvent: func(e bubble.Event) {
 			switch ev := e.(type) {
+			case bubble.ContextUsageEvent:
+				promptPos = ev.PromptTokens
+				ch <- ev
 			case bubble.TokenEvent:
 				if !runaway && guard.feed(ev.Text) {
 					runaway = true
@@ -1710,12 +1880,31 @@ func (m model) runTurn(ctx context.Context, ch chan<- tea.Msg) {
 		},
 	})
 
-	res, err := driver.RunWithPrompt(genCtx, m.systemPrompt(), m.history)
+	run := func(ctx context.Context, history []ds4.ChatMessage) (bubble.RunResult, error) {
+		return driver.RunWithPrompt(ctx, m.systemPrompt(), history)
+	}
+	var res bubble.RunResult
+	var err error
+	report := visualReport{Passes: m.visualPasses, Status: "visual review off"}
+	if vision {
+		res, report, err = runWithVisualReview(genCtx, filepath.Join(m.workDir, "draft.svg"), m.history,
+			m.visual.MaxPasses, m.visualPasses, run, func(pass int) {
+				ch <- visualReviewMsg{pass: pass, limit: m.visual.MaxPasses}
+			})
+	} else {
+		if m.visual.Mode != "off" {
+			report.Status = "visual review unavailable (text-only engine)"
+		}
+		res, err = run(genCtx, withoutVisualImages(m.history))
+	}
 	if runaway {
 		// The guard canceled genCtx, so the driver returns context.Canceled;
 		// translate it to errRunaway so the turn handler reports it as a
 		// runaway (not a user abort) and skips auto-correction.
 		err = errRunaway
+	}
+	if images != nil {
+		images.SetLimits(0, 0) // finish cleanup before turnDone can trigger engine release
 	}
 	// The session can be nil when a turn starts against a released engine
 	// (e.g. an auto-correct restart racing an `x` release); the driver
@@ -1724,7 +1913,10 @@ func (m model) runTurn(ctx context.Context, ch chan<- tea.Msg) {
 	if m.session != nil {
 		ctxPos = m.session.Pos()
 	}
-	ch <- turnDoneMsg{result: res, err: err, ctxPos: ctxPos}
+	if errors.Is(err, bubble.ErrContextBudget) {
+		ctxPos = promptPos // rejected prompt was never synced into the session
+	}
+	ch <- turnDoneMsg{result: res, err: err, ctxPos: ctxPos, visual: report}
 }
 
 func (m model) systemPrompt() string {
@@ -1732,19 +1924,21 @@ func (m model) systemPrompt() string {
 
   svg_clear() -> "Draft cleared." (refused once the draft has content; edit instead of clearing)
   svg_read(start_line?: int, end_line?: int) -> Draft lines, numbered "NNN | content".
-  svg_append(chunk: string) -> "Chunk appended successfully."
+  svg_append(chunk: string) -> Appends while the root is open; reports whether the root is now closed. Refuses content after a closed root without changing the draft.
   svg_replace(target: string, replacement: string) -> "Target substring replaced successfully."
   svg_replace_lines(start_line: int, end_line: int, replacement: string) -> "Lines replaced successfully."
   svg_validate() -> "Valid: …" on success, "Invalid:\n<diagnostic>" on failure. Checks XML syntax AND renders with the real rasterizer.
+  svg_preview() -> Image of the current complete draft on white, or text diagnostics if unavailable. Inspect it for visual problems; it does not edit the draft.
 
 Line numbers in svg_read output and svg_validate diagnostics match svg_replace_lines arguments. The "NNN | " prefix is display-only: NEVER include it in svg_append chunks or svg_replace targets/replacements.
 
 Workflow for every user request:
 
-1. At the start of a new request the draft is already empty; construct the SVG by appending chunks using svg_append. (Do NOT call svg_clear if you are correcting, editing, or validating an existing draft — it will be refused.)
+1. At the start of a new request the draft is already empty; construct the SVG by appending chunks using svg_append. Open <svg> in the first chunk, leave it open between chunks, and write the single closing </svg> only after all drawing elements. If the root is already closed, use replacement tools to insert elements before its closing tag; do not append to the end of the file. (Do NOT call svg_clear if you are correcting, editing, or validating an existing draft — it will be refused.)
 2. Validate the drafted SVG by calling svg_validate.
 3. If it returns "Invalid:", read the diagnostic — it includes the error line number and a numbered snippet. Use svg_replace or svg_replace_lines to make a MINIMAL fix to just those lines (use svg_read on a small range for more context if needed), then call svg_validate again. Do NOT clear the draft and do NOT rebuild it from scratch.
-4. When svg_validate returns "Valid:", emit your final response. You do not need to output the complete SVG in your text response if it has been written to the draft, but confirm completion to the user.
+4. When the draft is valid and vision feedback is available, use svg_preview to inspect composition, clipping, and labels. Make targeted corrections and validate again; preview the revision when needed. If a preview reports that vision is unavailable, continue with text validation and do not repeatedly request it. During an application-requested visual review, inspect the attached image first; request another preview only after edits or when needed. Preview calls use the normal tool-round budget.
+5. When satisfied, emit your final response. You do not need to output the complete SVG in your text response if it has been written to the draft, but confirm completion to the user.
 
 The SVG must include xmlns="http://www.w3.org/2000/svg" and be self-contained.
 
@@ -1754,7 +1948,14 @@ Tips for successful generation:
 - XML comments (e.g., <!-- comment -->) are welcome, but they should be used sparingly (limitedly), kept concise/non-verbose, always properly closed/terminated, and only included when helpful for context.
 - Do NOT use rgba(r, g, b, a) color strings in fill or stroke attributes, as this format is unsupported by the Go color parser. Use hex values or standard rgb(r, g, b) instead, and specify opacity using fill-opacity or stroke-opacity attributes (e.g., fill="rgb(255,200,100)" fill-opacity="0.15").
 - Keep your thoughts inside the <think>...</think> block concise, focusing primarily on the visual design, coordinate mapping, and SVG structures. Do NOT output long mathematical derivations or conversational explanations outside the tool calls.
-- Always output tool calls using the exact XML syntax: <｜DSML｜invoke name="tool_name"> and </｜DSML｜invoke>. Do not make typos in the tag names (e.g., do not write DSLI, DSigname, or DSML incorrectly).`
+- Use the tool-call syntax supplied by the tool definitions.
+- When application visual feedback includes a rendered image, inspect that image before deciding whether edits are needed. Syntax validity alone does not establish visual quality. A review request continues the existing draft; do not clear it. Explain visible issues briefly, make targeted corrections, and validate again.`
+	base += fmt.Sprintf("\n\nRuntime limits: each drafting or review phase permits up to %d tool-capable rounds, followed by one final-answer turn without tools. One round is one assistant tool-call batch; multiple calls can share a round. Syntax-repair retries also consume rounds. Application budget messages report what remains; prioritize finishing a valid drawing within that budget. Context capacity is a separate token budget shared across drafting, tools, reasoning, images, and reviews. Heed application context warnings: stop adding detail as space runs low and finish a valid draft with a concise final response. A context checkpoint means continue the existing file, inspecting it again because the prior tool transcript was discarded.", m.maxToolRounds)
+	if m.visual.Mode != "off" && m.engine != nil && m.engine.HasVision() {
+		base += fmt.Sprintf("\nVision feedback is available through svg_preview. Automatic visual review allows up to %d passes per request, separately from the tool-round budget. Its messages identify the current pass and final pass.", m.visual.MaxPasses)
+	} else {
+		base += "\nVision feedback is unavailable for this run. Use svg_validate for text diagnostics; do not request svg_preview."
+	}
 	if m.yoloMode {
 		base += `
 
@@ -1991,6 +2192,9 @@ func (m model) kittyBadge() string {
 // basename says nothing about the actual model — falling back to the
 // file's basename.
 func (m model) modelDisplayName() string {
+	if m.modelPath == "" {
+		return "choose model"
+	}
 	if m.modelInfo != nil && m.modelInfo.Alias != "" {
 		return m.modelInfo.Alias
 	}
@@ -2014,9 +2218,12 @@ func (m model) thinkModeLabel() string {
 // async work); otherwise a fresh load is started. The single svgWidget
 // is mutated in place — never swapped for a cached copy.
 func (m *model) loadEntryCmd() tea.Cmd {
-	if m.entryIndex < 0 || m.entryIndex >= len(m.entries) {
+	// A resize's deferred load can arrive after generation starts. Never
+	// replace live panel entries while stream/result messages refer to them.
+	if m.generating || m.entryIndex < 0 || m.entryIndex >= len(m.entries) {
 		return nil
 	}
+	m.entryLoaded = true
 	e := m.entries[m.entryIndex]
 	m.thinkText = e.think
 	m.outputText = entryText(e)
@@ -2025,13 +2232,14 @@ func (m *model) loadEntryCmd() tea.Cmd {
 	m.toolCalls = make([]toolCallEntry, len(e.toolCalls))
 	copy(m.toolCalls, e.toolCalls)
 	m.input.SetValue(e.prompt)
-	if e.filename != "" {
+	if e.filename != "" && m.cache != nil {
 		if cached, ok := m.cache.Get(e.filename); ok {
+			m.displayedSVG = string(e.svgData)
 			return m.svgWidget.SetImageAndRenderer(cached.img, cached.renderer, cached.doc)
 		}
 	}
 	if len(e.svgData) > 0 {
-		return m.svgWidget.SetSVGData(e.filename, e.svgData)
+		return m.setPreviewSVG(e.filename, e.svgData)
 	}
 	return nil
 }
@@ -2064,7 +2272,7 @@ func (m model) svgWidth() int {
 // svgHeight returns the content height for the SVG widget, accounting for the
 // thinking box and error bars when visible.
 func (m model) svgHeight() int {
-	h := m.height - headerH - footerH - inputH
+	h := m.height - headerH - footerH - settingsH - inputH
 	if m.showThinking {
 		h -= m.thinkBoxH + 2 // + border
 	}
@@ -2112,6 +2320,9 @@ func (m model) View() tea.View {
 }
 
 func (m model) render() string {
+	if m.modelPicker.IsOpen() {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, m.modelPicker.View(m.width-4, m.height-2))
+	}
 	if m.width == 0 || m.height == 0 {
 		return ""
 	}
@@ -2139,7 +2350,14 @@ func (m model) render() string {
 		modelName = modelName[:17] + "..."
 	}
 	status := m.statusText
-	if m.errText != "" {
+	metrics := m.headerMetrics()
+	if m.switchingModel {
+		status = m.bicycleSpinner() + " " + m.statusText
+		if !m.switchStarted.IsZero() {
+			status += " " + fmtDuration(time.Since(m.switchStarted))
+		}
+		metrics = ""
+	} else if m.errText != "" {
 		cleanErr := strings.ReplaceAll(m.errText, "\n", " | ")
 		status = "Error: " + cleanErr
 		if len(status) > 40 {
@@ -2162,14 +2380,14 @@ func (m model) render() string {
 		m.width,
 		fmt.Sprintf(" svgpad │ %s │ ", modelName),
 		status,
-		m.headerMetrics(),
+		metrics,
 		engineinit.Badge(m.lifecycle.status)+" "+m.kittyBadge(),
 	)
 
 	// Footer
 	// Footer help bar — swaps with mode (edit vs command) via the shared
 	// editmode keymap; the full key reference lives in the ? overlay.
-	footerContent := " " + m.keymap().FooterText(m.input.Focused())
+	footerContent := m.footerText()
 	footer := lipgloss.NewStyle().
 		Background(lipgloss.Color("236")).
 		Foreground(lipgloss.Color("252")).
@@ -2295,20 +2513,7 @@ func (m model) render() string {
 		sections = append(sections, errStyle.Render(msg))
 	}
 	if m.showThinking {
-		var thinkContent string
-		if m.thinkText != "" && m.outputText != "" {
-			thinkContent = m.thinkText + "\n─────────────────\n" + m.outputText
-		} else if m.thinkText != "" {
-			thinkContent = m.thinkText
-		} else if m.outputText != "" {
-			thinkContent = m.outputText
-		} else {
-			if m.thinkMode == ds4.ThinkNone {
-				thinkContent = "(reasoning off — r to enable in command mode)"
-			} else {
-				thinkContent = "…"
-			}
-		}
+		thinkContent := m.activityContent()
 
 		// Two side-by-side panels — reasoning / tools — laid
 		// out side-by-side using lipgloss.JoinHorizontal.
@@ -2385,8 +2590,14 @@ func (m model) render() string {
 		inputStyle = inputStyle.BorderForeground(lipgloss.Color("75"))
 	}
 	inputContent := inputStyle.Render(m.input.View())
-	sections = append(sections, inputContent, footer)
+	sections = append(sections, m.settingsStrip(), inputContent, footer)
 
+	if m.showSettings {
+		return m.settingsOverlay()
+	}
+	if m.showDrawings {
+		return m.drawingsOverlay()
+	}
 	if m.showHelp {
 		return m.helpOverlay()
 	}
@@ -2412,8 +2623,12 @@ func (m model) bicycleSpinner() string {
 	right := strings.Repeat(" ", track-p)
 	spinner := "[" + left + bike + right + "]"
 	// Bright background so the emojis pop on dark terminals.
+	background := "220" // yellow while generating
+	if m.switchingModel {
+		background = "75"
+	} // blue while loading a model
 	return lipgloss.NewStyle().
-		Background(lipgloss.Color("220")).
+		Background(lipgloss.Color(background)).
 		Foreground(lipgloss.Color("0")).
 		Bold(true).
 		Render(spinner)
@@ -2493,7 +2708,7 @@ var (
 	infoDimStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 )
 
-func (m model) infoOverlay() string {
+func (m model) infoLines() []string {
 	ctxPct := 0
 	if m.ctxSize > 0 {
 		ctxPct = m.ctxPos * 100 / m.ctxSize
@@ -2550,6 +2765,8 @@ func (m model) infoOverlay() string {
 	row("backend", m.backend)
 	row("context", fmt.Sprintf("%d tokens", m.ctxSize))
 	row("reasoning", strings.TrimSpace(m.thinkModeLabel()))
+	row("tool budget", fmt.Sprintf("%d rounds per drafting/review phase (--tool-rounds)", m.maxToolRounds))
+	row("reviews", fmt.Sprintf("up to %d image passes per request (%s); [ / ] to adjust", m.visual.MaxPasses, m.visual.Mode))
 	ctxMode := "cleared per generation"
 	if m.preserveContext {
 		ctxMode = "preserved across generations"
@@ -2580,48 +2797,7 @@ func (m model) infoOverlay() string {
 		row("hint", "DS4_MTP_SPEC_LOG=1  miss logging → stderr")
 		row("hint", "DS4_MTP_CONF_LOG=1  confidence log → stderr")
 	}
-	b.WriteString("\n" + infoDimStyle.Render("  press any key to close"))
-
-	box := titledBox(lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		Padding(0, 1).
-		MaxWidth(m.width).
-		MaxHeight(m.height).
-		Render(b.String()), "ds4 · info")
-
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
-}
-
-// keymap builds the swapping footer bindings for the current state. The
-// Edit list is DefaultEditBindings() with {ctrl+n log} spliced before quit
-// so the log overlay key is discoverable while typing. The Command list is
-// a compact subset of the global commands — the full key reference lives
-// in the ? help overlay.
-func (m model) keymap() editmode.Keymap {
-	def := editmode.DefaultEditBindings()
-	edit := make([]editmode.Binding, 0, len(def)+1)
-	edit = append(edit, def[:len(def)-1]...)
-	edit = append(edit, editmode.Binding{Keys: "ctrl+n", Desc: "log"})
-	edit = append(edit, def[len(def)-1])
-
-	cmd := []editmode.Binding{
-		{Keys: "e", Desc: "edit"},
-		{Keys: "n", Desc: "new"},
-		{Keys: "c", Desc: "continue"},
-		{Keys: "g", Desc: "glyph"},
-		{Keys: "t", Desc: "think"},
-		{Keys: "r", Desc: "reason:" + strings.TrimSpace(m.thinkModeLabel())},
-		{Keys: "y", Desc: "yolo"},
-		{Keys: "p", Desc: "preserve"},
-		{Keys: "i", Desc: "image info"},
-		{Keys: "m", Desc: "info"},
-		{Keys: "x", Desc: "release"},
-		{Keys: "?", Desc: "help"},
-		{Keys: "ctrl+n", Desc: "log"},
-		{Keys: "< / >", Desc: "power"},
-		{Keys: "ctrl+c", Desc: "quit"},
-	}
-	return editmode.Keymap{Edit: edit, Command: cmd}
+	return strings.Split(b.String(), "\n")
 }
 
 // logPageSize is the per-page scroll distance used by pgup/pgdown in the
@@ -2725,8 +2901,11 @@ func (m model) logOverlay() string {
 	if !following {
 		mode = "FROZEN"
 	}
-	hint := fmt.Sprintf("  up/down · pgup/pgdown scroll · esc close   [%s %d/%d]",
+	hint := fmt.Sprintf("  ↑/↓ · PgUp/PgDown scroll · Ctrl+Y copy · Esc close   [%s %d/%d]",
 		mode, start, maxTop)
+	if m.copyNotice != "" {
+		hint = m.copyNotice
+	}
 	body += "\n\n" + infoDimStyle.Render(hint)
 
 	box := titledBox(lipgloss.NewStyle().
@@ -2739,50 +2918,31 @@ func (m model) logOverlay() string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
-func (m model) helpOverlay() string {
-	var b strings.Builder
-	b.WriteString("Keyboard shortcuts\n\n")
-	b.WriteString("Command mode (edit box not targeted)\n")
-	b.WriteString("  e          edit prompt (target the box)\n")
-	b.WriteString("  n          new prompt\n")
-	b.WriteString("  c          continue generating or correct SVG\n")
-	b.WriteString("  g          toggle glyph/image render mode\n")
-	b.WriteString("  t          toggle thinking/output box\n")
-	b.WriteString("  r          cycle reasoning mode (OFF → HIGH → MAX)\n")
-	b.WriteString("  y          toggle YOLO auto-prompt mode\n")
-	b.WriteString("  i          toggle image info pane\n")
-	b.WriteString("  < / >      adjust GPU throttle power (-/+ 10%)\n")
-	b.WriteString("  m          show model & metrics info\n")
-	b.WriteString("  ? / h      show this help\n\n")
-	b.WriteString("Edit mode (edit box targeted)\n")
-	b.WriteString("  enter      send prompt\n")
-	b.WriteString("  esc        escape to command mode\n")
-	b.WriteString("  ctrl+a/e   line start / line end\n")
-	b.WriteString("  ctrl+w     delete word back\n\n")
-	b.WriteString("Global (work in either mode)\n")
-	b.WriteString("  ctrl+n     libds4 log overlay\n")
-	b.WriteString("  ctrl+plus  enlarge thinking box\n")
-	b.WriteString("  ctrl+minus shrink thinking box\n")
-	b.WriteString("  shift+up   shrink thinking box\n")
-	b.WriteString("  shift+down enlarge thinking box\n")
-	b.WriteString("  shift+left shrink think panel\n")
-	b.WriteString("  shift+right enlarge think panel\n")
-	b.WriteString("  tab/shift+tab cycle focus (input → SVG → think → tools)\n")
-	b.WriteString("  up/down/left/right scroll or pan focused panel\n")
-	b.WriteString("  pgup/pgdown or k/j previous/next SVG in session\n")
-	b.WriteString("  +/-/0      zoom in / zoom out / reset (when SVG pane is focused)\n")
-	b.WriteString("  ctrl+q     quit\n")
-	b.WriteString("  ctrl+c     quit\n")
-	b.WriteString("\n" + infoDimStyle.Render("  press any key to close"))
-
-	box := titledBox(lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		Padding(0, 1).
-		MaxWidth(m.width).
-		MaxHeight(m.height).
-		Render(b.String()), "svgpad · help")
-
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+func (m model) helpLines() []string {
+	var lines []string
+	lines = append(lines, "Available shortcuts for the current focus", "")
+	for _, group := range []string{"Prompt", "Run", "Workspace", "Panel", "Inspect", "Layout"} {
+		var rows []string
+		for _, action := range m.actions(m.input.Focused()) {
+			if action.Group != group {
+				continue
+			}
+			line := fmt.Sprintf("%-18s %s", strings.Join(action.Keys, "/"), action.Label)
+			if action.Disabled != "" {
+				line += " · unavailable: " + action.Disabled
+			}
+			rows = append(rows, line)
+		}
+		if len(rows) > 0 {
+			lines = append(lines, infoHeadStyle.Render(group))
+			lines = append(lines, rows...)
+			lines = append(lines, "")
+		}
+	}
+	if m.input.Focused() {
+		lines = append(lines, "", "ctrl+a/e  line start/end", "ctrl+w    delete word")
+	}
+	return lines
 }
 
 // titledBox splices a title into the top border of a lipgloss-rendered box,
