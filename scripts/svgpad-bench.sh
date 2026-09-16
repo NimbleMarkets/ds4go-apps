@@ -13,6 +13,10 @@
 #                                             # (needs an installed vision model)
 # Compare: paste the CSVs side by side; seeds are pinned so both machines do
 # the same nominal work (backend float differences can still diverge output).
+#
+# Run on a quiet machine: residual GPU/unified memory from a prior engine or
+# a resident ollama model (`ollama stop <model>`) inflates engine-open time
+# or fails it outright with "ds4_engine_open failed with ds4 status 1".
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${BIN:-$REPO/bin/ds4go-svgpad}"
