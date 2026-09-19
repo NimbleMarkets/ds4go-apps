@@ -94,6 +94,22 @@ task run:glyphpad
 
 Type natural-language prompts to generate Unicode patterns, box-drawing diagrams, or pixel-art-style blocks. Use the modal edit box (`Ctrl+E`) to refine selections.
 
+Glyphpad and Cadpad now share **F1** help, **F2** run settings, **Ctrl+R**
+reasoning, **Ctrl+O** model selection, **Ctrl+Y** pane copying, and
+**Tab/Shift+Tab** focus traversal including the prompt. Settings changed during
+inference apply to the next request; loading locks settings. Engine loading is
+lazy, preserves queued prompts, and shows the bicycle animation. Logs remain
+available with **Ctrl+N**. Clipboard writes require OSC 52 terminal support.
+
+Both accept `--temp` (default 0.7), `--top-p` (0.95), and `--seed` (0 chooses a
+fresh seed per request). Cadpad also accepts `--tool-rounds` (default 36), with
+an additional final-answer turn, and Escape cancels its current run. Model
+switching preserves the drawing/program or CAD world. Cadpad's viewport copy
+is a textual world description; Glyph's canvas copy is the complete glyph grid.
+
+The remaining saved-work, visual-review, and headless rollout is tracked in
+[PAD-ROLLOUT.md](PAD-ROLLOUT.md).
+
 ### svgpad — SVG Scratchpad
 
 ```bash

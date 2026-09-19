@@ -24,6 +24,9 @@ import (
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/world"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
 	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
+	"github.com/NimbleMarkets/ds4go-apps/internal/modelpicker"
+	"github.com/NimbleMarkets/ds4go-apps/internal/padui"
+	"github.com/NimbleMarkets/ds4go-apps/internal/runconfig"
 	"github.com/NimbleMarkets/ntcharts/v2/picture"
 )
 
@@ -64,6 +67,8 @@ type camSettleMsg struct{ epoch int }
 type gpuWarmedUpMsg struct{}
 
 type toolDoneMsg struct {
+	history   []ds4.ChatMessage
+	ctxPos    int
 	text      string
 	err       error
 	reasoning string
@@ -73,10 +78,6 @@ type statusMsg string
 
 type driverEventMsg struct {
 	e bubble.Event
-}
-
-type generationStartedMsg struct {
-	ch chan tea.Msg
 }
 
 // kittyAutoToggleMsg triggers a one-time check to enable Kitty graphics
@@ -100,6 +101,14 @@ const (
 
 // model is the Bubble Tea root.
 type model struct {
+	controls      padui.Model
+	picker        modelpicker.Model
+	loading       padui.Loading
+	runOptions    runconfig.Options
+	pendingSubmit bool
+	mtpEnabled    bool
+	activeThink   ds4.ThinkMode
+
 	w        *world.World
 	renderer *render.Renderer
 	proj     render.Projection
@@ -126,6 +135,8 @@ type model struct {
 	tools     *ds4.ToolRegistry
 	thinkMode ds4.ThinkMode
 	maxRounds int
+	history   []ds4.ChatMessage
+	ctxPos    int
 
 	pic    picture.Model
 	input  textinput.Model
@@ -159,8 +170,11 @@ type model struct {
 	lastThinking  string
 	lastLuaOutput string
 
-	inferencing  bool
-	spinnerFrame int
+	inferencing   bool
+	gen           *bubble.Generation
+	quitRequested bool
+	opening       bool
+	spinnerFrame  int
 
 	lifecycle engineLifecycle
 	ctxSize   int
@@ -173,8 +187,6 @@ type model struct {
 	lastActiveLua string
 	luaEntries    []luaEntry
 	luaEntryIndex int
-
-	genCh chan tea.Msg
 
 	generationLog []string
 	genRound      int // current round number during generation
@@ -245,25 +257,28 @@ func newModel(app *appinit.App) model {
 	})
 
 	m := model{
-		w:         w,
-		renderer:  rend,
-		proj:      render.ProjAngle,
-		lib:       lib,
-		engOpts:   engOpts,
-		ctxSize:   ctxSize,
-		modelPath: modelPath,
-		backend:   backend,
-		logger:    logger,
-		logBuf:    logBuf,
-		debug:     debug,
-		input:     ti,
-		pic:       pic,
-		tools:     ds4.NewToolRegistry(),
-		thinkMode: ds4.ThinkNone,
-		maxRounds: 36,
-		lifecycle: engineLifecycle{status: engineinit.StatusDormant},
-		status:    "Ready. Type a modeling request or /create box base 4 3 2",
-		logTop:    -1,
+		w:          w,
+		renderer:   rend,
+		proj:       render.ProjAngle,
+		lib:        lib,
+		mtpEnabled: app.Flags.MTP != "none",
+		runOptions: runconfig.Options{Temperature: .7, TopP: .95, ToolRounds: 36},
+		engOpts:    engOpts,
+		ctxSize:    ctxSize,
+		modelPath:  modelPath,
+		backend:    backend,
+		opening:    false,
+		logger:     logger,
+		logBuf:     logBuf,
+		debug:      debug,
+		input:      ti,
+		pic:        pic,
+		tools:      ds4.NewToolRegistry(),
+		thinkMode:  ds4.ThinkNone,
+		maxRounds:  36,
+		lifecycle:  engineLifecycle{status: engineinit.StatusDormant},
+		status:     "Ready. Type a modeling request or /create box base 4 3 2",
+		logTop:     -1,
 		// Default orbit matches the old hardcoded corner view.
 		camAzimuth:     0.61,
 		camElevation:   0.46,
@@ -425,11 +440,8 @@ func (m model) Init() tea.Cmd {
 		m.warmUpGPUCmd(),
 	}
 
-	if m.lib != nil {
-		cmds = append(cmds, func() tea.Msg {
-			res := engineinit.Open(m.lib, m.engOpts, m.ctxSize)
-			return engineReadyMsg(res)
-		})
+	if m.lib != nil && m.modelPath == "" {
+		cmds = append(cmds, func() tea.Msg { return chooseModelMsg{} })
 	}
 
 	return tea.Batch(cmds...)

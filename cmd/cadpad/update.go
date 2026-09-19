@@ -13,10 +13,18 @@ import (
 	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/render"
 	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
+	"github.com/NimbleMarkets/ds4go-apps/internal/modelpicker"
+	"github.com/NimbleMarkets/ds4go-apps/internal/padui"
 	"github.com/NimbleMarkets/ntcharts/v2/picture"
 )
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if m.controls.Kind != "" || m.picker.IsOpen() || m.showLog || m.showHelp {
+		switch msg.(type) {
+		case tea.MouseClickMsg, tea.MouseReleaseMsg, tea.MouseMotionMsg, tea.MouseWheelMsg:
+			return m, nil
+		}
+	}
 	switch msg.(type) {
 	case tea.MouseMotionMsg, tea.MouseWheelMsg:
 		// Do not invalidate view cache for high frequency camera adjustments
@@ -27,6 +35,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case chooseModelMsg:
+		cmd := m.picker.Open(m.modelPath, nil)
+		return m, cmd
+	case modelpicker.LoadedMsg:
+		var cmd tea.Cmd
+		m.picker, cmd = m.picker.Update(msg)
+		return m, cmd
+	case modelpicker.SelectedMsg:
+		cmd := m.selectModel(msg.Model)
+		return m, cmd
+	case padui.LoadingTick:
+		cmd := m.loading.Update(msg)
+		return m, cmd
+
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 		m = m.resize()
@@ -73,17 +95,32 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, cmd)
 
 	case engineReadyMsg:
+		m.loading.Active = false
+		m.opening = false
+		if m.quitRequested {
+			m.engine, m.session = msg.Engine, msg.Session
+			return m, tea.Quit
+		}
 		if msg.Err != nil {
 			m.lifecycle.status = engineinit.StatusError
 			m.lifecycle.err = msg.Err
 			m.status = "engine error: " + msg.Err.Error()
+			m.pendingSubmit = false
 			m.logger.Printf("engine open failed: %v", msg.Err)
 		} else if m.lib != nil && msg.Engine != nil {
 			m.lifecycle.status = engineinit.StatusReady
+			m.lifecycle.err = nil
+			m.lastErr = ""
 			m.engine = msg.Engine
 			m.session = msg.Session
+			m.ctxSize, m.ctxPos = msg.Session.Ctx(), 0
 			m.status = "GPU ready · LLM commands enabled"
 			m.logger.Printf("engine ready (hasMTP=%v)", msg.HasMTP)
+			if m.pendingSubmit {
+				m.pendingSubmit = false
+				cmd := m.submitInputCmd()
+				return m, cmd
+			}
 		}
 
 	case gpuWarmedUpMsg:
@@ -133,8 +170,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case toolDoneMsg:
+		if len(msg.history) > 0 {
+			m.history = msg.history
+			m.ctxPos = msg.ctxPos
+		}
+		m.gen.Cancel()
 		m.inferencing = false
-		m.genCh = nil
 		m.genRound = 0
 		if msg.err != nil {
 			m.lastErr = msg.err.Error()
@@ -191,28 +232,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.spinnerFrame = 0
 		cmds = append(cmds, spinnerTick())
 
-	case generationStartedMsg:
-		m.genCh = msg.ch
-		m.inferencing = true
-		m.spinnerFrame = 0
-		m.showThinking = true
-		m.status = "generating with driver..."
-		m.logger.Printf("[GEN] started")
-		cmds = append(cmds, spinnerTick(), bubble.Wait(m.genCh))
-		// Auto-showing the LLM-output box shrinks bodyH(); refit the viewport.
-		if cmd := m.resizeViewport(); cmd != nil {
-			cmds = append(cmds, cmd)
-		}
-
 	case driverEventMsg:
 		m = m.handleDriverEvent(msg, &cmds)
-		if m.genCh != nil {
+		if m.gen != nil {
 			if !m.inferencing {
 				m.inferencing = true
 				m.spinnerFrame = 0
 				cmds = append(cmds, spinnerTick())
 			}
-			cmds = append(cmds, bubble.Wait(m.genCh))
+			cmds = append(cmds, m.gen.Wait())
 		}
 
 	case kittyAutoToggleMsg:
@@ -245,6 +273,32 @@ func (m *model) resizeViewport() tea.Cmd {
 }
 
 func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
+	if _, ok := msg.(tea.KeyReleaseMsg); ok {
+		return m, nil
+	}
+	k := msg.String()
+	if k == "ctrl+c" || k == "ctrl+q" || (k == "q" && !m.input.Focused() && !m.showHelp && !m.showLog && m.controls.Kind == "" && !m.picker.IsOpen()) {
+		m.quitRequested = true
+		m.gen.Cancel()
+		if m.opening {
+			m.status = "Waiting for engine loading before quitting…"
+			return m, nil
+		}
+		return m, tea.Quit
+	}
+	if m.quitRequested {
+		return m, nil
+	}
+	if press, ok := msg.(tea.KeyPressMsg); ok {
+		if handled, cmd := m.controlKey(press); handled {
+			return m, cmd
+		}
+	}
+	if k == "esc" && m.inferencing && !m.showHelp && !m.showLog {
+		m.gen.Cancel()
+		m.status = "Stopping…"
+		return m, nil
+	}
 	// Log overlay is modal.
 	if m.showLog {
 		switch msg.String() {
@@ -267,7 +321,7 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 
 	// Global quit / log toggle.
 	switch {
-	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c", "q"))):
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c", "ctrl+q"))):
 		return m, tea.Quit
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+n"))):
 		m.showLog = true
@@ -290,6 +344,10 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
 			if m.input.Value() != "" {
+				if m.inferencing {
+					m.status = "Wait for the current work to finish"
+					return m, nil
+				}
 				cmd := m.submitInputCmd()
 				m.input.Blur()
 				return m, cmd
@@ -314,7 +372,7 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 		return m, nil
 	case key.Matches(msg, key.NewBinding(key.WithKeys("e"))):
 		return m, m.input.Focus()
-	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c", "q"))):
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+c", "ctrl+q"))):
 		return m, tea.Quit
 	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+n"))):
 		m.showLog = true
@@ -397,9 +455,13 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("j"))):
 		// Selection follows the viewport: moving makes the object current
 		// and re-renders.
-		return m, m.selectObject(1)
+		if m.focus == focusViewport {
+			return m, m.selectObject(1)
+		}
 	case key.Matches(msg, key.NewBinding(key.WithKeys("k"))):
-		return m, m.selectObject(-1)
+		if m.focus == focusViewport {
+			return m, m.selectObject(-1)
+		}
 	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
 		if names := m.w.Names(); len(names) > 0 {
 			m.w.SetCurrent(names[m.selected])
@@ -512,6 +574,10 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.renderer.ClearCache()
 			return m, m.refreshPreview()
 		case key.Matches(msg, key.NewBinding(key.WithKeys("pgup"))):
+			if m.inferencing {
+				m.status = "Stop or finish generation before loading another script"
+				return m, nil
+			}
 			if len(m.luaEntries) > 0 && m.luaEntryIndex > 0 {
 				m.luaEntryIndex--
 				if cmd := m.loadLuaEntryCmd(); cmd != nil {
@@ -519,6 +585,10 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 				}
 			}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("pgdown"))):
+			if m.inferencing {
+				m.status = "Stop or finish generation before loading another script"
+				return m, nil
+			}
 			if len(m.luaEntries) > 0 && m.luaEntryIndex < len(m.luaEntries)-1 {
 				m.luaEntryIndex++
 				if cmd := m.loadLuaEntryCmd(); cmd != nil {
@@ -528,11 +598,11 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 	case focusThinking:
 		switch {
-		case key.Matches(msg, key.NewBinding(key.WithKeys("up"))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("up", "k"))):
 			m.thinkScroll++
 			m.status = fmt.Sprintf("thinking scroll %d", m.thinkScroll)
 			return m, nil
-		case key.Matches(msg, key.NewBinding(key.WithKeys("down"))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("down", "j"))):
 			if m.thinkScroll > 0 {
 				m.thinkScroll--
 			}
@@ -557,10 +627,10 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 		maxScroll := max(0, len(m.sourceLines)-page)
 		scrolled := false
 		switch {
-		case key.Matches(msg, key.NewBinding(key.WithKeys("up"))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("up", "k"))):
 			m.sourceScroll = min(maxScroll, m.sourceScroll+1)
 			scrolled = true
-		case key.Matches(msg, key.NewBinding(key.WithKeys("down"))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("down", "j"))):
 			m.sourceScroll = max(0, m.sourceScroll-1)
 			scrolled = true
 		case key.Matches(msg, key.NewBinding(key.WithKeys("pgup"))):
@@ -580,11 +650,11 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 	case focusLuaOutput:
 		switch {
-		case key.Matches(msg, key.NewBinding(key.WithKeys("up"))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("up", "k"))):
 			m.luaScroll++
 			m.status = fmt.Sprintf("lua scroll %d", m.luaScroll)
 			return m, nil
-		case key.Matches(msg, key.NewBinding(key.WithKeys("down"))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("down", "j"))):
 			if m.luaScroll > 0 {
 				m.luaScroll--
 			}
@@ -644,6 +714,9 @@ func (m model) handleDriverEvent(msg driverEventMsg, cmds *[]tea.Cmd) model {
 		return m
 	}
 	switch ev := msg.e.(type) {
+	case bubble.ContextUsageEvent:
+		m.ctxPos, m.ctxSize = ev.PromptTokens, ev.Capacity
+		m.logger.Printf("[CONTEXT] prompt=%d/%d remaining=%d", ev.PromptTokens, ev.Capacity, ev.Remaining())
 	case bubble.LogEvent:
 		entry := fmt.Sprintf("[%s] %s", ev.Level, ev.Message)
 		m.generationLog = append(m.generationLog, entry)

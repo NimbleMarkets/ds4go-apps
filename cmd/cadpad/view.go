@@ -33,6 +33,12 @@ func (m model) View() tea.View {
 	if m.width == 0 {
 		return tea.NewView("initializing...")
 	}
+	if m.picker.IsOpen() {
+		return tea.NewView(m.pickerView())
+	}
+	if m.controls.Kind != "" {
+		return tea.NewView(m.controls.View(m.width, m.height, m.settingRows(), m.controlActions()))
+	}
 	if m.showLog {
 		return tea.NewView(m.logOverlay())
 	}
@@ -104,6 +110,9 @@ func (m model) header() string {
 	left := brand + "  " + strings.Join(info, "  ")
 
 	status := ""
+	if m.loading.Active {
+		status = m.loading.View()
+	}
 	if m.inferencing {
 		status = m.robotSpinner()
 	}
@@ -348,7 +357,7 @@ func (m model) robotSpinner() string {
 }
 
 func (m model) helpLine() string {
-	return dimStyle.Render(" " + m.keymap().FooterText(m.input.Focused()))
+	return dimStyle.Render(m.controlFooter())
 }
 
 // flattenLine collapses all whitespace runs (including newlines) to single

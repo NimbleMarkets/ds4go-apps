@@ -22,6 +22,9 @@ import (
 	"github.com/NimbleMarkets/ds4go-apps/internal/editmode"
 	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
 	"github.com/NimbleMarkets/ds4go-apps/internal/headerbar"
+	"github.com/NimbleMarkets/ds4go-apps/internal/modelpicker"
+	"github.com/NimbleMarkets/ds4go-apps/internal/padui"
+	"github.com/NimbleMarkets/ds4go-apps/internal/runconfig"
 	"github.com/NimbleMarkets/ntcharts/v2/canvas"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -53,6 +56,16 @@ type engineReadyMsg engineinit.Result
 // ── model ────────────────────────────────────────────────────────────────────
 
 type model struct {
+	controls      padui.Model
+	paneFocus     int
+	resumeDrawing bool
+	picker        modelpicker.Model
+	loading       padui.Loading
+	runOptions    runconfig.Options
+	pendingSubmit bool
+	mtpEnabled    bool
+	activeThink   ds4.ThinkMode
+
 	width, height    int
 	canvasW, canvasH int // locked canvas content size — the LLM's coordinate space
 
@@ -73,13 +86,14 @@ type model struct {
 	logBuf       *ds4log.Buffer // captured libds4 diagnostics
 	logTop       int            // absolute first-visible line; -1 = follow tail
 
-	history    []chatMsg
-	rawBuf     []byte             // raw LLM response for the current turn
-	gen        *bubble.Generation // in-flight generation; nil when idle
-	generating bool
-	statusText string
-	errText    string
-	lastErr    error
+	history       []chatMsg
+	rawBuf        []byte             // raw LLM response for the current turn
+	gen           *bubble.Generation // in-flight generation; nil when idle
+	generating    bool
+	quitRequested bool
+	statusText    string
+	errText       string
+	lastErr       error
 
 	parser    *Parser
 	canvas    canvas.Model
@@ -125,8 +139,10 @@ func newModel(app *appinit.App) model {
 	wd, _ := os.Getwd()
 	return model{
 		lib:          lib,
+		mtpEnabled:   app.Flags.MTP != "none",
+		runOptions:   runconfig.Options{Temperature: .7, TopP: .95, ToolRounds: 20},
 		engOpts:      engOpts,
-		engineStatus: engineinit.StatusInit,
+		engineStatus: engineinit.StatusDormant,
 		modelPath:    modelPath,
 		mtpPath:      mtpPath,
 		backend:      backend,
@@ -134,7 +150,7 @@ func newModel(app *appinit.App) model {
 		parser:       NewParser(),
 		canvas:       canvas.New(40, 20),
 		input:        ti,
-		statusText:   "GPU initializing…",
+		statusText:   "Ready · engine loads on first request",
 		showThinking: true,
 		thinkBoxH:    defaultThinkBox,
 		thinkMode:    ds4.ThinkNone,
@@ -150,19 +166,29 @@ func newModel(app *appinit.App) model {
 // ── BubbleTea interface ───────────────────────────────────────────────────────
 
 func (m model) Init() tea.Cmd {
-	// Open the engine and session in the goroutine bubbletea spawns for
-	// this Cmd. Until engineReadyMsg lands the TUI is fully interactive
-	// but submissions are gated; the badge shows the init/ready state.
-	lib, opts, ctxSize := m.lib, m.engOpts, m.ctxSize
-	return func() tea.Msg {
-		return engineReadyMsg(engineinit.Open(lib, opts, ctxSize))
+	if m.modelPath == "" {
+		return func() tea.Msg { return chooseModelMsg{} }
 	}
+	return nil
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
+	case chooseModelMsg:
+		cmd := m.picker.Open(m.modelPath, nil)
+		return m, cmd
+	case modelpicker.LoadedMsg:
+		var cmd tea.Cmd
+		m.picker, cmd = m.picker.Update(msg)
+		return m, cmd
+	case modelpicker.SelectedMsg:
+		cmd := m.selectModel(msg.Model)
+		return m, cmd
+	case padui.LoadingTick:
+		cmd := m.loading.Update(msg)
+		return m, cmd
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -173,9 +199,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case tea.KeyPressMsg:
-		// Log overlay has its own scrollable input handling — only esc
-		// (or quit) leaves it; the rest of the key set scrolls. Info
-		// stays "any-key-dismisses" since it's not scrollable.
+		if msg.String() == "ctrl+c" || msg.String() == "ctrl+q" {
+			m.quitRequested = true
+			m.gen.Cancel()
+			if m.engineStatus == engineinit.StatusInit || m.engineStatus == engineinit.StatusOpening {
+				m.statusText = "Waiting for engine loading before quitting…"
+				return m, nil
+			}
+			return m, tea.Quit
+		}
+		if m.quitRequested {
+			return m, nil
+		}
+		if handled, cmd := m.controlKey(msg); handled {
+			return m, cmd
+		}
+		// Log and info overlays keep prompt input untouched until Escape.
 		if m.showLog {
 			switch msg.String() {
 			case "ctrl+c", "ctrl+q":
@@ -198,7 +237,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if s := msg.String(); s == "ctrl+c" || s == "ctrl+q" {
 				return m, tea.Quit
 			}
-			m.showInfo = false
+			if msg.String() == "esc" {
+				m.showInfo = false
+			}
 			return m, nil
 		}
 
@@ -227,8 +268,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if m.input.Focused() && !m.generating {
 				if m.engineStatus != engineinit.StatusReady {
-					m.statusText = "GPU initializing… please wait"
-					return m, nil
+					m.pendingSubmit = true
+					cmd := m.loadModel()
+					return m, cmd
 				}
 				text := strings.TrimSpace(m.input.Value())
 				if text != "" {
@@ -269,6 +311,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "n": // new prompt — clear and target
+			if m.generating {
+				return m, nil
+			}
 			m.input.SetValue("")
 			m.history = nil
 			m.lastErr = nil
@@ -280,12 +325,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.input.Focus())
 
 		case "c": // continue generating
+			if m.engine == nil || m.session == nil || m.loading.Active {
+				m.statusText = "Load a model before continuing"
+				return m, nil
+			}
 			if m.generating {
 				return m, nil
 			}
 			isTruncated := false
 			if m.lastErr != nil {
-				if errors.Is(m.lastErr, ds4.ErrContextFull) || m.lastErr.Error() == "ds4go: session context full" || errors.Is(m.lastErr, context.Canceled) {
+				if errors.Is(m.lastErr, bubble.ErrContextBudget) || errors.Is(m.lastErr, ds4.ErrContextFull) || m.lastErr.Error() == "ds4go: session context full" || errors.Is(m.lastErr, context.Canceled) {
 					isTruncated = true
 				}
 			}
@@ -298,7 +347,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.genEnd = time.Time{}
 				m.tokenCount = 0
 				var waitCmd tea.Cmd
-				m.gen, waitCmd = bubble.Start(m.generateContinue)
+				if errors.Is(m.lastErr, bubble.ErrContextBudget) || errors.Is(m.lastErr, ds4.ErrContextFull) || m.session.Pos()+1024 >= m.session.Ctx() {
+					m.checkpoint()
+					m.resumeDrawing = true
+					m.activeThink = m.thinkMode
+					m.parser = NewParser()
+					m.rawBuf = nil
+					m.gen, waitCmd = bubble.Start(m.generate)
+				} else {
+					m.gen, waitCmd = bubble.Start(m.generateContinue)
+				}
 				cmds = append(cmds, waitCmd)
 			}
 			return m, tea.Batch(cmds...)
@@ -308,6 +366,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "t":
 			m.showThinking = !m.showThinking
+			if !m.showThinking && m.paneFocus == 3 {
+				m.paneFocus = 0
+			}
 			m = m.resize()
 
 		case "r":
@@ -360,6 +421,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case "l": // re-fit the canvas to the current window size
+			if m.generating {
+				m.statusText = "Finish generation before changing canvas dimensions"
+				return m, nil
+			}
 			m = m.lockCanvas()
 
 		case "<", ",":
@@ -434,11 +499,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case engineReadyMsg:
+		m.loading.Active = false
+		if m.quitRequested {
+			m.engine, m.session = msg.Engine, msg.Session
+			return m, tea.Quit
+		}
 		if msg.Err != nil {
 			m.engineStatus = engineinit.StatusError
 			m.engineErr = msg.Err
 			m.statusText = "Error"
 			m.errText = msg.Err.Error()
+			m.pendingSubmit = false
 			m.logger.Printf("[ENGINE] open failed: %v", msg.Err)
 			return m, nil
 		}
@@ -447,13 +518,28 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.hasMTP = msg.HasMTP
 		m.mtpDraft = msg.MTPDraft
 		m.ctxSize = msg.Session.Ctx()
+		m.ctxPos = 0
 		m.engineStatus = engineinit.StatusReady
+		m.engineErr = nil
+		m.errText = ""
 		m.statusText = "Ready"
 		m.logger.Printf("[ENGINE] ready  mtp=%v mtpDraft=%d ctx=%d",
 			m.hasMTP, m.mtpDraft, m.ctxSize)
+		if m.pendingSubmit {
+			m.pendingSubmit = false
+			text := strings.TrimSpace(m.input.Value())
+			if text != "" {
+				m.input.Blur()
+				return m, func() tea.Msg { return submitMsg{text} }
+			}
+		}
 		return m, nil
 
 	case submitMsg:
+		m.resumeDrawing = false
+		if m.generating || m.quitRequested || m.engine == nil || m.session == nil {
+			return m, nil
+		}
 		m.logger.Printf("[USER] %s", msg.text)
 		m.history = append(m.history, chatMsg{"user", msg.text})
 		m.parser.Reset()
@@ -461,6 +547,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.descText = ""
 		m.thinkText = ""
 		m.canvas.Clear()
+		m.activeThink = m.thinkMode
 		m.generating = true
 		m.statusText = "Generating..."
 		m.errText = ""
@@ -474,6 +561,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.gen, waitCmd = bubble.Start(m.generate)
 		cmds = append(cmds, waitCmd)
 
+	case bubble.ContextUsageEvent:
+		m.ctxPos, m.ctxSize = msg.PromptTokens, msg.Capacity
+		cmds = append(cmds, m.gen.Wait())
 	case bubble.TokenMsg:
 		text := string(msg)
 		if m.debug {
@@ -502,9 +592,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.genEnd = time.Now()
 		m.ctxPos = msg.CtxPos
 		if msg.Err != nil {
-			if errors.Is(msg.Err, ds4.ErrContextFull) || msg.Err.Error() == "ds4go: session context full" {
+			if errors.Is(msg.Err, bubble.ErrContextBudget) || errors.Is(msg.Err, ds4.ErrContextFull) || msg.Err.Error() == "ds4go: session context full" {
 				m.statusText = "Ready · Context full"
-				m.errText = "Session context capacity reached. Press 'c' to continue or 'n' for a new prompt."
+				m.errText = "Context capacity reached. Press c to rebuild context from the current drawing, or n for a new prompt. If it repeats, shorten the request or use a larger --ctx."
 			} else {
 				m.errText = msg.Err.Error()
 				if m.statusText != "Aborted" {
@@ -690,6 +780,12 @@ func (m model) render() string {
 	if m.width == 0 {
 		return "Initializing..."
 	}
+	if m.picker.IsOpen() {
+		return m.pickerView()
+	}
+	if m.controls.Kind != "" {
+		return m.controls.View(m.width, m.height, m.settingRows(), m.controlActions())
+	}
 	if m.showInfo {
 		return m.infoOverlay()
 	}
@@ -707,6 +803,9 @@ func (m model) render() string {
 	// Header bar
 	modelName := filepath.Base(m.modelPath)
 	status := m.statusText
+	if m.loading.Active {
+		status = m.loading.View()
+	}
 	if m.errText != "" {
 		cleanErr := strings.ReplaceAll(m.errText, "\n", " | ")
 		status = "Error: " + cleanErr
@@ -812,7 +911,7 @@ func (m model) render() string {
 			case m.generating:
 				think = "..."
 			case m.thinkMode == ds4.ThinkNone:
-				think = "(reasoning off — r to enable in command mode)"
+				think = "(reasoning off — Ctrl+R to change)"
 			}
 		}
 		thinkingPanel := titledBox(lipgloss.NewStyle().
@@ -839,7 +938,7 @@ func (m model) render() string {
 
 	// Footer help bar — swaps with mode (edit vs command). The step-mode
 	// animation uses a constrained command list built inside m.keymap().
-	help := " " + m.keymap().FooterText(m.input.Focused())
+	help := m.controlFooter()
 	footer := lipgloss.NewStyle().
 		Width(m.width).
 		MaxHeight(1).
@@ -1307,7 +1406,7 @@ func (m model) infoOverlay() string {
 		row("hint", "DS4_MTP_SPEC_LOG=1  miss logging → stderr")
 		row("hint", "DS4_MTP_CONF_LOG=1  confidence log → stderr")
 	}
-	b.WriteString("\n" + infoDimStyle.Render("  press any key to close"))
+	b.WriteString("\n" + infoDimStyle.Render("  Esc close"))
 
 	box := titledBox(lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1414,7 +1513,13 @@ func (m model) generate(ctx context.Context, ch chan<- tea.Msg) {
 
 	steps := []func() error{
 		func() error { return m.engine.ChatBegin(tokens) },
-		func() error { return m.engine.ChatAppendMessage(tokens, "system", m.systemPrompt()) },
+		func() error {
+			system := m.systemPrompt()
+			if m.resumeDrawing {
+				system += "\nContinue the existing drawing represented by the last assistant canvas snapshot. Preserve the user's requirements and emit a complete updated canvas JSON object, not a fragment of the interrupted JSON."
+			}
+			return m.engine.ChatAppendMessage(tokens, "system", system)
+		},
 	}
 	for _, msg := range m.history {
 		msg := msg
@@ -1423,6 +1528,10 @@ func (m model) generate(ctx context.Context, ch chan<- tea.Msg) {
 		})
 	}
 	steps = append(steps, func() error {
+		usage := bubble.ContextUsageEvent{PromptTokens: tokens.Len(), Capacity: m.session.Ctx()}
+		if err := m.engine.ChatAppendMessage(tokens, "user", runconfig.ContextFeedback(usage)); err != nil {
+			return err
+		}
 		return m.engine.ChatAppendAssistantPrefix(tokens, m.thinkMode)
 	})
 
@@ -1434,17 +1543,21 @@ func (m model) generate(ctx context.Context, ch chan<- tea.Msg) {
 		}
 	}
 
+	usage := bubble.ContextUsageEvent{PromptTokens: tokens.Len(), Capacity: m.session.Ctx()}
+	bubble.Send(ctx, ch, usage)
+	if usage.Remaining() <= 1024 {
+		tokens.Free()
+		done(bubble.ErrContextBudget)
+		return
+	}
 	opts := ds4.GenerateOptions{
-		MaxTokens: 8192,
+		MaxTokens:   8192,
+		Temperature: m.runOptions.Temperature, TopP: m.runOptions.TopP, Seed: m.runOptions.EffectiveSeed(),
 		StopOnEOS: true,
 	}
 	opts.OnToken = func(token int) {
 		if text, err := m.engine.TokenText(token); err == nil {
-			select {
-			case ch <- bubble.TokenMsg(text):
-			default:
-				// Channel full — drop token so Continue can check context.
-			}
+			bubble.Send(ctx, ch, bubble.TokenMsg(text))
 		}
 	}
 	opts.Context = ctx
@@ -1463,16 +1576,13 @@ func (m model) generateContinue(ctx context.Context, ch chan<- tea.Msg) {
 	}
 
 	opts := ds4.GenerateOptions{
-		MaxTokens: 8192,
+		MaxTokens:   8192,
+		Temperature: m.runOptions.Temperature, TopP: m.runOptions.TopP, Seed: m.runOptions.EffectiveSeed(),
 		StopOnEOS: true,
 	}
 	opts.OnToken = func(token int) {
 		if text, err := m.engine.TokenText(token); err == nil {
-			select {
-			case ch <- bubble.TokenMsg(text):
-			default:
-				// Channel full — drop token so Continue can check context.
-			}
+			bubble.Send(ctx, ch, bubble.TokenMsg(text))
 		}
 	}
 	opts.Context = ctx

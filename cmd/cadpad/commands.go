@@ -16,6 +16,7 @@ import (
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/lua"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/render"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/world"
+	"github.com/NimbleMarkets/ds4go-apps/internal/runconfig"
 	simplesdf "github.com/soypat/gsdf/gsdfaux/simplesdf"
 )
 
@@ -186,8 +187,16 @@ func errStr(e error) string {
 	return e.Error()
 }
 
-func (m model) submitInputCmd() tea.Cmd {
+func (m *model) submitInputCmd() tea.Cmd {
+	if m.inferencing || m.quitRequested {
+		m.status = "Stop or finish the current run first"
+		return nil
+	}
 	text := strings.TrimSpace(m.input.Value())
+	if !strings.HasPrefix(text, "/") && m.lib != nil && m.engine == nil {
+		m.pendingSubmit = true
+		return m.loadModel()
+	}
 	m.input.SetValue("")
 	if text == "" {
 		return nil
@@ -195,7 +204,14 @@ func (m model) submitInputCmd() tea.Cmd {
 	m.logger.Printf("[USER] %s", text)
 
 	if strings.HasPrefix(text, "/") {
-		return m.handleSlash(text)
+		m.inferencing = true
+		work := m.handleSlash(text)
+		var wait tea.Cmd
+		m.gen, wait = bubble.Start(func(ctx context.Context, ch chan<- tea.Msg) {
+			defer close(ch)
+			ch <- work()
+		})
+		return wait
 	}
 
 	if m.session == nil || m.engine == nil {
@@ -205,23 +221,23 @@ func (m model) submitInputCmd() tea.Cmd {
 		}
 	}
 
-	return tea.Batch(
-		func() tea.Msg { return bubble.InferencingStartMsg{} },
-		func() tea.Msg {
-			ch := make(chan tea.Msg, 128)
+	m.activeThink = m.thinkMode
+	m.inferencing = true
+	m.spinnerFrame = 0
+	m.showThinking = true
+	m.status = "Generating…"
+	tsFile := fmt.Sprintf("cadpad.%s.lua", time.Now().Format("20060102_150405.000000000"))
+	*m.currentLuaFile = tsFile
+	m.lastActiveLua = filepath.Join(m.luaWorkspace, tsFile)
+	snapshot := *m
+	var wait tea.Cmd
+	m.gen, wait = bubble.Start(func(ctx context.Context, ch chan<- tea.Msg) {
+		defer close(ch)
+		ctx, cancel := context.WithTimeout(ctx, 600*time.Second)
+		defer cancel()
+		m := snapshot
 
-			go func() {
-				defer close(ch)
-
-				ctx, cancel := context.WithTimeout(context.Background(), 600*time.Second)
-				defer cancel()
-
-				// Assign a single timestamped file for this prompt cycle.
-				tsFile := fmt.Sprintf("cadpad.%s.lua", time.Now().Format("20060102_150405"))
-				*m.currentLuaFile = tsFile
-				m.lastActiveLua = filepath.Join(m.luaWorkspace, tsFile)
-
-				system := fmt.Sprintf(`You are a CAD modeling assistant. You can ONLY build models by writing and running Lua code. There are NO direct geometry-creation tools.
+		system := fmt.Sprintf(`You are a CAD modeling assistant. You can ONLY build models by writing and running Lua code. There are NO direct geometry-creation tools.
 
 The Lua environment provides a module "sdf" with these constructors (all arguments are NUMBERS, not strings):
 - sdf.sphere(radius)
@@ -270,90 +286,89 @@ You MUST write all code to "%s". Use lua_read, lua_write, lua_append, lua_replac
 
 If lua_run errors, read the file, fix the code, and run again. Keep responses concise.`, tsFile)
 
-				var lastAssistant ds4.ChatMessage
-				var driver *bubble.GenerationDriver
-				driver = bubble.NewGenerationDriver(bubble.DriverOptions{
-					Engine:    m.engine,
-					Session:   m.session,
-					Tools:     m.tools,
-					ThinkMode: m.thinkMode,
-					MaxRounds: m.maxRounds,
-					ExecuteTools: func(ctx context.Context, calls []ds4.ToolCall) ([]ds4.ChatMessage, error) {
-						driver.Emit(bubble.LogEvent{
-							Level:   "info",
-							Message: fmt.Sprintf("executing %d tool call(s)", len(calls)),
-						})
-						for _, c := range calls {
-							driver.Emit(bubble.LogEvent{
-								Level:   "info",
-								Message: fmt.Sprintf("tool: %s args=%s", c.Name, truncateForLog(c.Arguments, 200)),
-							})
-						}
-
-						results, err := m.tools.ExecuteToolCalls(ctx, calls)
-						if err != nil {
-							driver.Emit(bubble.LogEvent{Level: "error", Message: "tool exec error: " + err.Error()})
-							return nil, err
-						}
-
-						for _, r := range results {
-							driver.Emit(bubble.LogEvent{
-								Level:   "info",
-								Message: "tool result: " + truncateForLog(r.Content, 200),
-							})
-						}
-						return results, nil
-					},
-					OnEvent: func(e bubble.Event) {
-						if am, ok := e.(bubble.AssistantMessageEvent); ok {
-							lastAssistant = am.Message
-						}
-						select {
-						case ch <- driverEventMsg{e: e}:
-						default:
-						}
-					},
+		var lastAssistant ds4.ChatMessage
+		var driver *bubble.GenerationDriver
+		driver = bubble.NewGenerationDriver(bubble.DriverOptions{
+			Engine:      m.engine,
+			Session:     m.session,
+			Tools:       m.tools,
+			ThinkMode:   m.thinkMode,
+			MaxRounds:   m.maxRounds + 1,
+			MaxTokens:   8192,
+			Temperature: m.runOptions.Temperature, TopP: m.runOptions.TopP, Seed: m.runOptions.EffectiveSeed(),
+			PrepareHistory: runconfig.PrepareHistory, ContextFeedback: runconfig.ContextFeedback, MinResponseTokens: 1024,
+			ExecuteTools: func(ctx context.Context, calls []ds4.ToolCall) ([]ds4.ChatMessage, error) {
+				driver.Emit(bubble.LogEvent{
+					Level:   "info",
+					Message: fmt.Sprintf("executing %d tool call(s)", len(calls)),
 				})
+				for _, c := range calls {
+					driver.Emit(bubble.LogEvent{
+						Level:   "info",
+						Message: fmt.Sprintf("tool: %s args=%s", c.Name, truncateForLog(c.Arguments, 200)),
+					})
+				}
 
-				res, err := driver.RunWithPrompt(ctx, system, []ds4.ChatMessage{{Role: "user", Content: text}})
+				results, err := m.tools.ExecuteToolCalls(ctx, calls)
 				if err != nil {
-					// On timeout/error, preserve whatever assistant output we have.
-					if lastAssistant.Content != "" || lastAssistant.ReasoningContent != "" {
-						summary := lastAssistant.Content
-						reasoning := lastAssistant.ReasoningContent
-						if reasoning == "" {
-							reasoning, summary = extractThinkFromContent(summary)
-						}
-						ch <- toolDoneMsg{
-							text:      summary,
-							reasoning: reasoning,
-							err:       err,
-						}
-					} else {
-						ch <- toolDoneMsg{err: err}
-					}
-					return
+					driver.Emit(bubble.LogEvent{Level: "error", Message: "tool exec error: " + err.Error()})
+					return nil, err
 				}
 
-				summary := res.Assistant.Content
-				reasoning := res.Assistant.ReasoningContent
-				if reasoning == "" {
-					// Fallback: manually extract <think> tags that ParseAssistant
-					// may have left in Content when thinkMode is ThinkNone.
-					reasoning, summary = extractThinkFromContent(summary)
+				for _, r := range results {
+					driver.Emit(bubble.LogEvent{
+						Level:   "info",
+						Message: "tool result: " + truncateForLog(r.Content, 200),
+					})
 				}
-				if summary == "" {
-					summary = fmt.Sprintf("LLM used %d tool rounds", res.ToolRounds)
+				return results, nil
+			},
+			OnEvent: func(e bubble.Event) {
+				if am, ok := e.(bubble.AssistantMessageEvent); ok {
+					lastAssistant = am.Message
+				}
+				bubble.Send(ctx, ch, driverEventMsg{e: e})
+			},
+		})
+
+		res, err := driver.RunWithPrompt(ctx, system, []ds4.ChatMessage{{Role: "user", Content: text}})
+		if err != nil {
+			// On timeout/error, preserve whatever assistant output we have.
+			if lastAssistant.Content != "" || lastAssistant.ReasoningContent != "" {
+				summary := lastAssistant.Content
+				reasoning := lastAssistant.ReasoningContent
+				if reasoning == "" {
+					reasoning, summary = extractThinkFromContent(summary)
 				}
 				ch <- toolDoneMsg{
 					text:      summary,
 					reasoning: reasoning,
+					err:       err,
+					history:   res.History, ctxPos: m.session.Pos(),
 				}
-			}()
+			} else {
+				ch <- toolDoneMsg{err: err, history: res.History, ctxPos: m.session.Pos()}
+			}
+			return
+		}
 
-			return generationStartedMsg{ch: ch}
-		},
-	)
+		summary := res.Assistant.Content
+		reasoning := res.Assistant.ReasoningContent
+		if reasoning == "" {
+			// Fallback: manually extract <think> tags that ParseAssistant
+			// may have left in Content when thinkMode is ThinkNone.
+			reasoning, summary = extractThinkFromContent(summary)
+		}
+		if summary == "" {
+			summary = fmt.Sprintf("LLM used %d tool rounds", res.ToolRounds)
+		}
+		ch <- toolDoneMsg{
+			text:      summary,
+			reasoning: reasoning,
+			history:   res.History, ctxPos: m.session.Pos(),
+		}
+	})
+	return tea.Batch(wait, spinnerTick(), m.resizeViewport())
 }
 
 func (m model) handleSlash(text string) tea.Cmd {

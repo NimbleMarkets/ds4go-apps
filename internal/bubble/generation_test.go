@@ -80,3 +80,49 @@ func TestNilHandleSafety(t *testing.T) {
 		t.Error("nil handle Wait() should return a nil Cmd")
 	}
 }
+
+func TestContentDeliveryDoesNotDropWhenBufferFills(t *testing.T) {
+	g, cmd := Start(func(ctx context.Context, ch chan<- tea.Msg) {
+		defer close(ch)
+		for i := 0; i < 300; i++ {
+			if !Send(ctx, ch, i) {
+				return
+			}
+		}
+	})
+	defer g.StopAndWait()
+	for i := 0; i < 300; i++ {
+		if got := recvMsg(t, cmd); got != i {
+			t.Fatalf("message %d: %v", i, got)
+		}
+		cmd = g.Wait()
+	}
+}
+
+func TestStopAndWaitDrainsTerminalMessages(t *testing.T) {
+	finished := make(chan struct{})
+	g, _ := Start(func(ctx context.Context, ch chan<- tea.Msg) {
+		defer close(ch)
+		defer close(finished)
+		<-ctx.Done()
+		// A worker may have queued terminal/cleanup events after cancellation.
+		for i := 0; i < 100; i++ {
+			ch <- DoneMsg{}
+		}
+	})
+	stopped := make(chan struct{})
+	go func() { g.StopAndWait(); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not drain worker")
+	}
+	select {
+	case <-finished:
+	default:
+		t.Fatal("shutdown returned before worker exit")
+	}
+	g.StopAndWait()
+	var empty *Generation
+	empty.StopAndWait()
+}
