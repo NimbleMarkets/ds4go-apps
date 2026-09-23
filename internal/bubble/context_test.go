@@ -14,6 +14,85 @@ import (
 	"github.com/NimbleMarkets/ds4go/dsml"
 )
 
+func TestCompactionRebuildsPromptAndKeepsRoundBudget(t *testing.T) {
+	eng, _, reg := mockDriverEnv(t)
+	sess, err := eng.NewSession(2200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sess.Close()
+	block, err := dsml.RenderToolCalls([]dsml.ToolCall{{Name: "svg_append", Arguments: `{}`}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var usage ContextUsageEvent
+	var compacted ContextCompactedEvent
+	generated, executed, checks := 0, 0, 0
+	d := NewGenerationDriver(DriverOptions{
+		Engine: eng, Session: sess, Tools: reg, ThinkMode: ds4.ThinkNone, MaxRounds: 2, MaxTokens: 4096, MinResponseTokens: 512, ResponseReserveTokens: 64,
+		CompactHistory: func(_ context.Context, h []ds4.ChatMessage, u ContextUsageEvent) ([]ds4.ChatMessage, bool, error) {
+			checks++
+			if checks == 1 {
+				if u.PromptTokens < 2200 {
+					t.Fatal("did not measure oversized prompt")
+				}
+				return append([]ds4.ChatMessage(nil), h[1:]...), true, nil
+			}
+			return h, false, nil
+		},
+		ContextFeedback: func(ContextUsageEvent) string { return "Count this feedback too." },
+		OnEvent: func(e Event) {
+			switch e := e.(type) {
+			case ContextUsageEvent:
+				usage = e
+			case ContextCompactedEvent:
+				compacted = e
+			}
+		},
+		CompletePrompt: func(p *ds4.Prompt, o ds4.GenerateOptions, _ func(dsml.StreamEvent)) (string, error) {
+			generated++
+			if p.Tokens.Len() != usage.PromptTokens || o.MaxTokens > usage.Remaining()-64 || o.MaxTokens <= 0 {
+				t.Fatalf("unmeasured budget: %+v max=%d prompt=%d", usage, o.MaxTokens, p.Tokens.Len())
+			}
+			return block, nil
+		},
+		ExecuteTools: func(ctx context.Context, c []ds4.ToolCall) ([]ds4.ChatMessage, error) {
+			executed++
+			return reg.ExecuteToolCalls(ctx, c)
+		},
+	})
+	history := []ds4.ChatMessage{{Role: "assistant", Content: strings.Repeat("old context ", 1300)}, {Role: "user", Content: "keep the active request"}}
+	res, err := d.RunWithPrompt(context.Background(), "sys", history)
+	if !errors.Is(err, ErrMaxRounds) || generated != 2 || executed != 1 || checks != 2 || res.ToolRounds != 1 {
+		t.Fatalf("round budget changed: gen=%d exec=%d checks=%d rounds=%d err=%v", generated, executed, checks, res.ToolRounds, err)
+	}
+	if compacted.After >= compacted.Before || res.History[0].Content != "keep the active request" {
+		t.Fatalf("bad compaction: %+v", compacted)
+	}
+	if len(history[0].Content) < 2500 {
+		t.Fatal("mutated input")
+	}
+}
+
+func TestCompactionFailureKeepsHistoryWithoutGeneration(t *testing.T) {
+	eng, sess, reg := mockDriverEnv(t)
+	want := errors.New("checkpoint disk full")
+	h := []ds4.ChatMessage{{Role: "user", Content: "preserve this"}}
+	d := NewGenerationDriver(DriverOptions{Engine: eng, Session: sess, Tools: reg,
+		CompactHistory: func(context.Context, []ds4.ChatMessage, ContextUsageEvent) ([]ds4.ChatMessage, bool, error) {
+			return nil, false, want
+		},
+		CompleteTurn: func(*ds4.Tokens, ds4.GenerateOptions, func(dsml.StreamEvent)) (string, error) {
+			t.Fatal("generated after checkpoint failure")
+			return "", nil
+		},
+	})
+	res, err := d.RunWithPrompt(context.Background(), "sys", h)
+	if !errors.Is(err, want) || len(res.History) != 1 || res.History[0].Content != "preserve this" {
+		t.Fatalf("%+v %v", res, err)
+	}
+}
+
 func TestContextPreflightCountsFeedbackAndProtectsGeneration(t *testing.T) {
 	eng, _, reg := mockDriverEnv(t)
 	history := []ds4.ChatMessage{

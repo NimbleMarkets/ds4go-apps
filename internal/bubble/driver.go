@@ -22,6 +22,11 @@ type DriverOptions struct {
 	ThinkMode ds4.ThinkMode
 	MaxRounds int
 
+	// FinalResponseOnly removes tool definitions on the final allowed turn and
+	// adds a system instruction to summarize completed and unfinished work.
+	// Calls emitted anyway remain subject to the hard execution limit.
+	FinalResponseOnly bool
+
 	// MaxTokens bounds each assistant turn's token budget (shared across
 	// think-recovery resumes inside ds4go). Values <= 0 default to 1024.
 	MaxTokens int
@@ -60,6 +65,16 @@ type DriverOptions struct {
 	// each model round. round is zero-based; maxRounds includes the final turn.
 	// It must not mutate its input; its result becomes the retained history.
 	PrepareHistory func(history []ds4.ChatMessage, round, maxRounds int) []ds4.ChatMessage
+
+	// CompactHistory may replace history after measuring the actual prompt,
+	// including images and schemas. Called once per round; must not mutate its
+	// input. A changed history is rebuilt and checked before generation, without
+	// resetting the tool-round budget or executing any calls again.
+	CompactHistory func(context.Context, []ds4.ChatMessage, ContextUsageEvent) ([]ds4.ChatMessage, bool, error)
+
+	// ResponseReserveTokens, when positive, caps generation to remaining space
+	// minus this reserve. Zero preserves the existing MaxTokens behavior.
+	ResponseReserveTokens int
 
 	// ContextFeedback optionally adds guidance based on the rendered prompt.
 	// Its message is appended and the prompt is rebuilt before the capacity
@@ -132,9 +147,10 @@ func (d *GenerationDriver) Emit(e Event) {
 
 // RunResult is the final snapshot after a RunWithPrompt (similar to ds4.ToolLoopResult).
 type RunResult struct {
-	Assistant  ds4.ChatMessage
-	ToolRounds int
-	History    []ds4.ChatMessage
+	Assistant       ds4.ChatMessage
+	ToolRounds      int
+	History         []ds4.ChatMessage
+	BudgetExhausted bool // reached the final, non-tool-capable turn
 }
 
 // RunWithPrompt executes a full multi-round observable tool-calling
@@ -208,10 +224,11 @@ func (d *GenerationDriver) RunWithPrompt(ctx context.Context, system string, his
 
 	working := append([]ds4.ChatMessage(nil), history...)
 	toolRounds := 0
+	budgetExhausted := false
 	syntaxRetried := false
 	var lastAssistant ds4.ChatMessage
 	partial := func() RunResult {
-		return RunResult{History: working, ToolRounds: toolRounds, Assistant: lastAssistant}
+		return RunResult{History: working, ToolRounds: toolRounds, Assistant: lastAssistant, BudgetExhausted: budgetExhausted}
 	}
 
 	for round := 0; ; round++ {
@@ -222,22 +239,56 @@ func (d *GenerationDriver) RunWithPrompt(ctx context.Context, system string, his
 			}
 		}
 
+		budgetExhausted = round >= maxRounds-1
+		promptTools, turnSystem := d.opts.Tools, system
+		if budgetExhausted && d.opts.FinalResponseOnly {
+			promptTools = ds4.NewToolRegistry()
+			promptTools.SetReplayStore(d.opts.Tools.ReplayStore())
+			turnSystem += "\nFinal response only: the tool budget is exhausted and all tools are unavailable, including scratchpad tools. Do not emit tool calls or tool markup. Summarize only confirmed completed work and explicitly state remaining work. Do not claim unexecuted operations succeeded. The application will save a checkpoint after this response."
+		}
 		d.opts.OnEvent(RoundStartedEvent{Round: round})
 		if d.opts.PrepareHistory != nil {
 			working = d.opts.PrepareHistory(working, round, maxRounds)
 		}
 
-		prompt, err := d.opts.Tools.BuildPromptMultimodal(d.opts.Engine, d.opts.Images, system, working, d.opts.ThinkMode)
+		prompt, err := promptTools.BuildPromptMultimodal(d.opts.Engine, d.opts.Images, turnSystem, working, d.opts.ThinkMode)
 		if err != nil {
 			d.opts.OnEvent(ErrorEvent{Err: err})
 			return partial(), err
 		}
 		usage := ContextUsageEvent{PromptTokens: prompt.Tokens.Len(), Capacity: d.opts.Session.Ctx()}
+		if d.opts.CompactHistory != nil {
+			next, changed, compactErr := d.opts.CompactHistory(ctx, working, usage)
+			if compactErr != nil {
+				prompt.Free()
+				d.opts.OnEvent(ErrorEvent{Err: compactErr})
+				return partial(), compactErr
+			}
+			if changed {
+				candidate, err := promptTools.BuildPromptMultimodal(d.opts.Engine, d.opts.Images, turnSystem, next, d.opts.ThinkMode)
+				if err != nil {
+					prompt.Free()
+					d.opts.OnEvent(ErrorEvent{Err: err})
+					return partial(), err
+				}
+				// A short history can grow when a checkpoint is added. Keep
+				// the original unless compaction actually creates more room.
+				if candidate.Tokens.Len() < usage.PromptTokens {
+					before := usage.PromptTokens
+					prompt.Free()
+					prompt, working = candidate, next
+					usage.PromptTokens = prompt.Tokens.Len()
+					d.opts.OnEvent(ContextCompactedEvent{Before: before, After: usage.PromptTokens})
+				} else {
+					candidate.Free()
+				}
+			}
+		}
 		if d.opts.ContextFeedback != nil {
 			if note := d.opts.ContextFeedback(usage); note != "" {
 				prompt.Free()
 				working = append(working, ds4.ChatMessage{Role: "user", ToolCallID: ContextFeedbackID, Content: note})
-				prompt, err = d.opts.Tools.BuildPromptMultimodal(d.opts.Engine, d.opts.Images, system, working, d.opts.ThinkMode)
+				prompt, err = promptTools.BuildPromptMultimodal(d.opts.Engine, d.opts.Images, turnSystem, working, d.opts.ThinkMode)
 				if err != nil {
 					d.opts.OnEvent(ErrorEvent{Err: err})
 					return partial(), err
@@ -264,6 +315,14 @@ func (d *GenerationDriver) RunWithPrompt(ctx context.Context, system string, his
 					d.opts.OnEvent(TokenEvent{Text: part})
 				}
 			},
+		}
+		if d.opts.ResponseReserveTokens > 0 {
+			genOpts.MaxTokens = min(genOpts.MaxTokens, usage.Remaining()-d.opts.ResponseReserveTokens)
+			if genOpts.MaxTokens <= 0 {
+				prompt.Free()
+				d.opts.OnEvent(ErrorEvent{Err: ErrContextBudget})
+				return partial(), ErrContextBudget
+			}
 		}
 		text, err := completePrompt(prompt, genOpts, func(ev dsml.StreamEvent) {
 			d.opts.OnEvent(StreamEvent{Event: ev})
@@ -297,17 +356,22 @@ func (d *GenerationDriver) RunWithPrompt(ctx context.Context, system string, his
 				continue
 			}
 			d.opts.OnEvent(RoundCompletedEvent{Round: round})
-			return RunResult{
-				Assistant:  assistant,
-				ToolRounds: toolRounds,
-				History:    working,
-			}, nil
+			return partial(), nil
 		}
 		syntaxRetried = false
 
-		if round >= maxRounds-1 {
+		if budgetExhausted {
+			// Pair every rejected call with an observation so continuing the conversation
+			// cannot mistake it for an executed operation or leave dangling call IDs.
+			rejected := make([]ds4.ChatMessage, 0, len(assistant.ToolCalls))
+			for _, call := range assistant.ToolCalls {
+				rejected = append(rejected, ds4.ChatMessage{Role: "tool", ToolCallID: call.ID,
+					Content: "NOT EXECUTED: " + call.Name + ". Tool round budget exhausted; no operation was performed. Report this as unfinished work."})
+			}
+			working = append(working, rejected...)
+			d.opts.OnEvent(ToolResultsEvent{Results: rejected})
 			d.opts.OnEvent(ErrorEvent{Err: ErrMaxRounds})
-			return RunResult{Assistant: assistant, ToolRounds: toolRounds, History: working}, ErrMaxRounds
+			return partial(), ErrMaxRounds
 		}
 
 		// Delegate execution to host (cadpad will run registry.Execute + side effects + Emit logs)

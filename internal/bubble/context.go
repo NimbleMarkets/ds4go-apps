@@ -16,6 +16,11 @@ type ContextUsageEvent struct {
 
 func (ContextUsageEvent) event() {}
 
+// ContextCompactedEvent reports actual prompt sizes before/after compaction.
+type ContextCompactedEvent struct{ Before, After int }
+
+func (ContextCompactedEvent) event() {}
+
 func (u ContextUsageEvent) Remaining() int { return max(0, u.Capacity-u.PromptTokens) }
 
 // ContextFeedbackID marks host guidance so apps can exclude it from user intent.

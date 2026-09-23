@@ -135,7 +135,18 @@ func DispatchRGBA8(dev *wgpu.Device, req ImageDispatch) (*image.NRGBA, error) {
 		return nil, fmt.Errorf("submit: %w", err)
 	}
 
-	if err := staging.Map(context.Background(), wgpu.MapModeRead, 0, outBytes); err != nil {
+	// Buffer.Map starts an unpinned goroutine for Poll(PollWait). On Metal,
+	// WaitIdle creates/drains a thread-local autorelease pool; migration of
+	// that goroutine can crash in objc pool cleanup. Keep the entire mapping
+	// lifecycle on the caller's locked Executor thread, including GPU wait.
+	pending, err := staging.MapAsync(wgpu.MapModeRead, 0, outBytes)
+	if err != nil {
+		return nil, fmt.Errorf("map staging: %w", err)
+	}
+	dev.Poll(wgpu.PollWait)
+	err = pending.Wait(context.Background())
+	pending.Release()
+	if err != nil {
 		return nil, fmt.Errorf("map staging: %w", err)
 	}
 	defer staging.Unmap()
