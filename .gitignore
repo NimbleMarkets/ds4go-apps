@@ -19,6 +19,8 @@ docs
 /cadpad
 /glyphpad
 /svgpad
+/trippad
+/trippad-gallery/
 
 # ds4 shared libraries dropped into lib/ (lib/README.md is kept)
 /lib/libds4.*

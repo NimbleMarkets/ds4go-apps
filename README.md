@@ -13,6 +13,7 @@ This repository contains a family of Bubble Tea TUI tools that run DeepSeek-fami
 | **glyphpad** | `ds4go-glyphpad` | Unicode glyph / ASCII-art scratchpad. Chat with a local model to generate, edit, and arrange characters, blocks, and symbols in a canvas. |
 | **svgpad** | `ds4go-svgpad` | SVG drawing scratchpad. Describe shapes, diagrams, or illustrations in natural language and get rendered SVG output directly in the terminal via `ntcharts-svg`. |
 | **cadpad** | `ds4go-cadpad` | CAD modeling workbench driven by LLM tool-calling against the `simplesdf` geometry engine. Create, transform, and boolean 3D solids with live picture previews. Can also run headless (no engine) as a pure Go geometry harness. |
+| **[trippad](cmd/trippad/README.md)** | `ds4go-trippad` | Live psychedelic WGSL shaders, GPU animation, parameter sliders, and LLM shader editing with optional vision previews. Runs without a model using `--no-engine`. |
 | **steering** | `ds4go-steering` | DeepSeek activation-steering dashboard. Tweak FFN and attention steering vectors in real time, branch comparison timelines, and explore token logits interactively. |
 
 ---

@@ -37,6 +37,7 @@ tasks:
       - task: build:steering
       - task: build:svgpad
       - task: build:cadpad
+      - task: build:trippad
 
   # Shared directives; each public build task gets its own checksum.
   build:glyphpad: &app-build
@@ -44,7 +45,7 @@ tasks:
     requires:
       vars:
         - name: APP
-          enum: [glyphpad, steering, svgpad, cadpad]
+          enum: [glyphpad, steering, svgpad, cadpad, trippad]
     method: checksum
     sources:
       - Taskfile.yml
@@ -155,6 +156,25 @@ tasks:
         if [ -n "{{.POWER}}" ]; then args="$args --power {{.POWER}}"; fi
         if [ -n "{{.NO_ENGINE}}" ]; then args="$args --no-engine"; fi
         ./bin/ds4go-cadpad $args
+
+  build:trippad:
+    <<: *app-build
+    desc: Build trippad binary
+    vars:
+      BUILD_CONFIG: *build-config
+      DS4GO_SOURCE_DIR: *ds4go-source-dir
+      APP: trippad
+
+  build:trippad-memory:
+    desc: Build the engine-free scratchpad CLI
+    cmds:
+      - go build -o ./bin/ds4go-trippad-memory ./cmd/trippad-memory
+
+  run:trippad:
+    desc: Run the shader playground (add -- --no-engine for shaders only)
+    deps: [build:trippad]
+    cmds:
+      - ./bin/ds4go-trippad {{.CLI_ARGS}}
 
   log:
     desc: Tail glyphpad.log, svgpad.log and cadpad.log in real time

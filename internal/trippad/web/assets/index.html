@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Trippad · Shader playground</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+<header class="topbar">
+<div class="identity"><span class="brand">trippad</span><h1 id="name">Shader playground</h1></div>
+<nav class="actions" aria-label="Shader and playback controls"><button id="gallery-open">Gallery</button><button id="reload" title="Copy trippad’s current shader, parameter values, clock and resolution">Load live state</button><button id="play">Pause</button><button id="reset">Reset time</button></nav>
+</header>
+<main>
+<section class="preview"><canvas id="canvas" width="640" height="480" aria-label="Animated shader"></canvas><p id="status" role="status">Starting WebGPU…</p></section>
+<aside>
+<h2 class="panel-title">Parameters</h2>
+<div id="controls"></div>
+<p class="muted">Changes apply to this browser only.</p>
+<div class="playback-stats" aria-label="Playback statistics"><span id="fps" title="Submitted frames per second">— fps</span><span id="size" title="Render resolution">—</span></div>
+</aside>
+</main>
+<dialog id="gallery-dialog" aria-labelledby="gallery-title">
+<div class="gallery-heading"><div><span class="eyebrow">SAVED VERSIONS + STARTERS</span><h2 id="gallery-title">Shader gallery</h2></div><button id="gallery-close">Close</button></div>
+<p id="gallery-description" class="muted">One card per shader. Load the latest compatible version or browse its history.</p>
+<button id="gallery-back" hidden>← All shaders</button>
+<div class="gallery-toolbar"><input id="gallery-search" type="search" placeholder="Search shader names or version IDs" aria-label="Search gallery"><button id="gallery-refresh">Refresh</button></div>
+<label class="gallery-error-filter"><input id="gallery-errors" type="checkbox"> Include shaders with compiler errors</label>
+<p id="gallery-note" role="status"></p><div id="gallery-grid"></div>
+<div class="gallery-footer"><button id="gallery-prev">Previous</button><span id="gallery-page"></span><button id="gallery-next">Next</button></div>
+</dialog>
+<details><summary>Exact compute WGSL</summary><pre id="source"></pre></details>
+<script type="module" src="/app.js"></script>
+</body></html>
