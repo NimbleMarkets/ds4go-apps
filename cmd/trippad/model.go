@@ -25,6 +25,10 @@ import (
 )
 
 type tickMsg time.Time
+
+// frameDueMsg starts the next animation frame once the frame period has
+// elapsed since the previous frame started.
+type frameDueMsg struct{}
 type startupMsg struct{}
 type probeMsg struct{}
 type frameMsg struct {
@@ -80,6 +84,7 @@ type model struct {
 	hasVision                                   bool
 	width, height, selected, starter, downscale int
 	rasterW, rasterH                            int
+	frameStart                                  time.Time
 	targetFPS                                   int
 	fullscreen                                  bool
 	playing, dirty, rendering, noEngine         bool
@@ -103,7 +108,7 @@ func newModel(s *tools.State) *model {
 	input.Prompt = "> "
 	input.Placeholder = "Enter a prompt or /help (Tab to focus)"
 	input.CharLimit = 8192
-	return &model{engineStatus: engineinit.StatusDormant, state: s, input: input, pic: picture.NewWithConfig(picture.Config{CellPixelWidth: 8, CellPixelHeight: 16, Fit: picture.FitFill}), playing: true, dirty: true, downscale: 2, targetFPS: 60, status: "Space pause · ↑↓ select · ←→ adjust · Tab prompt · ? help", options: runconfig.Options{Temperature: .7, TopP: .95, ToolRounds: 20}}
+	return &model{engineStatus: engineinit.StatusDormant, state: s, input: input, pic: picture.NewWithConfig(picture.Config{CellPixelWidth: 8, CellPixelHeight: 16, Fit: picture.FitFill, KittyTransport: picture.KittyTransportAuto}), playing: true, dirty: true, downscale: 2, targetFPS: 60, status: "Space pause · ↑↓ select · ←→ adjust · Tab prompt · ? help", options: runconfig.Options{Temperature: .7, TopP: .95, ToolRounds: 20}}
 }
 func (m *model) tick() tea.Cmd {
 	return tea.Tick(time.Second/time.Duration(max(1, m.targetFPS)), func(t time.Time) tea.Msg { return tickMsg(t) })
@@ -112,6 +117,10 @@ func (m *model) Init() tea.Cmd {
 	return tea.Batch(m.pic.Init(), picture.RequestCellSize(), picture.QueryKittySupport(), m.tick(), func() tea.Msg { return startupMsg{} }, tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg { return probeMsg{} }))
 }
 func (m *model) close() {
+	// Program.Run has stopped its output writer before this cleanup.
+	if err := m.pic.Close(); err != nil {
+		m.addLog("Could not release Kitty shared memory: " + err.Error())
+	}
 	m.gen.StopAndWait()
 	m.action.StopAndWait()
 	m.loader.StopAndWait()
@@ -135,6 +144,7 @@ func (m *model) renderCmd() tea.Cmd {
 	}
 	m.rendering = true
 	m.dirty = false
+	m.frameStart = time.Now()
 	snap := m.state.Snapshot()
 	m.lastRevision = snap.Revision
 	cols, rows := m.viewport()
@@ -255,15 +265,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		cmds = append(cmds, m.resizeViewport())
 	case tickMsg:
-		now := time.Time(msg)
-		m.dt = 0
-		if !m.lastTick.IsZero() && m.playing {
-			m.dt = float32(now.Sub(m.lastTick).Seconds())
-			m.t += m.dt
-			m.dirty = true
-		}
-		m.lastTick = now
-		m.state.Clock(m.t, m.dt, m.frame, m.fps)
+		m.advanceClock(time.Time(msg))
 		m.selected = min(m.selected, max(0, len(m.state.Snapshot().Source.Params)-1))
 		if m.state.Snapshot().Revision != m.lastRevision {
 			m.dirty = true
@@ -314,7 +316,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			})
 		} else {
 			m.state.RecordPerformance(tools.Performance{RenderMS: float64(msg.duration) / float64(time.Millisecond), SampledAt: time.Now().UnixMilli()})
-			m.rendering = false
+			cmds = append(cmds, m.releaseFrame())
 		}
 	case encodedMsg:
 		m.state.RecordPerformance(msg.performance)
@@ -322,7 +324,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// sent, so a later frame cannot overtake this terminal presentation.
 		cmds = append(cmds, tea.Sequence(m.pic.Update(msg.msg), func() tea.Msg { return presentedMsg{} }))
 	case presentedMsg:
-		m.rendering = false
+		cmds = append(cmds, m.releaseFrame())
+	case frameDueMsg:
+		if m.playing {
+			cmds = append(cmds, m.scheduleFrame())
+		}
 	case actionMsg:
 		m.action.StopAndWait()
 		m.action = nil
@@ -462,4 +468,43 @@ func (m *model) View() tea.View {
 	v := tea.NewView(m.workspaceView())
 	v.AltScreen = true
 	return v
+}
+
+// advanceClock moves animation time forward to now while playing and
+// publishes the clock to the tool state.
+func (m *model) advanceClock(now time.Time) {
+	m.dt = 0
+	if !m.lastTick.IsZero() && m.playing {
+		m.dt = float32(now.Sub(m.lastTick).Seconds())
+		m.t += m.dt
+		m.dirty = true
+	}
+	m.lastTick = now
+	m.state.Clock(m.t, m.dt, m.frame, m.fps)
+}
+
+// releaseFrame frees the single in-flight frame slot and, while playing,
+// starts the next frame as soon as the frame period allows instead of waiting
+// for the next tick. Waiting for the tick made any frame longer than one
+// period cost two, snapping 60 fps to 30, 20 or 15.
+func (m *model) releaseFrame() tea.Cmd {
+	m.rendering = false
+	if !m.playing {
+		return nil
+	}
+	return m.scheduleFrame()
+}
+
+// scheduleFrame starts a frame now if the frame period has elapsed since the
+// previous frame started, otherwise defers by the remaining time.
+func (m *model) scheduleFrame() tea.Cmd {
+	if m.rendering {
+		return nil
+	}
+	period := time.Second / time.Duration(max(1, m.targetFPS))
+	if wait := period - time.Since(m.frameStart); wait > 0 {
+		return tea.Tick(wait, func(time.Time) tea.Msg { return frameDueMsg{} })
+	}
+	m.advanceClock(time.Now())
+	return m.renderCmd()
 }
