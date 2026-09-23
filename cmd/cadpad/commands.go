@@ -89,7 +89,7 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 		if !ok || s.Shader() == nil {
 			return previewUpdatedMsg{name: cur, epoch: epoch, ok: false, err: "no sdf"}
 		}
-		pc, pr := m.viewportInnerSize()
+		pw, ph := m.previewPixelSize()
 		var img image.Image
 		var rect image.Rectangle
 		var err error
@@ -105,19 +105,19 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 				// High-quality one-shot: smooth SDF sphere trace at full
 				// resolution (the slow path), for a final look once the
 				// camera is framed. Deliberately CPU — no render-mode badge.
-				img, rect, err = m.renderer.RenderAngledScale(s, cur, cp, pc*8, pr*16, 1)
+				img, rect, err = m.renderer.RenderAngledScale(s, cur, cp, pw, ph, 1)
 			} else {
 				// Live auto path: GPU raymarch when available+transpilable,
 				// else CPU mesh-preview fallback. The returned mode drives the
 				// viewport's GPU/CPU badge.
 				var mode render.RenderMode
-				img, rect, mode, err = m.renderer.RenderAngledAuto(s, cur, cp, pc*8, pr*16, 1)
+				img, rect, mode, err = m.renderer.RenderAngledAuto(s, cur, cp, pw, ph, 1)
 				ok2 := err == nil
 				m.w.SetPreview(cur, world.Projection(m.proj), rect.Dx(), rect.Dy(), ok2, errStr(err))
 				return previewUpdatedMsg{name: cur, epoch: epoch, img: img, ok: ok2, err: errStr(err), mode: mode, hasMode: true}
 			}
 		} else {
-			img, rect, err = m.renderer.Render(s, cur, m.proj, pc*8, pr*16)
+			img, rect, err = m.renderer.Render(s, cur, m.proj, pw, ph)
 		}
 		ok2 := err == nil
 		m.w.SetPreview(cur, world.Projection(m.proj), rect.Dx(), rect.Dy(), ok2, errStr(err))
@@ -146,7 +146,7 @@ func (m model) refreshPreviewHQCmd() tea.Cmd {
 		if !ok || s.Shader() == nil {
 			return previewUpdatedMsg{name: cur, epoch: epoch, ok: false, err: "no sdf", hq: true}
 		}
-		pc, pr := m.viewportInnerSize()
+		pw, ph := m.previewPixelSize()
 		cp := render.CameraParams{
 			Azimuth:   m.camAzimuth,
 			Elevation: m.camElevation,
@@ -154,7 +154,7 @@ func (m model) refreshPreviewHQCmd() tea.Cmd {
 			PanX:      m.camPanX,
 			PanY:      m.camPanY,
 		}
-		img, rect, mode, err := m.renderer.RenderAngledAutoQ(s, cur, cp, pc*8, pr*16, 1, render.HighGPUQuality(cp))
+		img, rect, mode, err := m.renderer.RenderAngledAutoQ(s, cur, cp, pw, ph, 1, render.HighGPUQuality(cp))
 		ok2 := err == nil
 		m.w.SetPreview(cur, world.Projection(m.proj), rect.Dx(), rect.Dy(), ok2, errStr(err))
 		return previewUpdatedMsg{name: cur, epoch: epoch, img: img, ok: ok2, err: errStr(err), mode: mode, hasMode: true, hq: true}

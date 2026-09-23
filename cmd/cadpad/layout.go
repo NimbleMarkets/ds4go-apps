@@ -105,6 +105,16 @@ func (m model) viewportInnerSize() (cols, rows int) {
 	return cols, rows
 }
 
+// previewPixelSize returns the viewport's size in terminal pixels, using the
+// cell size the terminal reported (8x16 until it answers). Rendering for this
+// size keeps the preview's aspect equal to the viewport's on any font; the
+// renderer's edge caps bound the actual raster.
+func (m model) previewPixelSize() (w, h int) {
+	cols, rows := m.viewportInnerSize()
+	cw, ch := m.pic.CellPixelSize()
+	return cols * cw, rows * ch
+}
+
 // viewportBounds returns the screen rectangle of the viewport panel for
 // mouse hit-testing (row 0 is the header).
 func (m model) viewportBounds() (x0, y0, x1, y1 int) {

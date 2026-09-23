@@ -36,6 +36,10 @@ type PreviewConfig struct {
 	// MaxEdge is the max pixels on the longer side of the output image.
 	// Typical interactive value: 160-256. Larger slows preview.
 	MaxEdge int
+	// GPUMaxEdge caps the longer side of GPU raymarch output, which is cheap
+	// enough to run at display resolution. Zero means twice MaxEdge. The CPU
+	// paths always use MaxEdge.
+	GPUMaxEdge int
 	// EvalBuffer is passed to NewImageRendererSDF2 (min 4096 recommended).
 	EvalBuffer int
 	// ColorConv if non-nil overrides the default inside/outside scheme.
@@ -44,6 +48,7 @@ type PreviewConfig struct {
 
 var DefaultPreviewConfig = PreviewConfig{
 	MaxEdge:    768,
+	GPUMaxEdge: 1536,
 	EvalBuffer: 8192,
 	ColorConv:  NiceColorConv,
 }
@@ -162,6 +167,9 @@ type Renderer struct {
 func NewRenderer(cfg PreviewConfig) (*Renderer, error) {
 	if cfg.MaxEdge <= 0 {
 		cfg.MaxEdge = DefaultPreviewConfig.MaxEdge
+	}
+	if cfg.GPUMaxEdge <= 0 {
+		cfg.GPUMaxEdge = 2 * cfg.MaxEdge
 	}
 	if cfg.EvalBuffer < 4096 {
 		cfg.EvalBuffer = DefaultPreviewConfig.EvalBuffer
@@ -323,6 +331,7 @@ func (r *Renderer) SetMaxEdge(edge int) {
 	}
 	r.mu.Lock()
 	r.cfg.MaxEdge = edge
+	r.cfg.GPUMaxEdge = 2 * edge
 	r.lastSz = make(map[string]image.Rectangle)
 	r.mu.Unlock()
 }

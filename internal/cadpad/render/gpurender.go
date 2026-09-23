@@ -97,7 +97,7 @@ func (r *Renderer) RenderAngledGPUQ(s3 simplesdf.SDF3, name string, cp CameraPar
 
 	// Output dimensions: identical to RenderAngledScale (pane budget + MaxEdge
 	// cap, then the same downscale division and floor).
-	w, h := computeTargetSizeAngled(maxW, maxH, r.cfg.MaxEdge)
+	w, h := computeTargetSizeAngled(maxW, maxH, r.cfg.GPUMaxEdge)
 	if downscale > 1 {
 		w = max(8, w/downscale)
 		h = max(8, h/downscale)
