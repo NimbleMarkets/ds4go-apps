@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -210,6 +211,14 @@ func (m model) viewportView(w int) string {
 	}
 	if m.resIndex > 0 {
 		projLabel += fmt.Sprintf("@%d", resPresets[m.resIndex])
+	}
+	if !m.lastRaster.Empty() {
+		ms := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
+		cost := fmt.Sprintf("%.1fms", ms(m.lastRender))
+		if m.lastEncode > 0 {
+			cost = fmt.Sprintf("%.1f+%.0fms", ms(m.lastRender), ms(m.lastEncode))
+		}
+		projLabel += fmt.Sprintf(" %dx%d %s", m.lastRaster.Dx(), m.lastRaster.Dy(), cost)
 	}
 	cur := m.w.Current()
 	if cur == "" {

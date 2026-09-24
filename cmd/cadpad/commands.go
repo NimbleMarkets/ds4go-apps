@@ -90,6 +90,7 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 			return previewUpdatedMsg{name: cur, epoch: epoch, ok: false, err: "no sdf"}
 		}
 		pw, ph := m.previewPixelSize()
+		start := time.Now()
 		var img image.Image
 		var rect image.Rectangle
 		var err error
@@ -114,14 +115,14 @@ func (m model) refreshPreviewCmd() tea.Cmd {
 				img, rect, mode, err = m.renderer.RenderAngledAuto(s, cur, cp, pw, ph, 1)
 				ok2 := err == nil
 				m.w.SetPreview(cur, world.Projection(m.proj), rect.Dx(), rect.Dy(), ok2, errStr(err))
-				return previewUpdatedMsg{name: cur, epoch: epoch, img: img, ok: ok2, err: errStr(err), mode: mode, hasMode: true}
+				return previewUpdatedMsg{name: cur, epoch: epoch, img: img, ok: ok2, err: errStr(err), render: time.Since(start), mode: mode, hasMode: true}
 			}
 		} else {
 			img, rect, err = m.renderer.Render(s, cur, m.proj, pw, ph)
 		}
 		ok2 := err == nil
 		m.w.SetPreview(cur, world.Projection(m.proj), rect.Dx(), rect.Dy(), ok2, errStr(err))
-		return previewUpdatedMsg{name: cur, epoch: epoch, img: img, ok: ok2, err: errStr(err)}
+		return previewUpdatedMsg{name: cur, epoch: epoch, img: img, ok: ok2, err: errStr(err), render: time.Since(start)}
 	}
 }
 
@@ -147,6 +148,7 @@ func (m model) refreshPreviewHQCmd() tea.Cmd {
 			return previewUpdatedMsg{name: cur, epoch: epoch, ok: false, err: "no sdf", hq: true}
 		}
 		pw, ph := m.previewPixelSize()
+		start := time.Now()
 		cp := render.CameraParams{
 			Azimuth:   m.camAzimuth,
 			Elevation: m.camElevation,
@@ -157,7 +159,7 @@ func (m model) refreshPreviewHQCmd() tea.Cmd {
 		img, rect, mode, err := m.renderer.RenderAngledAutoQ(s, cur, cp, pw, ph, 1, render.HighGPUQuality(cp))
 		ok2 := err == nil
 		m.w.SetPreview(cur, world.Projection(m.proj), rect.Dx(), rect.Dy(), ok2, errStr(err))
-		return previewUpdatedMsg{name: cur, epoch: epoch, img: img, ok: ok2, err: errStr(err), mode: mode, hasMode: true, hq: true}
+		return previewUpdatedMsg{name: cur, epoch: epoch, img: img, ok: ok2, err: errStr(err), render: time.Since(start), mode: mode, hasMode: true, hq: true}
 	}
 }
 

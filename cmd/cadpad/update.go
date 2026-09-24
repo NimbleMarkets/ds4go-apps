@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"image"
 	"math"
 	"path/filepath"
 	"strings"
@@ -136,8 +137,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showRenderMode = true
 			}
 			if msg.ok && msg.img != nil {
-				cmds = append(cmds, m.pic.SetImage(msg.img))
-				m.logger.Printf("[PREVIEW] %s ok  bounds=%+v", msg.name, msg.img.Bounds())
+				m.lastRaster = msg.img.Bounds()
+				m.lastRender = msg.render
+				cmds = append(cmds, m.presentPreview(msg.img))
+				m.logger.Printf("[PREVIEW] %s ok  bounds=%+v render=%s", msg.name, msg.img.Bounds(), msg.render)
 			} else if msg.err != "" {
 				m.lastErr = msg.err
 				m.logger.Printf("[PREVIEW] %s err=%q", msg.name, msg.err)
@@ -158,6 +161,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, tea.Tick(150*time.Millisecond, func(time.Time) tea.Msg {
 				return camSettleMsg{epoch: epoch}
 			}))
+		}
+
+	case padui.FrameEncodedMsg:
+		m.lastEncode = msg.Encode
+		m.lastEncodeBytes = msg.Bytes
+		if cmd := m.pic.Update(msg.Msg); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 
 	case camSettleMsg:
@@ -945,6 +955,12 @@ func (m *model) scrollLuaOutput(delta int) {
 // refreshPreview requests a preview render, coalescing with any render
 // already in flight. The 3D view rasterizes a cached mesh, so camera moves
 // are fast at full resolution and need no progressive/low-res pass.
+// presentPreview hands a frame to the picture widget, timing its encode so the
+// viewport header can show where frame time goes.
+func (m *model) presentPreview(img image.Image) tea.Cmd {
+	return padui.TimeEncode(m.pic.SetImage(img))
+}
+
 func (m *model) refreshPreview() tea.Cmd {
 	// Every render request advances the epoch so any settle tick scheduled for
 	// an earlier frame is recognized as stale and ignored when it fires. This

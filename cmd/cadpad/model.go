@@ -48,6 +48,9 @@ type previewUpdatedMsg struct {
 	// must not be treated as "GPU".)
 	mode    render.RenderMode
 	hasMode bool
+	// render is the renderer's wall time for this frame (GPU dispatch and
+	// readback, or the CPU path), shown in the viewport header.
+	render time.Duration
 
 	// hq marks a frame produced by the high-quality settle render
 	// (RenderAngledAutoQ at HighGPUQuality). The settle handler uses it to avoid
@@ -220,7 +223,13 @@ type model struct {
 	// live 3D frame; showRenderMode gates the viewport badge so it only appears
 	// once a real auto-path frame has reported a mode.
 	lastRenderMode render.RenderMode
-	showRenderMode bool
+	// Frame cost telemetry for the viewport header: raster on screen, render
+	// time, and the picture widget's encode time and payload size.
+	lastRaster      image.Rectangle
+	lastRender      time.Duration
+	lastEncode      time.Duration
+	lastEncodeBytes int
+	showRenderMode  bool
 
 	// View cache for high-frequency input events
 	cachedView *string
