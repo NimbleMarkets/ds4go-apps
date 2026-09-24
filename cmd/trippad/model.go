@@ -108,7 +108,7 @@ func newModel(s *tools.State) *model {
 	input.Prompt = "> "
 	input.Placeholder = "Enter a prompt or /help (Tab to focus)"
 	input.CharLimit = 8192
-	return &model{engineStatus: engineinit.StatusDormant, state: s, input: input, pic: picture.NewWithConfig(picture.Config{CellPixelWidth: 8, CellPixelHeight: 16, Fit: picture.FitFill, KittyTransport: picture.KittyTransportAuto}), playing: true, dirty: true, downscale: 2, targetFPS: 60, status: "Space pause · ↑↓ select · ←→ adjust · Tab prompt · ? help", options: runconfig.Options{Temperature: .7, TopP: .95, ToolRounds: 20}}
+	return &model{engineStatus: engineinit.StatusDormant, state: s, input: input, pic: picture.NewWithConfig(picture.Config{CellPixelWidth: 8, CellPixelHeight: 16, Fit: picture.FitFill}), playing: true, dirty: true, downscale: 2, targetFPS: 60, status: "Space pause · ↑↓ select · ←→ adjust · Tab prompt · ? help", options: runconfig.Options{Temperature: .7, TopP: .95, ToolRounds: 20}}
 }
 func (m *model) tick() tea.Cmd {
 	return tea.Tick(time.Second/time.Duration(max(1, m.targetFPS)), func(t time.Time) tea.Msg { return tickMsg(t) })
@@ -117,10 +117,6 @@ func (m *model) Init() tea.Cmd {
 	return tea.Batch(m.pic.Init(), picture.RequestCellSize(), picture.QueryKittySupport(), m.tick(), func() tea.Msg { return startupMsg{} }, tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg { return probeMsg{} }))
 }
 func (m *model) close() {
-	// Program.Run has stopped its output writer before this cleanup.
-	if err := m.pic.Close(); err != nil {
-		m.addLog("Could not release Kitty shared memory: " + err.Error())
-	}
 	m.gen.StopAndWait()
 	m.action.StopAndWait()
 	m.loader.StopAndWait()
