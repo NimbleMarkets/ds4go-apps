@@ -22,9 +22,11 @@ This repository contains a family of Bubble Tea TUI tools that run DeepSeek-fami
 
 These apps require `ds4go` to be installed, with a `ds4` dynamic library and associated model downloaded.  `ds4` requires 128G or more of GPU memory.
 
-The apps use **ds4go v0.7.0**, which requires libds4 **v0.5.20260910** or
+The apps use **ds4go v0.8.0**, which requires libds4 **v0.5.20260910** or
 newer. DeepSeek V4.1 and think levels require **v0.6.20260912**; DGX Spark
-(GB10) requires the **v0.6.20260913** `linux-arm64-gb10-cuda` library asset.
+(GB10) requires the **v0.6.20260913** `linux-arm64-gb10-cuda` library asset;
+Qwen3.8 Flash Next and the low and medium reasoning modes require
+**v0.7.20260918**.
 
 On Linux, cadpad uses Vulkan for its GPU viewport. The Taskfile builds with
 `CGO_ENABLED=0` and `-tags=nofakecgo`, sharing purego's FFI runtime with goffi;
@@ -35,13 +37,14 @@ graphics driver is required for GPU rendering.
 
 ## Build
 
-This working tree uses new ds4go public model APIs that are not yet in v0.7.0.
-Until the next ds4go release, build alongside the updated `../ds4-go` checkout:
+ds4go v0.8.0 is published, so the module builds without a workspace. trippad
+still uses ntcharts picture changes that are not released yet; until they are,
+build alongside the `../ntcharts` checkout:
 
 ```bash
 # One-time local workspace setup (go.work is ignored).
-go work init . ../ds4-go
-# If you already have a go.work, use: go work use . ../ds4-go
+go work init . ../ntcharts
+# If you already have a go.work, use: go work use . ../ntcharts
 ```
 
 Build everything at once:

@@ -8,8 +8,8 @@ github.com/76creates/stickers v1.5.0 h1:LJOlzeUbGOKBlsfi1UXShQiBh7IY7D9g5KTG7qlt
 github.com/76creates/stickers v1.5.0/go.mod h1:S0ii0IRGMJx5n5zGpesai8oX0DWY3X5PDI3OUErgF38=
 github.com/MakeNowJust/heredoc v1.0.0 h1:cXCdzVdstXyiTqTvfqk9SDHpKNjxuom+DOlyEeQ4pzQ=
 github.com/MakeNowJust/heredoc v1.0.0/go.mod h1:mG5amYoWBHf8vpLOuehzbGGw0EHxpZZ6lCpQ4fNJ8LE=
-github.com/NimbleMarkets/ds4go v0.7.0 h1:pvPzjk3jaesBfOhw6uVZLwCAxgrRMWECMThzcjdzkGI=
-github.com/NimbleMarkets/ds4go v0.7.0/go.mod h1:wzPzejhH46DxhpFLLpaeV85NFXG9KyYGt0genQfXQxc=
+github.com/NimbleMarkets/ds4go v0.8.0 h1:S2i3kGUY8qidwA9G0kqHk7Aw9sm7xlVDmtbFJjpdUyA=
+github.com/NimbleMarkets/ds4go v0.8.0/go.mod h1:wzPzejhH46DxhpFLLpaeV85NFXG9KyYGt0genQfXQxc=
 github.com/NimbleMarkets/ntcharts-svg v0.2.2 h1:XVCeOyAfnMsrisyL7/UmXTBp/iyD+32wx5jdEp+XSjs=
 github.com/NimbleMarkets/ntcharts-svg v0.2.2/go.mod h1:Pt8lNhzOYrocdpBu8M94Q3TFjw3YUqTSRySAQXwuJ/s=
 github.com/NimbleMarkets/ntcharts/v2 v2.2.0 h1:c173B0dc2eaJMJGEzlGEn8AVpuupIot5BkqLawJrVVo=

@@ -7,15 +7,17 @@ require (
 	charm.land/bubbletea/v2 v2.0.8
 	charm.land/lipgloss/v2 v2.0.5
 	github.com/76creates/stickers v1.5.0
-	github.com/NimbleMarkets/ds4go v0.7.0
+	github.com/NimbleMarkets/ds4go v0.8.0
 	github.com/NimbleMarkets/ntcharts-svg v0.2.2
 	github.com/NimbleMarkets/ntcharts/v2 v2.2.0
 	github.com/NimbleMarkets/ntdiff v0.0.1
 	github.com/alecthomas/chroma/v2 v2.27.0
+	github.com/charmbracelet/ultraviolet v0.0.0-20260713092251-4bee1914c0cf
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/chewxy/math32 v1.11.2
 	github.com/ebitengine/purego v0.11.0
 	github.com/gogpu/gputypes v0.5.1
+	github.com/gogpu/naga v0.17.15
 	github.com/gogpu/wgpu v0.30.22
 	github.com/hpinc/go3mf v0.24.2
 	github.com/soypat/geometry v0.0.0-20260615162427-dce6cc7451b3
@@ -23,6 +25,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.10
 	github.com/yuin/gopher-lua v1.1.2
+	golang.org/x/sys v0.48.0
 )
 
 require (
@@ -32,7 +35,6 @@ require (
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/lipgloss v1.1.0 // indirect
-	github.com/charmbracelet/ultraviolet v0.0.0-20260713092251-4bee1914c0cf // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.15 // indirect
 	github.com/charmbracelet/x/powernap v0.1.6 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
@@ -48,7 +50,6 @@ require (
 	github.com/go-webgpu/goffi v0.6.4 // indirect
 	github.com/go-webgpu/webgpu v0.5.3 // indirect
 	github.com/gogpu/gpucontext v0.21.1 // indirect
-	github.com/gogpu/naga v0.17.15 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/lrstanley/bubblezone/v2 v2.0.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
@@ -67,6 +68,5 @@ require (
 	golang.org/x/image v0.44.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 )

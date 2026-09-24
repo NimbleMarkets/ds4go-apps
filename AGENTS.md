@@ -34,8 +34,8 @@ checkpoints. Keep the active user request intact; do not silently discard its
 constraints. Checkpoints must distinguish completed operations, failed attempts,
 and remaining work so resuming cannot blindly repeat side effects.
 
-This checkout currently uses the local `../ds4-go` scratchtool API and the
-`../ntcharts` picture fix through ignored `go.work`; see the trippad README.
+ds4go v0.8.0 is the published pin. This checkout still needs the local
+`../ntcharts` picture changes through the ignored `go.work`; see the README.
 Validate maintained packages with `go test ./cmd/... ./internal/... ./ntgpu` and
 `go vet ./cmd/... ./internal/... ./ntgpu`. Run GPU tests without `-race`; the
 current Metal callback has a known checkptr incompatibility. Focused Go race
