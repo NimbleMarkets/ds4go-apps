@@ -1842,6 +1842,9 @@ func (m model) runTurn(ctx context.Context, ch chan<- tea.Msg) {
 		Images:    images,
 		ThinkMode: m.activeReasoning(),
 		MaxRounds: m.maxToolRounds + 1, // tool rounds plus the final answer turn
+		// The final answer turn runs without tool schemas and is asked to
+		// summarize completed and unfinished work.
+		FinalResponseOnly: true,
 		// Auto-correct retries run on a smaller budget so a degenerate retry
 		// fails fast and three of them cannot fill the session context.
 		MaxTokens:   turnMaxTokens(m.autoCorrectCount),

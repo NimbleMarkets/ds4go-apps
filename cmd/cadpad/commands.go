@@ -291,13 +291,16 @@ If lua_run errors, read the file, fix the code, and run again. Keep responses co
 		var lastAssistant ds4.ChatMessage
 		var driver *bubble.GenerationDriver
 		driver = bubble.NewGenerationDriver(bubble.DriverOptions{
-			Engine:      m.engine,
-			Session:     m.session,
-			Tools:       m.tools,
-			ThinkMode:   m.thinkMode,
-			MaxRounds:   m.maxRounds + 1,
-			MaxTokens:   8192,
-			Temperature: m.runOptions.Temperature, TopP: m.runOptions.TopP, Seed: m.runOptions.EffectiveSeed(),
+			Engine:    m.engine,
+			Session:   m.session,
+			Tools:     m.tools,
+			ThinkMode: m.thinkMode,
+			MaxRounds: m.maxRounds + 1,
+			MaxTokens: 8192,
+			// Last allowed round answers without tools and summarizes what was
+			// and was not finished instead of dying on ErrMaxRounds mid-plan.
+			FinalResponseOnly: true,
+			Temperature:       m.runOptions.Temperature, TopP: m.runOptions.TopP, Seed: m.runOptions.EffectiveSeed(),
 			PrepareHistory: runconfig.PrepareHistory, ContextFeedback: runconfig.ContextFeedback, MinResponseTokens: 1024,
 			ExecuteTools: func(ctx context.Context, calls []ds4.ToolCall) ([]ds4.ChatMessage, error) {
 				driver.Emit(bubble.LogEvent{
