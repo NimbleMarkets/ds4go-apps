@@ -5,9 +5,6 @@ Animate WGSL compute shaders on the GPU, tune their parameters with sliders, and
 ## Quick start
 
 ```sh
-# Until the picture fix is released, include the sibling ntcharts checkout
-# containing commit 67c79f7 in the project's existing workspace.
-go work use ../ds4-go ../ntcharts
 go build -o bin/ds4go-trippad ./cmd/trippad
 ./bin/ds4go-trippad --no-engine
 ./bin/ds4go-trippad # choose an installed model before loading

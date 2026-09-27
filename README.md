@@ -37,15 +37,8 @@ graphics driver is required for GPU rendering.
 
 ## Build
 
-ds4go v0.8.0 is published, so the module builds without a workspace. trippad
-still uses ntcharts picture changes that are not released yet; until they are,
-build alongside the `../ntcharts` checkout:
-
-```bash
-# One-time local workspace setup (go.work is ignored).
-go work init . ../ntcharts
-# If you already have a go.work, use: go work use . ../ntcharts
-```
+ds4go v0.8.0 and ntcharts v2.3.0 are published, so the module builds without a
+workspace.
 
 Build everything at once:
 

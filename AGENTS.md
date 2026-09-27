@@ -34,8 +34,9 @@ checkpoints. Keep the active user request intact; do not silently discard its
 constraints. Checkpoints must distinguish completed operations, failed attempts,
 and remaining work so resuming cannot blindly repeat side effects.
 
-ds4go v0.8.0 is the published pin. This checkout still needs the local
-`../ntcharts` picture changes through the ignored `go.work`; see the README.
+ds4go v0.8.0 and ntcharts v2.3.0 are the published pins; the module builds and
+tests without a workspace. Check with `GOWORK=off` when a local ignored
+`go.work` is present, since CI has none.
 Validate maintained packages with `go test ./cmd/... ./internal/... ./ntgpu` and
 `go vet ./cmd/... ./internal/... ./ntgpu`. Run GPU tests without `-race`; the
 current Metal callback has a known checkptr incompatibility. Focused Go race

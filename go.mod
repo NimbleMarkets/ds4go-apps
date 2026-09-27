@@ -3,16 +3,16 @@ module github.com/NimbleMarkets/ds4go-apps
 go 1.26.3
 
 require (
-	charm.land/bubbles/v2 v2.1.1
-	charm.land/bubbletea/v2 v2.0.8
-	charm.land/lipgloss/v2 v2.0.5
+	charm.land/bubbles/v2 v2.2.1
+	charm.land/bubbletea/v2 v2.0.9
+	charm.land/lipgloss/v2 v2.0.6
 	github.com/76creates/stickers v1.5.0
 	github.com/NimbleMarkets/ds4go v0.8.0
 	github.com/NimbleMarkets/ntcharts-svg v0.2.2
-	github.com/NimbleMarkets/ntcharts/v2 v2.2.0
+	github.com/NimbleMarkets/ntcharts/v2 v2.3.0
 	github.com/NimbleMarkets/ntdiff v0.0.1
 	github.com/alecthomas/chroma/v2 v2.27.0
-	github.com/charmbracelet/ultraviolet v0.0.0-20260713092251-4bee1914c0cf
+	github.com/charmbracelet/ultraviolet v0.0.0-20260910203606-6c9e17dc7a16
 	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/chewxy/math32 v1.11.2
 	github.com/ebitengine/purego v0.11.0
@@ -63,10 +63,10 @@ require (
 	github.com/sourcegraph/jsonrpc2 v0.2.3 // indirect
 	github.com/soypat/glgl v0.0.0-20250930033525-aafa471e3c50 // indirect
 	github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef // indirect
-	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	github.com/xo/terminfo v1.2.0 // indirect
 	golang.org/x/exp v0.0.0-20260709172345-9ea1abe57597 // indirect
-	golang.org/x/image v0.44.0 // indirect
+	golang.org/x/image v0.46.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/text v0.40.0 // indirect
+	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 )
