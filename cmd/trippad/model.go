@@ -65,6 +65,8 @@ type model struct {
 	app                                         *appinit.App
 	options                                     runconfig.Options
 	pic                                         picture.Model
+	transport                                   padui.KittyTransport
+	transportFallbackLogged                     bool
 	input                                       textinput.Model
 	picker                                      modelpicker.Model
 	loading                                     padui.Loading
@@ -110,6 +112,15 @@ func newModel(s *tools.State) *model {
 	input.CharLimit = 8192
 	return &model{engineStatus: engineinit.StatusDormant, state: s, input: input, pic: picture.NewWithConfig(picture.Config{CellPixelWidth: 8, CellPixelHeight: 16, Fit: picture.FitFill}), playing: true, dirty: true, downscale: 2, targetFPS: 60, status: "Space pause · ↑↓ select · ←→ adjust · Tab prompt · ? help", options: runconfig.Options{Temperature: .7, TopP: .95, ToolRounds: 20}}
 }
+
+// setKittyTransport requests how Kitty frames are delivered. The widget's
+// re-render commands are dropped: the animation presents a new frame anyway.
+func (m *model) setKittyTransport(t padui.KittyTransport) {
+	cfg := t.Configure(picture.Config{})
+	m.transport, m.transportFallbackLogged = t, false
+	m.pic.SetKittyFormat(cfg.KittyFormat)
+	m.pic.SetKittyMedium(cfg.KittyMedium)
+}
 func (m *model) tick() tea.Cmd {
 	return tea.Tick(time.Second/time.Duration(max(1, m.targetFPS)), func(t time.Time) tea.Msg { return tickMsg(t) })
 }
@@ -117,6 +128,9 @@ func (m *model) Init() tea.Cmd {
 	return tea.Batch(m.pic.Init(), picture.RequestCellSize(), picture.QueryKittySupport(), m.tick(), func() tea.Msg { return startupMsg{} }, tea.Tick(300*time.Millisecond, func(time.Time) tea.Msg { return probeMsg{} }))
 }
 func (m *model) close() {
+	// Unlink shared-memory frames the terminal has not consumed; they would
+	// otherwise persist after exit.
+	m.pic.SetImage(nil)
 	m.gen.StopAndWait()
 	m.action.StopAndWait()
 	m.loader.StopAndWait()
@@ -307,6 +321,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if frame, ok := encoded.(picture.KittyFrameMsg); ok {
 					perf.UploadBytes = len(frame.APC)
 					perf.Kitty = true
+					perf.Transport = string(padui.FrameTransport(frame))
 				}
 				return encodedMsg{msg: encoded, performance: perf}
 			})
@@ -316,6 +331,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case encodedMsg:
 		m.state.RecordPerformance(msg.performance)
+		if m.transport == padui.KittyTransportSharedMemory && msg.performance.Kitty && msg.performance.Transport != string(m.transport) && !m.transportFallbackLogged {
+			m.transportFallbackLogged = true
+			m.addLog("Kitty shared memory unavailable; frames use direct " + msg.performance.Transport)
+		}
 		// Keep coalescing until the upload and placeholder update have been
 		// sent, so a later frame cannot overtake this terminal presentation.
 		cmds = append(cmds, tea.Sequence(m.pic.Update(msg.msg), func() tea.Msg { return presentedMsg{} }))

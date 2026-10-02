@@ -38,6 +38,9 @@ type Performance struct {
 	UploadBytes int     `json:"upload_bytes"`
 	SampledAt   int64   `json:"sampled_at"`
 	Kitty       bool    `json:"kitty"`
+	// Transport is what the last Kitty frame actually used: png, rgba, or shm.
+	// With shm, UploadBytes is only the reference written to the terminal.
+	Transport string `json:"transport,omitempty"`
 }
 
 type State struct {

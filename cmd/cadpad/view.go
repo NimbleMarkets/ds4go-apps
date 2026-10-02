@@ -11,6 +11,7 @@ import (
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/render"
 	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
 	"github.com/NimbleMarkets/ds4go-apps/internal/headerbar"
+	"github.com/NimbleMarkets/ds4go-apps/internal/padui"
 	"github.com/NimbleMarkets/ntcharts/v2/picture"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -217,6 +218,12 @@ func (m model) viewportView(w int) string {
 		cost := fmt.Sprintf("%.1fms", ms(m.lastRender))
 		if m.lastEncode > 0 {
 			cost = fmt.Sprintf("%.1f+%.0fms", ms(m.lastRender), ms(m.lastEncode))
+		}
+		// Name the transport unless everything is the default, so a
+		// shared-memory fallback to PNG is visible.
+		png := padui.KittyTransportPNG
+		if m.lastTransport != "" && (m.lastTransport != png || (m.transport != "" && m.transport != png)) {
+			cost += " " + string(m.lastTransport)
 		}
 		projLabel += fmt.Sprintf(" %dx%d %s", m.lastRaster.Dx(), m.lastRaster.Dy(), cost)
 	}

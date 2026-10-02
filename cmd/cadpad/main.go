@@ -6,14 +6,13 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
 	"github.com/NimbleMarkets/ds4go-apps/internal/cadpad/world"
+	"github.com/NimbleMarkets/ds4go-apps/internal/padui"
 	"github.com/NimbleMarkets/ds4go-apps/internal/runconfig"
 	"github.com/spf13/pflag"
 )
@@ -29,10 +28,15 @@ func run() (err error) {
 	flags := appinit.RegisterFlags(pflag.CommandLine, "cadpad", appinit.Defaults{Ctx: 16384, Power: 80})
 	var noEngine bool
 	pflag.BoolVar(&noEngine, "no-engine", false, "start without LLM engine (pure geometry mode or harness embedding)")
+	kittyTransport := pflag.String("kitty-transport", string(padui.KittyTransportPNG), padui.KittyTransportUsage)
 	options := runconfig.Register(pflag.CommandLine, 36)
 	pflag.Parse()
 	if err := options.Validate(); err != nil {
 		return err
+	}
+	transport, err := padui.ParseKittyTransport(*kittyTransport)
+	if err != nil {
+		return fmt.Errorf("--kitty-transport: %w", err)
 	}
 
 	app, err := appinit.Bootstrap(flags, appinit.WithoutEngine(noEngine), appinit.AllowModelSelection())
@@ -42,28 +46,15 @@ func run() (err error) {
 	defer func() { app.Close(err) }()
 
 	m := newModel(app)
+	m.setKittyTransport(transport)
 	m.runOptions = *options
 	m.maxRounds = options.ToolRounds
 	p := tea.NewProgram(m)
 	final, runErr := p.Run()
 
-	// The model owns the engine/session once Init's goroutine fires; on
-	// exit we recover them from the final model state and close in order.
+	// Recover what the model owns from its final state.
 	if fm, ok := final.(model); ok {
-		fm.gen.StopAndWait()
-		if fm.session != nil {
-			fm.session.Close()
-		}
-		if fm.engine != nil {
-			fm.engine.Close()
-		}
-		if fm.luaDiag != nil {
-			fm.luaDiag.Close(context.Background())
-		}
-		// Best-effort autosave of current world for recovery.
-		if len(fm.w.Names()) > 0 {
-			_ = fm.w.Save(filepath.Join(os.TempDir(), "cadpad-last.cad.json"))
-		}
+		fm.shutdown()
 	}
 	return runErr
 }

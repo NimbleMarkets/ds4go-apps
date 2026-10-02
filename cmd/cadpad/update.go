@@ -166,6 +166,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case padui.FrameEncodedMsg:
 		m.lastEncode = msg.Encode
 		m.lastEncodeBytes = msg.Bytes
+		m.lastTransport = msg.Transport
 		if cmd := m.pic.Update(msg.Msg); cmd != nil {
 			cmds = append(cmds, cmd)
 		}

@@ -93,7 +93,10 @@ submissions are in flight. Hidden tabs and the gallery suspend main rendering.
 Browser CPU/GPU timing queries and periodic native telemetry polling are omitted.
 
 For deeper native profiling, `/api/state` still exposes the latest native FPS,
-render/readback duration, Kitty encoding duration and upload bytes. These are
+render/readback duration, Kitty encoding duration, upload bytes and the
+transport the last frame used (`png`, `rgba` or `shm`). With `shm` the upload
+bytes are only the reference written to the terminal; the pixels travel through
+shared memory. These are
 wall times; glyph encoding and terminal transport/display are not measured.
 The native path allocates dispatch buffers, waits for the GPU, reads pixels into
 Go, then prepares/PNG-encodes frames for the terminal. Browser presentation keeps
@@ -352,7 +355,7 @@ Presets contain the name, shader body, parameter definitions, and named values. 
 
 Use `--help` for all flags. Shared flags include `--model` / `-m`, `--lib`, `--ctx`, `--backend`, `--mtp`, `--debug`, `--power`, `--ssd-streaming`, `--temp`, `--top-p`, `--seed`, and `--tool-rounds`.
 
-Trippad adds `--web[=127.0.0.1:8080]`, `--web-only`, `--no-engine`, `--fullscreen`, `--preset FILE`, `--gallery-dir PATH`, `--memory-dir PATH`, `--memory-session ID`, `--wgsl-lsp auto|off|PATH`, `--fps 1..60` (default 60), and `--downscale 1..8` (default 2). Higher downscale values trade detail for faster rendering and smaller terminal uploads; `+`/`-` in the controls pane or `/downscale N` change it while running, and the header shows the current raster; `--fps 30` reduces CPU and terminal work. Inference defaults to a 16,384-token context, 100% power (no throttling), and 20 tool rounds plus a final response. Qwen3.8 does not support power throttling, so selecting a catalog Qwen model temporarily uses 100% even when a lower `--power` was configured; switching back restores that setting. Native diagnostics always go to `trippad.log`; `--debug` additionally logs raw LLM traffic. Failed loads open the shared log dialog automatically so the native reason is visible alongside the status code.
+Trippad adds `--web[=127.0.0.1:8080]`, `--web-only`, `--no-engine`, `--fullscreen`, `--preset FILE`, `--gallery-dir PATH`, `--memory-dir PATH`, `--memory-session ID`, `--wgsl-lsp auto|off|PATH`, `--fps 1..60` (default 60), `--kitty-transport png|rgba|shm` (default `png`; see the top-level README), and `--downscale 1..8` (default 2). Higher downscale values trade detail for faster rendering and smaller terminal uploads; `+`/`-` in the controls pane or `/downscale N` change it while running, and the header shows the current raster; `--fps 30` reduces CPU and terminal work. Inference defaults to a 16,384-token context, 100% power (no throttling), and 20 tool rounds plus a final response. Qwen3.8 does not support power throttling, so selecting a catalog Qwen model temporarily uses 100% even when a lower `--power` was configured; switching back restores that setting. Native diagnostics always go to `trippad.log`; `--debug` additionally logs raw LLM traffic. Failed loads open the shared log dialog automatically so the native reason is visible alongside the status code.
 
 ## Development
 

@@ -229,6 +229,8 @@ type model struct {
 	lastRender      time.Duration
 	lastEncode      time.Duration
 	lastEncodeBytes int
+	transport       padui.KittyTransport // requested
+	lastTransport   padui.KittyTransport // used by the last frame, after any fallback
 	showRenderMode  bool
 
 	// View cache for high-frequency input events
@@ -454,4 +456,36 @@ func (m model) Init() tea.Cmd {
 	}
 
 	return tea.Batch(cmds...)
+}
+
+// setKittyTransport requests how Kitty frames are delivered. The widget's
+// re-render commands are dropped: this is set before the first preview.
+func (m *model) setKittyTransport(t padui.KittyTransport) {
+	cfg := t.Configure(picture.Config{})
+	m.transport = t
+	m.pic.SetKittyFormat(cfg.KittyFormat)
+	m.pic.SetKittyMedium(cfg.KittyMedium)
+}
+
+// shutdown releases what the model owns once the program has stopped. The
+// model owns the engine and session after Init's goroutine fires, so they are
+// closed here in order.
+func (m *model) shutdown() {
+	// Unlink shared-memory frames the terminal has not consumed; they would
+	// otherwise persist after exit.
+	m.pic.SetImage(nil)
+	m.gen.StopAndWait()
+	if m.session != nil {
+		m.session.Close()
+	}
+	if m.engine != nil {
+		m.engine.Close()
+	}
+	if m.luaDiag != nil {
+		m.luaDiag.Close(context.Background())
+	}
+	// Best-effort autosave of current world for recovery.
+	if len(m.w.Names()) > 0 {
+		_ = m.w.Save(filepath.Join(os.TempDir(), "cadpad-last.cad.json"))
+	}
 }

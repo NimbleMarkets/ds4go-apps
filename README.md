@@ -338,6 +338,21 @@ cadpad-only:
 |------|---------|
 | `--no-engine` | Start without LLM (pure geometry / headless tool use) |
 
+cadpad and trippad:
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--kitty-transport` | `png` | How Kitty frames reach the terminal: `png`, `rgba`, or `shm` |
+
+`png` works everywhere Kitty graphics do, including over SSH. `rgba` skips the
+PNG encode but sends about 5.3 bytes per pixel through the terminal. `shm`
+passes raw pixels through shared memory, so only a short reference goes through
+the terminal. It needs a local terminal that supports Kitty's shared-memory
+medium (`t=s`), such as Kitty or Ghostty. Nothing can detect that support, so
+`shm` is never chosen automatically: if the viewport stays blank, go back to
+`png`. When a shared-memory object cannot be created, frames fall back to PNG.
+cadpad names the transport in the viewport header and trippad logs the fallback.
+
 steering-only:
 
 | Flag | Meaning |

@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
+	"github.com/NimbleMarkets/ds4go-apps/internal/padui"
 	"github.com/NimbleMarkets/ds4go-apps/internal/runconfig"
 	"github.com/NimbleMarkets/ds4go-apps/internal/trippad/library"
 	"github.com/NimbleMarkets/ds4go-apps/internal/trippad/memory"
@@ -45,6 +46,7 @@ func run() (err error) {
 	preset := pflag.String("preset", "", "load a .trip.json preset at startup")
 	downscale := pflag.Int("downscale", 2, "viewport pixel downscale (1..8; adapts upward for slow frames)")
 	fps := pflag.Int("fps", 60, "target animation frames per second (1..60)")
+	kittyTransport := pflag.String("kitty-transport", string(padui.KittyTransportPNG), padui.KittyTransportUsage)
 	webAddr := pflag.String("web", "", "serve a WebGPU comparison on a loopback address (default 127.0.0.1:8080)")
 	pflag.Lookup("web").NoOptDefVal = "127.0.0.1:8080"
 	webOnly := pflag.Bool("web-only", false, "serve only the browser demo, without terminal rendering or a model")
@@ -62,6 +64,10 @@ func run() (err error) {
 	}
 	if *fps < 1 || *fps > 60 {
 		return fmt.Errorf("--fps must be 1..60")
+	}
+	transport, err := padui.ParseKittyTransport(*kittyTransport)
+	if err != nil {
+		return fmt.Errorf("--kitty-transport: %w", err)
 	}
 	if *webOnly {
 		if *webAddr == "" {
@@ -128,6 +134,10 @@ func run() (err error) {
 	}
 	m.downscale = *downscale
 	m.targetFPS = *fps
+	m.setKittyTransport(transport)
+	if transport != padui.KittyTransportPNG {
+		m.addLog("Kitty transport: " + string(transport) + " requested")
+	}
 	m.noEngine = *noEngine
 	m.fullscreen = *fullscreen
 	m.addLog("Shader history: " + store.Dir + " · F3 gallery")
