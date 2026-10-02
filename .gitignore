@@ -47,6 +47,11 @@ docs
 
 # cadpad session + tool/runtime artifacts
 /cadpad-session.cad.json
+
+# Presets and scenes saved into the repo root by running the pads there
+# (committed examples live under examples/)
+/*.trip.json
+/*.cad.json
 /users.json
 /.antigravitycli/
 
