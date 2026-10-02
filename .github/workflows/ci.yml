@@ -41,13 +41,14 @@ jobs:
             exit 1
           fi
 
-      # Pure-Go set = packages that do NOT transitively import gogpu, which needs
-      # cgo + Metal and only builds on darwin. Same computation as the linux job.
+      # Pure-Go set = packages that do NOT transitively import gogpu (cgo + Metal,
+      # darwin only) or go-gl (cgo + system GL/X11 headers the runner lacks; the
+      # CAD packages reach it through gsdf). Same computation as the linux job.
       - name: Compute pure-Go package set
         id: pkgs
         run: |
           list=$(for p in $(go list ./...); do
-            go list -deps "$p" 2>/dev/null | grep -q 'gogpu/wgpu' || echo "$p"
+            go list -deps -test "$p" 2>/dev/null | grep -qE 'gogpu/wgpu|go-gl/(gl|glfw)' || echo "$p"
           done | tr '\n' ' ')
           echo "pure-Go packages: $list"
           echo "list=$list" >> "$GITHUB_OUTPUT"
@@ -125,14 +126,16 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # Pure-Go set = every package that does NOT transitively import gogpu.
-      # This catches indirect importers (internal/cadpad/{harness,lua,tools}),
-      # which a path grep would miss.
+      # Pure-Go set = every package that does NOT transitively import gogpu or
+      # go-gl. This catches indirect importers (internal/cadpad/{harness,lua,
+      # tools,world}), which a path grep would miss; -test also counts imports
+      # made only by a package's tests. The excluded CAD packages
+      # still get Linux coverage from the CGO-disabled compile step below.
       - name: Compute pure-Go package set
         id: pkgs
         run: |
           list=$(for p in $(go list ./...); do
-            go list -deps "$p" 2>/dev/null | grep -q 'gogpu/wgpu' || echo "$p"
+            go list -deps -test "$p" 2>/dev/null | grep -qE 'gogpu/wgpu|go-gl/(gl|glfw)' || echo "$p"
           done | tr '\n' ' ')
           echo "pure-Go packages: $list"
           echo "list=$list" >> "$GITHUB_OUTPUT"
