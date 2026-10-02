@@ -174,6 +174,10 @@ func TestCheckColorLiterals(t *testing.T) {
 		{"bad stop-color", `stop-color="#zz"`, "stop-color"},
 		{"bad style fill", `style="stroke-width:2;fill:#ccc.5"`, "ccc.5"},
 		{"bad style case", `style="FILL:#ccc.5"`, "ccc.5"},
+		// oksvg has no alpha hex; the error has to tell the model what to use.
+		{"rrggbbaa", `fill="#ff000080"`, "fill-opacity"},
+		{"rgba hex", `stroke="#f008"`, "stroke-opacity"},
+		{"stop alpha", `stop-color="#ff000080"`, "stop-opacity"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := checkColorLiterals(wrap(tc.attrs))
@@ -192,5 +196,31 @@ func TestValidateSVGToleratesUnknownElements(t *testing.T) {
 	doc := `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><metadata><x/></metadata><rect width="5" height="5" fill="red"/></svg>`
 	if got := validateSVG([]byte(doc)); got != "valid" {
 		t.Errorf("validateSVG = %q, want valid", got)
+	}
+}
+
+func TestCheckColorLiteralsInStyleSheet(t *testing.T) {
+	doc := func(css string) []byte {
+		return []byte(`<svg xmlns="http://www.w3.org/2000/svg"><style>` + css + `</style><rect class="a" width="5" height="5"/></svg>`)
+	}
+	for _, tc := range []struct {
+		name, css, wantErr string
+	}{
+		{"valid", `.a { fill: #fff; stroke: red !important; stroke-width: 2 } .b{stop-color:navy}`, ""},
+		{"keywords", `.a { fill: none; stroke: currentColor }`, ""},
+		{"bad fill", `.a { fill: #ccc.5 }`, "ccc.5"},
+		{"bad stroke after valid rule", `.b{fill:red} .a{stroke:#12; fill:blue}`, "stroke"},
+		{"cdata", `<![CDATA[.a { fill: #zzz }]]>`, "zzz"},
+		{"selector text is not a property", `rect.fill-x:hover { opacity: .5 }`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkColorLiterals(doc(tc.css))
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("error = %v, want mention of %q", err, tc.wantErr)
+			}
+		})
 	}
 }

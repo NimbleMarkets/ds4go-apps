@@ -23,8 +23,16 @@ import (
 // matters.
 const renderCheckEdge = 64
 
-// colorProperties are the style properties oksvg parses with ParseSVGColor.
-var colorProperties = map[string]bool{"fill": true, "stroke": true, "stop-color": true}
+// colorProperties are the style properties oksvg parses with ParseSVGColor,
+// each with the opacity property that carries alpha for it.
+var colorProperties = map[string]string{"fill": "fill-opacity", "stroke": "stroke-opacity", "stop-color": "stop-opacity"}
+
+// cssColorDecl finds color declarations in a <style> sheet. The lead-in keeps
+// "fill" inside a selector or a longer name (".fill-x", "-fill") from matching.
+var cssColorDecl = regexp.MustCompile(`(?i)(?:^|[{;\s])(fill|stroke|stop-color)\s*:\s*([^;}]*)`)
+
+// alphaHex matches the #rgba and #rrggbbaa forms oksvg does not parse.
+var alphaHex = regexp.MustCompile(`^#(?:[0-9a-fA-F]{4}|[0-9a-fA-F]{8})$`)
 
 // rasterizeChecked rasterizes like svg.RasterizeSVG and also rejects invalid
 // color literals. oksvg now skips an unparsable fill/stroke and keeps the
@@ -43,10 +51,10 @@ func rasterizeChecked(data []byte, maxW, maxH int) (image.Image, error) {
 }
 
 // checkColorLiterals returns the first fill, stroke or stop-color value (as an
-// attribute or inside style="") that oksvg cannot parse. Colors set from a
-// <style> sheet are not checked.
+// attribute, inside style="", or in a <style> sheet) that oksvg cannot parse.
 func checkColorLiterals(data []byte) error {
 	dec := xml.NewDecoder(bytes.NewReader(data))
+	inStyleSheet := false
 	for {
 		tok, err := dec.Token()
 		if err == io.EOF {
@@ -55,39 +63,69 @@ func checkColorLiterals(data []byte) error {
 		if err != nil {
 			return nil // well-formedness is reported by inspectSVGDocument
 		}
-		start, ok := tok.(xml.StartElement)
-		if !ok {
-			continue
-		}
-		for _, attr := range start.Attr {
-			name := strings.ToLower(attr.Name.Local)
-			switch {
-			case colorProperties[name]:
-				if err := checkColorValue(name, attr.Value); err != nil {
-					return err
-				}
-			case name == "style":
-				for _, decl := range strings.Split(attr.Value, ";") {
-					prop, value, found := strings.Cut(decl, ":")
-					prop = strings.ToLower(strings.TrimSpace(prop))
-					if found && colorProperties[prop] {
-						if err := checkColorValue(prop, value); err != nil {
-							return err
-						}
+		switch t := tok.(type) {
+		case xml.CharData:
+			if inStyleSheet {
+				for _, m := range cssColorDecl.FindAllStringSubmatch(string(t), -1) {
+					if err := checkColorValue(strings.ToLower(m[1]), m[2]); err != nil {
+						return err
 					}
 				}
+			}
+			continue
+		case xml.EndElement:
+			if t.Name.Local == "style" {
+				inStyleSheet = false
+			}
+			continue
+		case xml.StartElement:
+			if t.Name.Local == "style" {
+				inStyleSheet = true
+			}
+			if err := checkElementColors(t); err != nil {
+				return err
 			}
 		}
 	}
 }
 
+// checkElementColors checks the color attributes and style="" declarations of
+// one element.
+func checkElementColors(start xml.StartElement) error {
+	for _, attr := range start.Attr {
+		name := strings.ToLower(attr.Name.Local)
+		switch {
+		case colorProperties[name] != "":
+			if err := checkColorValue(name, attr.Value); err != nil {
+				return err
+			}
+		case name == "style":
+			for _, decl := range strings.Split(attr.Value, ";") {
+				prop, value, found := strings.Cut(decl, ":")
+				prop = strings.ToLower(strings.TrimSpace(prop))
+				if found && colorProperties[prop] != "" {
+					if err := checkColorValue(prop, value); err != nil {
+						return err
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func checkColorValue(prop, value string) error {
-	switch strings.ToLower(strings.TrimSpace(value)) {
+	value, _, _ = strings.Cut(value, "!") // "!important"
+	value = strings.TrimSpace(value)
+	switch strings.ToLower(value) {
 	case "inherit", "currentcolor", "context-fill", "context-stroke":
 		return nil // keywords oksvg resolves before it parses a literal
 	}
 	if _, err := oksvg.ParseSVGColor(value); err != nil {
-		return fmt.Errorf("invalid %s %q: %w", prop, strings.TrimSpace(value), err)
+		if alphaHex.MatchString(value) {
+			return fmt.Errorf("invalid %s %q: alpha hex is not supported; use a 6-digit hex color with %s (or rgba())", prop, value, colorProperties[prop])
+		}
+		return fmt.Errorf("invalid %s %q: %w", prop, value, err)
 	}
 	return nil
 }
