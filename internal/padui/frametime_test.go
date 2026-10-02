@@ -73,6 +73,7 @@ func TestTimeEncodeReportsActualTransport(t *testing.T) {
 		{KittyTransportPNG, KittyTransportPNG},
 		{KittyTransportRGBA, KittyTransportRGBA},
 		{KittyTransportSharedMemory, shared},
+		{KittyTransportAuto, shared},
 	} {
 		previous := picture.KittySupported()
 		picture.ForceKittyCapability(picture.KittyCapabilitySupported)

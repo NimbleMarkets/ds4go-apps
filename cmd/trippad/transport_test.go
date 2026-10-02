@@ -52,6 +52,7 @@ func TestKittyTransportReachesTelemetry(t *testing.T) {
 		{padui.KittyTransportPNG, "png"},
 		{padui.KittyTransportRGBA, "rgba"},
 		{padui.KittyTransportSharedMemory, shared},
+		{padui.KittyTransportAuto, shared},
 	} {
 		m := kittyTransportModel(t, tc.request)
 		encoded := encodeFrame(t, m)
@@ -101,6 +102,10 @@ func TestMatchingTransportIsNotLoggedAsFallback(t *testing.T) {
 		{padui.KittyTransportSharedMemory, "shm"},
 		{padui.KittyTransportPNG, "png"},
 		{padui.KittyTransportRGBA, "rgba"},
+		// Auto falls back to PNG whenever the terminal has not confirmed
+		// shared memory; that is not something to report.
+		{padui.KittyTransportAuto, "png"},
+		{padui.KittyTransportAuto, "shm"},
 	} {
 		m := kittyTransportModel(t, tc.request)
 		m.Update(encodedMsg{msg: picture.KittyFrameMsg{}, performance: tools.Performance{Kitty: true, Transport: tc.actual}})

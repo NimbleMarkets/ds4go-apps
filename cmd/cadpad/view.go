@@ -220,9 +220,9 @@ func (m model) viewportView(w int) string {
 			cost = fmt.Sprintf("%.1f+%.0fms", ms(m.lastRender), ms(m.lastEncode))
 		}
 		// Name the transport unless everything is the default, so a
-		// shared-memory fallback to PNG is visible.
-		png := padui.KittyTransportPNG
-		if m.lastTransport != "" && (m.lastTransport != png || (m.transport != "" && m.transport != png)) {
+		// fallback from an explicit request to PNG is visible. Auto landing
+		// on PNG is the ordinary case and stays unlabelled.
+		if m.lastTransport != "" && (m.lastTransport != padui.KittyTransportPNG || !m.transport.Implicit()) {
 			cost += " " + string(m.lastTransport)
 		}
 		projLabel += fmt.Sprintf(" %dx%d %s", m.lastRaster.Dx(), m.lastRaster.Dy(), cost)

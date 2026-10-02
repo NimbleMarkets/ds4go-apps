@@ -342,15 +342,22 @@ cadpad and trippad:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--kitty-transport` | `png` | How Kitty frames reach the terminal: `png`, `rgba`, or `shm` |
+| `--kitty-transport` | `png` | How Kitty frames reach the terminal: `png`, `rgba`, `shm`, or `auto` |
 
 `png` works everywhere Kitty graphics do, including over SSH. `rgba` skips the
 PNG encode but sends about 5.3 bytes per pixel through the terminal. `shm`
 passes raw pixels through shared memory, so only a short reference goes through
 the terminal. It needs a local terminal that supports Kitty's shared-memory
-medium (`t=s`), such as Kitty or Ghostty. Nothing can detect that support, so
-`shm` is never chosen automatically: if the viewport stays blank, go back to
-`png`. When a shared-memory object cannot be created, frames fall back to PNG.
+medium (`t=s`), such as Kitty or Ghostty. `shm` trusts you: it uses shared memory
+once the terminal answers the startup `t=s` probe, falls back to PNG until then (and
+whenever an object cannot be created), and the pad logs the fallback once.
+
+`auto` makes the same request but says nothing when it lands on PNG, because that is
+the expected result over SSH or in a terminal without `t=s`. The widget only sends
+shared-memory frames after the terminal has answered the probe, and a terminal that
+cannot read the object never does. The cadpad header labels the transport (`shm`)
+once shared memory is in use. `png` stays the default; if the viewport stays blank
+with `auto` or `shm`, go back to `png`.
 cadpad names the transport in the viewport header and trippad logs the fallback.
 
 steering-only:

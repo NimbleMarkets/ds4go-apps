@@ -20,21 +20,32 @@ const (
 	// encode, but about 5.3 bytes per pixel on the wire.
 	KittyTransportRGBA KittyTransport = "rgba"
 	// KittyTransportSharedMemory passes raw pixels through a named shared
-	// buffer. The terminal must be local and support Kitty's t=s medium;
-	// nothing can probe that, so it is never selected automatically.
+	// buffer. The terminal must be local and support Kitty's t=s medium.
 	KittyTransportSharedMemory KittyTransport = "shm"
+	// KittyTransportAuto asks for shared memory and lets the widget decide.
+	// The widget sends shared-memory frames only after the terminal has
+	// answered its t=s probe with OK, which a terminal that cannot read the
+	// object (remote, or without t=s support) never does; until then, and
+	// always in that case, frames are PNG.
+	KittyTransportAuto KittyTransport = "auto"
 )
 
 // KittyTransportUsage is the flag help shared by the pads.
-const KittyTransportUsage = "Kitty frame transport: png, rgba, or shm (shared memory; local terminals with Kitty t=s support only)"
+const KittyTransportUsage = "Kitty frame transport: png, rgba, shm (shared memory; local terminals with Kitty t=s support only), or auto (shm when the terminal confirms it, else png)"
 
 // ParseKittyTransport validates a flag value, ignoring case.
 func ParseKittyTransport(s string) (KittyTransport, error) {
 	switch t := KittyTransport(strings.ToLower(s)); t {
-	case KittyTransportPNG, KittyTransportRGBA, KittyTransportSharedMemory:
+	case KittyTransportPNG, KittyTransportRGBA, KittyTransportSharedMemory, KittyTransportAuto:
 		return t, nil
 	}
-	return "", fmt.Errorf("unknown Kitty transport %q (want png, rgba, or shm)", s)
+	return "", fmt.Errorf("unknown Kitty transport %q (want png, rgba, shm, or auto)", s)
+}
+
+// Implicit reports whether landing on PNG is an expected outcome of this
+// request rather than a failure to honor it: the default and auto.
+func (t KittyTransport) Implicit() bool {
+	return t == "" || t == KittyTransportPNG || t == KittyTransportAuto
 }
 
 // Configure returns cfg requesting this transport, leaving other fields alone.
@@ -43,7 +54,7 @@ func (t KittyTransport) Configure(cfg picture.Config) picture.Config {
 	switch t {
 	case KittyTransportRGBA:
 		cfg.KittyFormat = picture.KittyFormatRGBA
-	case KittyTransportSharedMemory:
+	case KittyTransportSharedMemory, KittyTransportAuto:
 		cfg.KittyMedium = picture.KittyMediumSharedMemory
 	}
 	return cfg

@@ -19,6 +19,9 @@ func TestParseKittyTransportSelectsFormatAndMedium(t *testing.T) {
 		// failed object creation does not flood the terminal stream.
 		{"shm", picture.KittyFormatPNG, picture.KittyMediumSharedMemory},
 		{"SHM", picture.KittyFormatPNG, picture.KittyMediumSharedMemory},
+		// Auto asks for shared memory; the widget uses it only once the
+		// terminal has answered the t=s probe and otherwise sends PNG.
+		{"auto", picture.KittyFormatPNG, picture.KittyMediumSharedMemory},
 	} {
 		tr, err := ParseKittyTransport(tc.in)
 		if err != nil {
@@ -40,9 +43,22 @@ func TestParseKittyTransportRejectsUnknownValue(t *testing.T) {
 	if err == nil {
 		t.Fatal("unknown transport accepted; a typo would silently run the default")
 	}
-	for _, want := range []string{"sharedmem", "png", "rgba", "shm"} {
+	for _, want := range []string{"sharedmem", "png", "rgba", "shm", "auto"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+// Only an explicit request makes a PNG fallback worth reporting; auto and the
+// default are expected to land on PNG whenever the terminal cannot do better.
+func TestKittyTransportImplicit(t *testing.T) {
+	for tr, want := range map[KittyTransport]bool{
+		"": true, KittyTransportPNG: true, KittyTransportAuto: true,
+		KittyTransportRGBA: false, KittyTransportSharedMemory: false,
+	} {
+		if got := tr.Implicit(); got != want {
+			t.Errorf("%q.Implicit() = %v, want %v", tr, got, want)
 		}
 	}
 }
