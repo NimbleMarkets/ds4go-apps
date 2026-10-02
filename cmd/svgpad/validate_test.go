@@ -152,3 +152,45 @@ func TestAutoCorrectFeedbackEmptyDraft(t *testing.T) {
 		t.Errorf("feedback %q should not suggest line edits on an empty draft", got)
 	}
 }
+
+func TestCheckColorLiterals(t *testing.T) {
+	wrap := func(attrs string) []byte {
+		return []byte(`<svg xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="g"><stop ` + attrs + `/></linearGradient></defs><g ` + attrs + `/></svg>`)
+	}
+	for _, tc := range []struct {
+		name, attrs, wantErr string // wantErr "" means accepted
+	}{
+		{"hex6", `fill="#a1b2c3"`, ""},
+		{"hex3", `stroke="#abc"`, ""},
+		{"named", `fill="navy"`, ""},
+		{"unknown name", `fill="rebeccapurple"`, "rebeccapurple"}, // CSS4, not an SVG 1.1 name
+		{"rgba", `fill="rgba(1,2,3,0.5)"`, ""},
+		{"none and keywords", `fill="none" stroke="currentColor"`, ""},
+		{"inherit", `fill="inherit"`, ""},
+		{"paint server", `fill="url(#g)"`, ""},
+		{"valid style", `style="fill:#fff; stroke : red;stroke-width:2"`, ""},
+		{"bad fill attr", `fill="#ccc.5"`, "ccc.5"},
+		{"bad stroke attr", `stroke="#12"`, "stroke"},
+		{"bad stop-color", `stop-color="#zz"`, "stop-color"},
+		{"bad style fill", `style="stroke-width:2;fill:#ccc.5"`, "ccc.5"},
+		{"bad style case", `style="FILL:#ccc.5"`, "ccc.5"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkColorLiterals(wrap(tc.attrs))
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Errorf("unexpected error: %v", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("error = %v, want mention of %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// Other elements, such as <metadata>, must not make a document invalid.
+func TestValidateSVGToleratesUnknownElements(t *testing.T) {
+	doc := `<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><metadata><x/></metadata><rect width="5" height="5" fill="red"/></svg>`
+	if got := validateSVG([]byte(doc)); got != "valid" {
+		t.Errorf("validateSVG = %q, want valid", got)
+	}
+}

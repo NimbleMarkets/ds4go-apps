@@ -6,17 +6,91 @@
 package main
 
 import (
+	"bytes"
+	"encoding/xml"
 	"fmt"
+	"image"
+	"io"
 	"regexp"
 	"strings"
 
 	svg "github.com/NimbleMarkets/ntcharts-svg/svg"
+	"github.com/NimbleMarkets/oksvg"
 )
 
 // renderCheckEdge is the bitmap edge used for validation rasterization.
 // Small: parse and style resolution catch the errors; pixel count barely
 // matters.
 const renderCheckEdge = 64
+
+// colorProperties are the style properties oksvg parses with ParseSVGColor.
+var colorProperties = map[string]bool{"fill": true, "stroke": true, "stop-color": true}
+
+// rasterizeChecked rasterizes like svg.RasterizeSVG and also rejects invalid
+// color literals. oksvg now skips an unparsable fill/stroke and keeps the
+// inherited paint, so the rasterizer alone reports "ccc.5" as fine; the agent
+// would never learn the color it wrote is ignored. Strict parsing is no
+// substitute: it also aborts on benign elements such as <metadata>.
+func rasterizeChecked(data []byte, maxW, maxH int) (image.Image, error) {
+	img, err := svg.RasterizeSVG(data, maxW, maxH)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkColorLiterals(data); err != nil {
+		return nil, err
+	}
+	return img, nil
+}
+
+// checkColorLiterals returns the first fill, stroke or stop-color value (as an
+// attribute or inside style="") that oksvg cannot parse. Colors set from a
+// <style> sheet are not checked.
+func checkColorLiterals(data []byte) error {
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return nil // well-formedness is reported by inspectSVGDocument
+		}
+		start, ok := tok.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		for _, attr := range start.Attr {
+			name := strings.ToLower(attr.Name.Local)
+			switch {
+			case colorProperties[name]:
+				if err := checkColorValue(name, attr.Value); err != nil {
+					return err
+				}
+			case name == "style":
+				for _, decl := range strings.Split(attr.Value, ";") {
+					prop, value, found := strings.Cut(decl, ":")
+					prop = strings.ToLower(strings.TrimSpace(prop))
+					if found && colorProperties[prop] {
+						if err := checkColorValue(prop, value); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func checkColorValue(prop, value string) error {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "inherit", "currentcolor", "context-fill", "context-stroke":
+		return nil // keywords oksvg resolves before it parses a literal
+	}
+	if _, err := oksvg.ParseSVGColor(value); err != nil {
+		return fmt.Errorf("invalid %s %q: %w", prop, strings.TrimSpace(value), err)
+	}
+	return nil
+}
 
 // validateSVG checks well-formedness AND renderability, returning a short
 // status string ("valid", or a reason). It rasterizes with the same
@@ -29,7 +103,7 @@ func validateSVG(data []byte) string {
 	if _, err := inspectSVGDocument(string(data), false); err != nil {
 		return "parse error: " + err.Error()
 	}
-	if _, err := svg.RasterizeSVG(data, renderCheckEdge, renderCheckEdge); err != nil {
+	if _, err := rasterizeChecked(data, renderCheckEdge, renderCheckEdge); err != nil {
 		return "render error: " + err.Error()
 	}
 	return "valid"
@@ -56,7 +130,7 @@ func validateSVGDetailed(svgStr string) string {
 	// Only consult the rasterizer once the XML is clean; renderer output
 	// on malformed XML would just duplicate the parse diagnostics.
 	if len(issues) == 0 {
-		if _, err := svg.RasterizeSVG([]byte(svgStr), renderCheckEdge, renderCheckEdge); err != nil {
+		if _, err := rasterizeChecked([]byte(svgStr), renderCheckEdge, renderCheckEdge); err != nil {
 			msg := fmt.Sprintf("Render error from the rasterizer: %v", err)
 			if line := locateRenderErrorLine(svgStr, err.Error()); line > 0 {
 				msg += fmt.Sprintf(" (likely near line %d)\n%s", line, numberedSnippet(svgStr, line))

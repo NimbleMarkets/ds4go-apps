@@ -13,7 +13,7 @@ import (
 
 // Options controls device selection for an Executor.
 type Options struct {
-	PowerPreference      wgpu.PowerPreference
+	PowerPreference      gputypes.PowerPreference
 	AllowSoftware        bool
 	ForceFallbackAdapter bool
 }

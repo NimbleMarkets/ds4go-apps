@@ -93,7 +93,7 @@ func runComputeDoubleOnExec(in []float32) ([]float32, error) {
 	}
 
 	bgl, err := dev.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
-		Entries: []wgpu.BindGroupLayoutEntry{{
+		Entries: []gputypes.BindGroupLayoutEntry{{
 			Binding:    0,
 			Visibility: wgpu.ShaderStageCompute,
 			Buffer:     &gputypes.BufferBindingLayout{Type: gputypes.BufferBindingTypeStorage},

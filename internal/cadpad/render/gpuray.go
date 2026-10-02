@@ -96,7 +96,7 @@ func buildGPUPipeline(wgsl string) (*gpuPipeline, error) {
 	}
 
 	p.bgl, err = dev.CreateBindGroupLayout(&wgpu.BindGroupLayoutDescriptor{
-		Entries: []wgpu.BindGroupLayoutEntry{
+		Entries: []gputypes.BindGroupLayoutEntry{
 			{
 				Binding:    0,
 				Visibility: wgpu.ShaderStageCompute,

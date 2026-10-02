@@ -12,7 +12,6 @@ import (
 
 	ds4 "github.com/NimbleMarkets/ds4go"
 	"github.com/NimbleMarkets/ds4go-apps/internal/bubble"
-	svg "github.com/NimbleMarkets/ntcharts-svg/svg"
 )
 
 const visualPreviewEdge = 1024
@@ -68,7 +67,7 @@ type visualReviewMsg struct{ pass, limit int }
 // aspect ratio. Composite transparency onto a known background so encoders
 // that discard alpha do not turn transparent pixels into black ink.
 func renderVisualPreview(data []byte) (ds4.ImageInput, error) {
-	img, err := svg.RasterizeSVG(data, visualPreviewEdge, visualPreviewEdge)
+	img, err := rasterizeChecked(data, visualPreviewEdge, visualPreviewEdge)
 	if err != nil {
 		return ds4.ImageInput{}, fmt.Errorf("render visual preview: %w", err)
 	}
