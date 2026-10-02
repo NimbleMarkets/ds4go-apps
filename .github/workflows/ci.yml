@@ -164,6 +164,14 @@ jobs:
             go test -exec=true ./cmd/... ./internal/... ./ntgpu
           done
 
+      # Shared-memory Kitty frames are /dev/shm objects that outlive the process
+      # unless a pad releases them on exit; the Linux-only tests check that.
+      - name: Test Kitty transport (Linux shared memory)
+        env:
+          CGO_ENABLED: "0"
+          GOFLAGS: "-tags=nofakecgo"
+        run: go test -count=1 -run 'Transport|SharedMemory' ./cmd/cadpad ./cmd/trippad ./internal/padui
+
       # Release builds the pure-Go apps with CGO disabled; verify they
       # cross-compile to every shipped target. Windows is intentionally absent:
       # ds4go's purego path has no Dlsym there (matches the goreleaser goos list).
