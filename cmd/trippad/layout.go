@@ -138,9 +138,12 @@ func (m *model) workspaceView() string {
 		if output == "" {
 			output = "Waiting for model output…"
 		}
-		if len(r.tools) > 0 {
+		if len(r.tools) > 0 && len(r.calls) == 0 {
 			toolText += "\nTools: " + strings.Join(r.tools, ", ")
 		}
+	}
+	if recent := m.recentToolLines(4); len(recent) > 0 {
+		toolText += "\n" + strings.Join(recent, "\n")
 	}
 	if toolText == "" {
 		toolText = "No tools yet. Ctrl+N logs."
@@ -149,7 +152,7 @@ func (m *model) workspaceView() string {
 	outputW := m.width - l.controlsW
 	activity := lipgloss.JoinHorizontal(lipgloss.Top,
 		pane("THINKING / OUTPUT", tailText(output, outputW-2, l.activityH-2), outputW, l.activityH, "240"),
-		pane("TOOLS / LOG", tailText(toolText, l.controlsW-2, l.activityH-2), l.controlsW, l.activityH, "240"))
+		pane(m.toolPaneTitle(l.controlsW), tailText(toolText, l.controlsW-2, l.activityH-2), l.controlsW, l.activityH, "240"))
 	settings := "reasoning " + thinkLabel(m.thinkMode)
 	if label := m.contextLabel(); label != "" {
 		settings += " · " + label
@@ -177,7 +180,7 @@ Tab            Switch between prompt and controls
 ← / →          Adjust; Shift changes ten steps
 F3             Shader gallery
 Ctrl+O         Choose / change model
-Ctrl+T         Thinking and output
+Ctrl+T         Thinking, output and tool calls
 Ctrl+L         Current source
 Ctrl+R         Reasoning level for the next request
 Ctrl+N         Logs and diagnostics

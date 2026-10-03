@@ -23,6 +23,14 @@ thinking/output, tool log, and prompt. Purple marks active controls; blue marks
 the focused prompt. Activity panes show the latest output; Ctrl+T and Ctrl+N
 open the full scrollable views. F1 or `?` opens the shared help dialog.
 
+The tool pane tracks every tool call the model makes: the title carries the
+session totals (`TOOLS / LOG · 12 · 2 ✗` is 12 calls, 2 of which failed), and
+the newest calls follow the log as `✓` done, `✗` failed (the tool answered
+`ERROR:`), `…` running, or `–` never run because the request ended first.
+Ctrl+T lists each call per round with its arguments, result and duration, plus
+a per-tool tally. Arguments and results are shortened and stripped of control
+sequences; the model still sees the full text.
+
 Press **Ctrl+F** (or `f` outside the prompt), or enter `/fullscreen`, for an
 animation-only view that fills the terminal with no borders or status bars.
 **Esc** or **Ctrl+F** restores the workspace, including draft prompt and focus,
@@ -116,7 +124,7 @@ WebGPU API reference: [W3C WebGPU specification](https://www.w3.org/TR/webgpu/).
 | `R` | Randomize controls |
 | Ctrl+O | Open the shared model picker, including while editing a prompt |
 | Ctrl+N | Open native diagnostics and application logs; arrows/PageUp/PageDown scroll, Esc closes |
-| Ctrl+T / `T` | Show live thinking, replies, and tool activity for the latest request |
+| Ctrl+T / `T` | Show live thinking, replies, and every tool call (arguments, result, duration) for the latest requests |
 | Ctrl+L / `L` | Inspect current source: shader body, full WGSL, or preset JSON; ←/→ or Tab switches tabs |
 | Ctrl+R | Cycle reasoning off → high → max for the next request |
 | Ctrl+Y | Copy the active thinking/source view to the terminal clipboard |

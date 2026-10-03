@@ -28,7 +28,8 @@ type inspector struct {
 type activityRound struct {
 	number          int
 	thinking, reply string
-	tools           []string
+	tools           []string // names from the stream, until the message supplies calls
+	calls           []toolCall
 }
 
 func thinkLabel(mode ds4.ThinkMode) string {
@@ -97,6 +98,9 @@ func (m *model) activityText() string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Reasoning: %s · Ctrl+R changes the next request\n", thinkLabel(mode))
+	if m.toolStats.calls > 0 {
+		b.WriteString("Tool calls: " + m.toolStats.summary() + "\n")
+	}
 	if len(m.activity) == 0 {
 		b.WriteString("\nNo model output yet. Replies and tool activity appear here live.\n")
 	}
@@ -111,7 +115,12 @@ func (m *model) activityText() string {
 		if r.reply != "" {
 			b.WriteString("Reply\n" + r.reply + "\n")
 		}
-		if len(r.tools) > 0 {
+		if len(r.calls) > 0 {
+			b.WriteString("Tools\n")
+			for _, c := range r.calls {
+				b.WriteString(c.detail())
+			}
+		} else if len(r.tools) > 0 {
 			b.WriteString("Tools: " + strings.Join(r.tools, ", ") + "\n")
 		}
 	}

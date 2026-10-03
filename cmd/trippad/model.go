@@ -81,6 +81,7 @@ type model struct {
 	inspect                                     inspector
 	thinkMode, activeThinkMode                  ds4.ThinkMode
 	activity                                    []activityRound
+	toolStats                                   toolStats
 	library                                     *library.Store
 	gallery                                     shaderGallery
 	hasVision                                   bool
@@ -367,6 +368,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case bubble.LogEvent:
 			m.addLog(ev.Message)
 		case bubble.ToolResultsEvent:
+			m.recordToolResults(ev.Results)
 			for _, r := range ev.Results {
 				m.addLog(r.Content)
 				for _, part := range r.Parts {
@@ -380,6 +382,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case bubble.AssistantMessageEvent:
 			m.finishActivity(ev.Message)
+			m.recordToolCalls(ev.Message.ToolCalls)
 			if ev.Message.Content != "" {
 				m.addLog(ev.Message.Content)
 			}
@@ -396,6 +399,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case doneMsg:
 		m.gen.StopAndWait()
 		m.gen = nil
+		m.abandonPendingTools()
 		m.history = msg.result.History
 		if msg.notice != "" {
 			m.finishActivity(msg.result.Assistant)
