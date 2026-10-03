@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
 	ds4 "github.com/NimbleMarkets/ds4go"
 	"github.com/charmbracelet/x/ansi"
 )
@@ -28,6 +29,7 @@ const (
 // sanitized and bounded when recorded, so rendering never has to be.
 type toolCall struct {
 	id, name, args, result string
+	reason                 string // first line of a failure, without its "ERROR:" prefix
 	status                 toolStatus
 	started                time.Time
 	took                   time.Duration
@@ -132,9 +134,11 @@ func (m *model) recordToolResults(results []ds4.ChatMessage) {
 		call.result = oneLine(text, maxResultRune)
 		call.took = time.Since(call.started)
 		call.status = toolOK
-		if strings.HasPrefix(strings.TrimSpace(text), "ERROR:") {
+		if trimmed := strings.TrimSpace(text); strings.HasPrefix(trimmed, "ERROR:") {
 			call.status = toolFailed
 			m.toolStats.failed++
+			first, _, _ := strings.Cut(strings.TrimPrefix(trimmed, "ERROR:"), "\n")
+			call.reason = oneLine(first, maxResultRune)
 		}
 	}
 }
@@ -187,19 +191,6 @@ func (c toolCall) detail() string {
 	return b.String()
 }
 
-// recentToolLines lists the newest calls oldest-first for the small pane, so
-// the latest one is the last line and survives the pane's tail cropping.
-func (m *model) recentToolLines(n int) []string {
-	var lines []string
-	for i := len(m.activity) - 1; i >= 0 && len(lines) < n; i-- {
-		for j := len(m.activity[i].calls) - 1; j >= 0 && len(lines) < n; j-- {
-			c := m.activity[i].calls[j]
-			lines = append([]string{c.status.mark() + " " + c.name}, lines...)
-		}
-	}
-	return lines
-}
-
 // toolPaneTitle puts the totals in the pane title, which stays visible however
 // short the pane is. It falls back to a compact form, then to the bare title.
 func (m *model) toolPaneTitle(width int) string {
@@ -219,4 +210,146 @@ func (m *model) toolPaneTitle(width int) string {
 		}
 	}
 	return base
+}
+
+// Pane palette. Status carries the colour; names and the log stay quiet so a
+// failure or a running call is the first thing the eye finds.
+var (
+	okStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("78"))
+	failStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
+	runStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	skipStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	dimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	ruleStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	reasonStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("167"))
+)
+
+func (s toolStatus) style() lipgloss.Style {
+	switch s {
+	case toolOK:
+		return okStyle
+	case toolFailed:
+		return failStyle
+	case toolSkipped:
+		return skipStyle
+	}
+	return runStyle
+}
+
+func formatDuration(d time.Duration) string {
+	switch {
+	case d < time.Millisecond:
+		return ""
+	case d < time.Second:
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	case d < 10*time.Second:
+		return fmt.Sprintf("%.1fs", d.Seconds())
+	}
+	return fmt.Sprintf("%.0fs", d.Seconds())
+}
+
+// callLine is "✓ name" with the duration right-aligned to the pane edge. A
+// running call shows its elapsed time once it has taken a second.
+func callLine(status toolStatus, name string, elapsed time.Duration, width int) string {
+	if status == toolRunning && elapsed < time.Second {
+		elapsed = 0
+	}
+	if status == toolSkipped {
+		elapsed = 0
+	}
+	right := formatDuration(elapsed)
+	nameW := width - 2
+	if right != "" {
+		nameW -= len(right) + 1
+		if nameW < 6 { // too narrow for both: keep the name
+			right, nameW = "", width-2
+		}
+	}
+	name = ansi.Truncate(name, max(1, nameW), "…")
+	shown := name
+	if status != toolOK { // a finished call's name stays quiet; anything else is coloured
+		shown = status.style().Render(name)
+	}
+	line := status.style().Render(status.mark()) + " " + shown
+	if right != "" {
+		pad := width - 2 - ansi.StringWidth(name) - len(right)
+		line += strings.Repeat(" ", max(1, pad)) + dimStyle.Render(right)
+	}
+	return line
+}
+
+// block is a call's lines for the pane: the call, then a failure's reason.
+// Without room for the reason only the call line is returned.
+func (c toolCall) block(width int, withReason bool) []string {
+	elapsed := c.took
+	if c.status == toolRunning {
+		elapsed = time.Since(c.started)
+	}
+	lines := []string{callLine(c.status, c.name, elapsed, width)}
+	if withReason && c.status == toolFailed && c.reason != "" {
+		lines = append(lines, "  "+reasonStyle.Render(ansi.Truncate(c.reason, max(1, width-2), "…")))
+	}
+	return lines
+}
+
+// toolPaneLines is the newest calls, oldest first, in at most height lines.
+// A call is never split across the crop; older calls fall off the top, and a
+// reason is dropped before its call is.
+func (m *model) toolPaneLines(width, height int) []string {
+	var out []string
+	add := func(block []string) bool {
+		if len(out)+len(block) > height {
+			if len(out)+1 > height {
+				return false
+			}
+			block = block[:1]
+		}
+		out = append(append([]string(nil), block...), out...)
+		return true
+	}
+	for i := len(m.activity) - 1; i >= 0; i-- {
+		r := m.activity[i]
+		if len(r.calls) == 0 {
+			// Names seen in the stream before the message supplies the calls.
+			for j := len(r.tools) - 1; j >= 0; j-- {
+				if !add([]string{callLine(toolRunning, oneLine(r.tools[j], 80), 0, width)}) {
+					return out
+				}
+			}
+			continue
+		}
+		for j := len(r.calls) - 1; j >= 0; j-- {
+			if !add(r.calls[j].block(width, true)) {
+				return out
+			}
+		}
+	}
+	return out
+}
+
+// toolPaneBody lays out the TOOLS / LOG pane: the dimmed log on top, a labelled
+// divider, then the calls. A pane too short for the log and divider shows
+// calls alone; with no calls it is the plain log or a hint.
+func (m *model) toolPaneBody(width, height int) string {
+	width, height = max(1, width), max(1, height)
+	var logText string
+	if len(m.log) > 0 {
+		logText = strings.Join(m.log[max(0, len(m.log)-8):], "\n")
+	}
+	calls := m.toolPaneLines(width, height)
+	if len(calls) == 0 {
+		if logText == "" {
+			logText = "No tools yet. Ctrl+N logs."
+		}
+		return dimStyle.Render(tailText(logText, width, height))
+	}
+	var out []string
+	if room := height - len(calls); room >= 2 && logText != "" {
+		for _, l := range strings.Split(tailText(logText, width, room-1), "\n") {
+			out = append(out, dimStyle.Render(l))
+		}
+		label := "─ calls "
+		out = append(out, ruleStyle.Render(label+strings.Repeat("─", max(0, width-ansi.StringWidth(label)))))
+	}
+	return strings.Join(append(out, calls...), "\n")
 }

@@ -23,13 +23,18 @@ thinking/output, tool log, and prompt. Purple marks active controls; blue marks
 the focused prompt. Activity panes show the latest output; Ctrl+T and Ctrl+N
 open the full scrollable views. F1 or `?` opens the shared help dialog.
 
-The tool pane tracks every tool call the model makes: the title carries the
-session totals (`TOOLS / LOG · 12 · 2 ✗` is 12 calls, 2 of which failed), and
-the newest calls follow the log as `✓` done, `✗` failed (the tool answered
-`ERROR:`), `…` running, or `–` never run because the request ended first.
-Ctrl+T lists each call per round with its arguments, result and duration, plus
-a per-tool tally. Arguments and results are shortened and stripped of control
-sequences; the model still sees the full text.
+The tool pane tracks every tool call the model makes. Its title carries the
+session totals (`TOOLS / LOG · 12 · 2 ✗` is 12 calls, 2 of them failed), and the
+newest calls are listed with a colour-coded status: green `✓` done, red `✗`
+failed (the tool answered `ERROR:`), amber `…` running, grey `–` never run
+because the request ended first. A call's duration sits at the right edge, and a
+running call shows its elapsed time once it passes a second. When there is room,
+a failed call's first error line appears under it, and the log, dimmed, sits above a `─ calls`
+divider. The pane is only a few rows tall, so calls take priority over the log
+as it shrinks; Ctrl+N has the full log. Ctrl+T lists each call per round with its
+arguments, result and duration, plus a per-tool tally. Arguments and results
+are shortened and stripped of control sequences; the model still sees the full
+text.
 
 Press **Ctrl+F** (or `f` outside the prompt), or enter `/fullscreen`, for an
 animation-only view that fills the terminal with no borders or status bars.

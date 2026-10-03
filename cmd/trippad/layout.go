@@ -131,28 +131,18 @@ func (m *model) workspaceView() string {
 	body := lipgloss.JoinHorizontal(lipgloss.Top, animation, parameters)
 
 	output := "Replies and thinking appear here. Ctrl+T expands."
-	toolText := strings.Join(m.log[max(0, len(m.log)-8):], "\n")
 	if len(m.activity) > 0 {
 		r := m.activity[len(m.activity)-1]
 		output = strings.TrimSpace(r.thinking + "\n" + r.reply)
 		if output == "" {
 			output = "Waiting for model output…"
 		}
-		if len(r.tools) > 0 && len(r.calls) == 0 {
-			toolText += "\nTools: " + strings.Join(r.tools, ", ")
-		}
-	}
-	if recent := m.recentToolLines(4); len(recent) > 0 {
-		toolText += "\n" + strings.Join(recent, "\n")
-	}
-	if toolText == "" {
-		toolText = "No tools yet. Ctrl+N logs."
 	}
 
 	outputW := m.width - l.controlsW
 	activity := lipgloss.JoinHorizontal(lipgloss.Top,
 		pane("THINKING / OUTPUT", tailText(output, outputW-2, l.activityH-2), outputW, l.activityH, "240"),
-		pane(m.toolPaneTitle(l.controlsW), tailText(toolText, l.controlsW-2, l.activityH-2), l.controlsW, l.activityH, "240"))
+		pane(m.toolPaneTitle(l.controlsW), m.toolPaneBody(l.controlsW-2, l.activityH-2), l.controlsW, l.activityH, "240"))
 	settings := "reasoning " + thinkLabel(m.thinkMode)
 	if label := m.contextLabel(); label != "" {
 		settings += " · " + label
