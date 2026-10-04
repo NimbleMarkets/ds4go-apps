@@ -18,6 +18,16 @@ This repository contains a family of Bubble Tea TUI tools that run DeepSeek-fami
 
 ---
 
+## Demos and screenshots
+
+- [DS4 Playground](https://gist.github.com/neomantra/ae47422c8daf7a458212c93992b3e078): svgpad, glyphpad, cadpad and steering at work, including a pelican drawn as SVG, a Pikachu from a glyph script, and a CAD model written as Lua.
+- [Demo videos](https://gist.github.com/neomantra/d49df05d6b137b9e6844186499715756): steering "hello world", the svgpad pelican, ds4 in Charm `crush`, and the `dankbot420` demo.
+- [ds4go CLI screenshots](https://gist.github.com/neomantra/40180ade13df93290250ce8c6d28c9f6): the underlying `ds4go` command's model list, model download, and validate output.
+
+These are works in progress, and the screenshots may not match the current UI.
+
+---
+
 ## Prerequisites
 
 These apps require `ds4go` to be installed, with a `ds4` dynamic library and associated model downloaded.  `ds4` requires 128G or more of GPU memory.
