@@ -61,6 +61,11 @@ docs
 *.out
 coverage.txt
 
+# Local agent tooling state and generated plans
+.claude/
+.superpowers/
+docs/superpowers/
+
 # Editor and OS noise
 .task
 .DS_Store
