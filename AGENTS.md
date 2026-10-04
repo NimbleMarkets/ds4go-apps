@@ -34,7 +34,7 @@ checkpoints. Keep the active user request intact; do not silently discard its
 constraints. Checkpoints must distinguish completed operations, failed attempts,
 and remaining work so resuming cannot blindly repeat side effects.
 
-ds4go v0.8.0 and ntcharts v2.3.0 are the published pins; the module builds and
+ds4go v0.8.0 and ntcharts v2.6.0 are the published pins; the module builds and
 tests without a workspace. Check with `GOWORK=off` when a local ignored
 `go.work` is present, since CI has none.
 Validate maintained packages with `go test ./cmd/... ./internal/... ./ntgpu` and

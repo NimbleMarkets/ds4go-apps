@@ -1,8 +1,8 @@
 # ds4go-apps
 
-Interactive local inferencing applications using [ds4go](https://github.com/NimbleMarkets/ds4go), a Golang library for the [`ds4` inferencing engine](https://github.com/antirez/ds4).  These explore using the DeepSeek v4 DF
+> **Experimental.** [ds4go](https://github.com/NimbleMarkets/ds4go) and our binary builds are carefully maintained, but this repository is experimental. Flags, keys, and behavior can change.
 
-This repository contains a family of Bubble Tea TUI tools that run DeepSeek-family models locally (Metal on macOS, CUDA on Linux, or CPU) for creative and technical tasks—from drawing SVGs and ASCII glyphs to parametric CAD modeling and neural activation steering.
+Terminal apps that run DeepSeek models locally through [ds4go](https://github.com/NimbleMarkets/ds4go), a Go binding for the [`ds4` inference engine](https://github.com/antirez/ds4). They draw SVGs and glyph art, build CAD models, animate shaders, and explore activation steering. Inference runs on Metal on macOS, CUDA on Linux, or the CPU.
 
 ---
 
@@ -10,88 +10,66 @@ This repository contains a family of Bubble Tea TUI tools that run DeepSeek-fami
 
 | App | Binary | What it does |
 |-----|--------|--------------|
-| **glyphpad** | `ds4go-glyphpad` | Unicode glyph / ASCII-art scratchpad. Chat with a local model to generate, edit, and arrange characters, blocks, and symbols in a canvas. |
-| **svgpad** | `ds4go-svgpad` | SVG drawing scratchpad. Describe shapes, diagrams, or illustrations in natural language and get rendered SVG output directly in the terminal via `ntcharts-svg`. |
-| **cadpad** | `ds4go-cadpad` | CAD modeling workbench driven by LLM tool-calling against the `simplesdf` geometry engine. Create, transform, and boolean 3D solids with live picture previews. Can also run headless (no engine) as a pure Go geometry harness. |
-| **[trippad](cmd/trippad/README.md)** | `ds4go-trippad` | Live psychedelic WGSL shaders, GPU animation, parameter sliders, and LLM shader editing with optional vision previews. Runs without a model using `--no-engine`. |
-| **steering** | `ds4go-steering` | DeepSeek activation-steering dashboard. Tweak FFN and attention steering vectors in real time, branch comparison timelines, and explore token logits interactively. |
+| **glyphpad** | `ds4go-glyphpad` | Unicode and ASCII art. Ask the model to generate and edit characters, blocks, and symbols on a canvas. |
+| **[svgpad](cmd/svgpad/README.md)** | `ds4go-svgpad` | SVG drawing. Describe an image, and the model writes SVG that is rendered in the terminal. With a vision model it reviews its own renders. |
+| **[cadpad](cmd/cadpad/README.md)** | `ds4go-cadpad` | 3D CAD. The model builds solids with tool calls (create, transform, boolean) on a signed-distance-field engine, with live previews. Runs without a model as a Go geometry harness. |
+| **[trippad](cmd/trippad/README.md)** | `ds4go-trippad` | Live WGSL shaders with parameter sliders and GPU animation. The model can edit the shader. Also runs in a browser with WebGPU. Works without a model. |
+| **steering** | `ds4go-steering` | Activation-steering dashboard. Adjust FFN and attention steering vectors, branch timelines, and look at token logits. |
 
 ---
 
 ## Demos and screenshots
 
-- [DS4 Playground](https://gist.github.com/neomantra/ae47422c8daf7a458212c93992b3e078): svgpad, glyphpad, cadpad and steering at work, including a pelican drawn as SVG, a Pikachu from a glyph script, and a CAD model written as Lua.
+- [DS4 Playground](https://gist.github.com/neomantra/ae47422c8daf7a458212c93992b3e078): svgpad, glyphpad, cadpad, and steering at work, including a pelican drawn as SVG, a Pikachu from a glyph script, and a CAD model written as Lua.
 - [Demo videos](https://gist.github.com/neomantra/d49df05d6b137b9e6844186499715756): steering "hello world", the svgpad pelican, ds4 in Charm `crush`, and the `dankbot420` demo.
 - [ds4go CLI screenshots](https://gist.github.com/neomantra/40180ade13df93290250ce8c6d28c9f6): the underlying `ds4go` command's model list, model download, and validate output.
 
-These are works in progress, and the screenshots may not match the current UI.
+The screenshots may not match the current UI.
 
 ---
 
-## Prerequisites
+## Requirements
 
-These apps require `ds4go` to be installed, with a `ds4` dynamic library and associated model downloaded.  `ds4` requires 128G or more of GPU memory.
+- **Go 1.26.8 or newer**, and [Task](https://taskfile.dev).
+- **libds4 and a model.** Install them with ds4go. `ds4` needs 128 GB or more of GPU memory.
+- **A GPU driver.** Metal on macOS. On Linux, cadpad and trippad use Vulkan for their GPU views.
+- **A terminal with Kitty graphics** (Kitty, Ghostty, WezTerm) to see images. Other terminals fall back to character rendering.
+- **A browser with WebGPU**, only for the trippad browser playground.
 
-The apps use **ds4go v0.8.0**, which requires libds4 **v0.5.20260910** or
-newer. DeepSeek V4.1 and think levels require **v0.6.20260912**; DGX Spark
-(GB10) requires the **v0.6.20260913** `linux-arm64-gb10-cuda` library asset;
-Qwen3.8 Flash Next and the low and medium reasoning modes require
-**v0.7.20260918**.
+These apps use ds4go v0.8.0, which needs libds4 v0.5.20260910 or newer. Some features need a newer libds4:
 
-On Linux, cadpad uses Vulkan for its GPU viewport. The Taskfile builds with
-`CGO_ENABLED=0` and `-tags=nofakecgo`, sharing purego's FFI runtime with goffi;
-OpenGL development headers are not needed for this build. A Vulkan-capable
-graphics driver is required for GPU rendering.
+| Feature | libds4 |
+|---------|--------|
+| DeepSeek V4.1 and think levels | v0.6.20260912 |
+| DGX Spark (GB10): the `linux-arm64-gb10-cuda` asset | v0.6.20260913 |
+| Qwen3.8 Flash Next, and the low and medium reasoning modes | v0.7.20260918 |
 
 ---
 
 ## Build
 
-ds4go v0.8.0 and ntcharts v2.3.0 are published, so the module builds without a
-workspace.
-
-Build everything at once:
+The module builds against the published ds4go and ntcharts releases. No workspace or local checkouts are needed.
 
 ```bash
-task build
+task build              # all apps
+task build:glyphpad     # or one app: svgpad, cadpad, trippad, trippad-memory, steering
 ```
 
-Or build individual apps:
+Binaries go to `./bin/`. Builds use `-mod=readonly` and skip apps whose inputs have not changed. Run `task tidy` after changing dependencies, and `task --force build` to rebuild everything. If a compile fails, the previous binary is kept. Build state is kept in the ignored `.task/` directory.
 
-```bash
-task build:glyphpad
-task build:svgpad
-task build:cadpad
-task build:steering
-```
-
-Builds use `-mod=readonly` and do not run `go mod tidy`; run `task tidy`
-explicitly when updating dependencies. Task's `sources`, `generates`, and
-`method: checksum` directives skip unchanged apps entirely, including the build
-command. Sources include embedded assets, workspace files, and the selected
-ds4go module's Go sources and module files (including a local checkout).
-A `status` check also detects changes
-to the Go environment, target platform, toolchain, and Git revision/status.
-Each app retains its previous binary if compilation fails. Use `task --force
-build` to bypass these checks, for example after changing an external local
-module replacement other than ds4go. State lives in the ignored `.task/` directory.
-
-Binaries are written to `./bin/`.
-
-For a direct Linux CAD build without Task:
+On Linux the Taskfile builds with `CGO_ENABLED=0` and `-tags=nofakecgo`, which shares purego's FFI runtime with goffi. No OpenGL headers are needed. To build cadpad directly:
 
 ```bash
 CGO_ENABLED=0 go build -tags=nofakecgo -o bin/ds4go-cadpad ./cmd/cadpad
 ```
 
-Task run commands select the inference backend automatically; use
-`BACKEND=cuda`, `BACKEND=metal`, or `BACKEND=cpu` to override it.
+`task run:<app>` picks the inference backend automatically. Set `BACKEND=cuda`, `BACKEND=metal`, or `BACKEND=cpu` to override it.
 
 ---
 
-## Quick Start
+## Running the apps
 
-### glyhpad — Glyph Scratchpad
+### glyphpad
 
 ```bash
 task run:glyphpad
@@ -99,216 +77,25 @@ task run:glyphpad
 ./bin/ds4go-glyphpad --backend metal --ctx 32768
 ```
 
-Type natural-language prompts to generate Unicode patterns, box-drawing diagrams, or pixel-art-style blocks. Use the modal edit box (`Ctrl+E`) to refine selections.
+Type a prompt to generate Unicode patterns, box-drawing diagrams, or pixel-art blocks. **Ctrl+E** opens the edit box to refine a selection. Copying the canvas copies the complete glyph grid.
 
-Glyphpad and Cadpad now share **F1** help, **F2** run settings, **Ctrl+R**
-reasoning, **Ctrl+O** model selection, **Ctrl+Y** pane copying, and
-**Tab/Shift+Tab** focus traversal including the prompt. Settings changed during
-inference apply to the next request; loading locks settings. Engine loading is
-lazy, preserves queued prompts, and shows the bicycle animation. Logs remain
-available with **Ctrl+N**. Clipboard writes require OSC 52 terminal support.
-
-Both accept `--temp` (default 0.7), `--top-p` (0.95), and `--seed` (0 chooses a
-fresh seed per request). Cadpad also accepts `--tool-rounds` (default 36), with
-an additional final-answer turn, and Escape cancels its current run. Model
-switching preserves the drawing/program or CAD world. Cadpad's viewport copy
-is a textual world description; Glyph's canvas copy is the complete glyph grid.
-
-The remaining saved-work, visual-review, and headless rollout is tracked in
-[PAD-ROLLOUT.md](PAD-ROLLOUT.md).
-
-### svgpad — SVG Scratchpad
+### svgpad
 
 ```bash
 task run:svgpad
 ```
 
-Describe an image (e.g., *“a blue circle inside a rounded rectangle”*) and the model emits SVG markup rendered live in the terminal. The engine is lazily loaded, so you can sketch offline and summon the LLM only when needed.
+Describe an image and the model writes SVG. See the [svgpad README](cmd/svgpad/README.md) for visual review, the model picker, headless mode (`--prompt`), and context handling.
 
-Drafting tools reject appends after the outer SVG root closes, preserving the draft and directing the model to edit inside the existing root. Validation reports content outside the root at the earlier closing line, so a misplaced `</svg>` can be corrected without repeatedly adding or deleting closing tags at the end of the file.
-
-With a vision model, svgpad also reviews its rendered output: **generate → render PNG → inspect → edit → render again**. The model checks labels, clipping, spacing, contrast, and composition after the normal drafting loop. Reviews use the same renderer as the viewer, preserve the canvas proportions, and composite transparency onto white. This is model feedback, not a guarantee of visual correctness.
-
-Visual review defaults to `auto`: it runs when the loaded engine has vision and otherwise reports that only syntax/render validation is available. The matching installed encoder is discovered through ds4go's model catalog. To require vision explicitly using the Vision-Exp model installed on a Linux/CUDA host:
-
-```bash
-task build:svgpad
-./bin/ds4go-svgpad \
-  --model vision-q2 \
-  --visual-review on --visual-rounds 3
-```
-
-All apps accept installed catalog aliases or GGUF paths with `--model`. Alias
-resolution uses ds4go's public API; a missing catalog model gets its own download
-command.
-
-In SVGPad, press **Ctrl+O** while idle to choose a different installed model.
-Type to search by alias or family, use **↑/↓**, then **Enter** to load it;
-**Esc** cancels. The picker shows model size and vision encoder availability.
-It refreshes the catalog each time it opens and does not download models or
-change the CLI's default model.
-
-Press **Ctrl+R** to cycle reasoning while typing, without moving the prompt
-cursor. The settings strip above the prompt keeps reasoning, model, vision mode,
-review rounds, and tool rounds visible. A reasoning change during generation is
-marked **next**; the active request and its automatic retries retain their
-original setting. **F1** opens help while typing. The footer shows the focused
-panel and available actions, fitting whole shortcuts onto one line.
-
-**F2** opens run settings from the prompt or any panel: reasoning, visual-review
-mode, review passes, tool rounds, and whether context is preserved between new
-prompts. Use **↑/↓** to select, **←/→** to change, and **Esc** to close. Changes
-last for the app session. Review and tool budgets are locked during generation,
-enrichment, and engine loading; reasoning and context can be set for the next
-request. Settings are read-only during model switching or engine release.
-If vision is not loaded, close settings and use **Ctrl+O** to choose a vision
-model; selecting the current model can reload it with its installed encoder.
-
-**F3** opens a searchable saved-drawing browser while idle. Type to filter by
-title, prompt, filename, or keywords, then press **Enter** to inspect a drawing.
-Browsing preserves your pending prompt, cursor, and working `draft.svg`;
-**c** continues the working draft. **Page Up/Down** now scroll or pan the focused
-panel, and **j/k** scroll down/up when the prompt is not focused. **Tab** and
-**Shift+Tab** cycle the visible panels and prompt.
-
-**Ctrl+Y** copies the focused pane: prompt text, SVG source, activity text, or
-Tool panel content. It copies the full pane content, including scrolled-off
-lines, without terminal styling. The SVG source follows the selected drawing
-or live preview, rather than reading a potentially different working draft.
-The same shortcut copies logs, help, or model details when those dialogs are
-open. Copying preserves focus, cursor, and scroll position; empty panes leave
-the clipboard unchanged. A footer notice reports the clipboard request.
-This uses OSC 52, so your terminal must allow clipboard writes; over SSH it
-targets the local terminal's clipboard.
-
-Help, settings, model details, drawings, and logs close with **Esc**; ordinary
-letters no longer dismiss help or model details. Help and model details support
-scrolling. **Ctrl+N** opens logs even during model loading; **F1** and **F2** also
-remain available. Shortcut routing, availability, footer hints, and help share
-an action registry in `internal/editmode`, ready for reuse by other apps.
-
-Starting with `--visual-review on` automatically opens the picker when the
-startup model is missing, is text-only, or has no selected vision encoder.
-Canceling keeps the app open; submitting reopens the picker until a suitable
-model is selected. `--vision-review on` is accepted as an alias.
-
-Switching closes the old engine before loading the new one. It keeps the prompt
-and `draft.svg`, replaces the old model's transcript with a draft checkpoint,
-and preserves backend, context size, power, SSD streaming, and review budgets.
-After loading, press **Esc**, then **c** to continue the existing draft, or enter
-a new prompt. Vision and MTP companions are selected afresh for the new model;
-an explicit companion path from startup is not reused across models. With
-`--visual-review on`, selection requires an installed matching vision encoder.
-Switching is available only when generation/enrichment is idle. A load failure keeps the
-draft available; choose another model or retry loading.
-
-The reusable Bubble Tea widget lives in `internal/modelpicker`; it reports a
-`SelectedMsg` so each app can own its engine lifecycle. SVGPad is its first user.
-
-For DeepSeek V4.1 Q2 on a Mac with SSD streaming:
-
-```bash
-./bin/ds4go-svgpad --model v41-q2 --backend metal --ssd-streaming \
-  --visual-review on --visual-rounds 3 --tool-rounds 20
-# Or build and run through Task:
-task run:svgpad -- --model v41-q2 --backend metal --ssd-streaming --visual-review on
-```
-
-The installed `v41-vision` encoder is selected automatically. `--ssd-streaming`
-passes through to the engine's expert streaming mode and defaults to off.
-
-With `--model glm53-q2`, the installed `glm53-vision` encoder is also selected
-automatically. To select an encoder explicitly, `--vision` accepts an installed
-alias (such as `glm53-vision`) or a GGUF path.
-
-Use `--visual-review off` to disable image review. This requires a vision-capable libds4 runtime and a compatible model/encoder pair; upgrading the Go package alone does not add vision to a text-only model. Extra flags also work with `task run:svgpad -- --visual-review off`.
-
-The default budget is three automatic image review passes per request (`--visual-rounds 1..5`), shared across syntax-correction retries. An unchanged draft ends review early. If the final pass changes the drawing, the status reports that the automatic review limit was reached after edits. Each pass retains text feedback and sends only the latest review image, limiting image context growth. Cancellation and context exhaustion keep the draft available for recovery.
-
-In the TUI, press **Esc** to leave prompt editing, then **`[` / `]`** to decrease/increase the review limit while idle. The footer shows `reviews:N`; `?` shows the shortcut and `m` shows the limit and review mode. Adjustments last for the current app session; `--visual-rounds` sets the startup value. This controls image review passes, each of which can include several edit-tool calls. It does not change the separate syntax-correction limit.
-
-The model can also call `svg_preview()` to inspect the current complete draft
-while working. The tool returns a PNG using the same renderer and white
-background as automatic review, or text diagnostics for an invalid/empty draft.
-It leaves the SVG unchanged. It requires a vision model with its encoder loaded
-and visual review set to `auto` or `on`; otherwise it returns an explanation.
-
-`--tool-rounds` sets the tool-round limit for each drafting or review phase
-(default **20**, minimum 1). A round is one assistant tool-call batch; multiple
-calls can share it, and syntax-repair retries consume the same budget. An extra
-model turn is reserved for a final answer without tools. For example, add
-`--tool-rounds 30` to give a complex drawing more room. The `m` info panel shows
-the configured limit.
-
-`--temp` sets the sampling temperature (default **0.7**; `--temp 0` restores
-greedy decoding), with `--top-p` (default 0.95) applied when sampling. Tool-call
-markup is always decoded greedily regardless, so sampling only shapes free
-content. Greedy decoding is deterministic but can loop on tool-call markers and
-makes auto-correct retries replay the identical failure. `--seed` pins the
-sampler for reproducible turns; the default (0) draws a fresh random seed each
-turn so regeneration and retries explore.
-
-`--prompt "..."` runs headless: no TUI, the full drafting/auto-correct/review
-pipeline executes once, the saved SVG path prints to stdout, and the exit code
-reports success. `--outfile out.svg` names the result instead of the timestamped
-`svgpad.<timestamp>.svg`. All other flags compose, e.g.
-`ds4go-svgpad --prompt "a red fox" --outfile fox.svg --model vision-q2 --visual-review on`.
-
-Before each model turn, SVGPad measures the rendered context, including tool
-definitions and image tokens, and tells the model how much space remains.
-Warnings become stronger around 75% and 90% usage (or sooner when little
-response space remains). The context meter and `[CONTEXT]` log entries refresh
-at these checks. Drafting and review phases share this capacity even when their
-tool-round budgets reset.
-
-SVGPad pauses before a turn that cannot fit at least 1,024 response tokens plus
-one spare position. A long individual response can still hit the runtime limit.
-After either context stop, press **Esc**, then **`c`** to keep your requests and
-`draft.svg`, discard the previous assistant/tool transcript and review images,
-and continue by inspecting the existing drawing. This recovery does not generate
-a summary: prior plans and review conclusions are discarded, so the model must
-check the artifact again. If the preserved requests themselves are too large,
-shorten the prompt or restart with a larger `--ctx`.
-
-The system prompt includes the configured limit and actual vision availability.
-Application messages report remaining rounds before each model turn, ask the
-model to finish when three remain, and require a final response at zero. These
-messages do not replace the user's prompt in saved metadata. The hard cap still
-applies if the model ignores the guidance.
-
-Preview calls use the normal tool-round budget, independently of
-`--visual-rounds`, and automatic review still runs after drafting. Only the latest
-preview or automatic-review image is retained in model context; earlier tool
-observations and critiques remain as text. The tool panel and log show the
-preview result summary.
-
-After saving, metadata enrichment generates the title, screen-reader description,
-and keywords in a separate session. If the loaded engine has vision, that session
-receives a rendered preview alongside the original prompt and SVG markup, and
-uses the visible result to describe the image. Text-only engines use markup;
-a rendering failure falls back to markup and is logged. This follows the loaded
-engine's vision capability independently of the automatic-review budget. The
-`[META]` log records `vision=true` or `vision=false`. Failed enrichment preserves
-the already-saved SVG.
-
-An optional test exercises live image inference and SVG editing without a terminal (ordinary tests use mocks):
-
-```bash
-SVG_VISION_MODEL="$HOME/.ds4/models/DeepSeek-V4-Flash-Vision-Exp-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8.gguf" \
-  go test ./cmd/svgpad -run TestVisualReviewLive -v -count=1 -timeout=10m
-```
-
-On Linux, also set `CGO_ENABLED=0 GOFLAGS=-tags=nofakecgo` as described above. `SVG_VISION_ENCODER` and `SVG_VISION_LIB` override the companion and runtime paths for this test.
-
-### cadpad — CAD Workbench
+### cadpad
 
 ```bash
 task run:cadpad
-# pure geometry mode (no LLM)
+# pure geometry, no model
 NO_ENGINE=1 task run:cadpad
 ```
 
-**Example session file** (`examples/cadpad/demo.cad.json`):
+Operations are stored as a replayable JSON log, so every create, transform, and boolean can be undone and saved. An example session, `examples/cadpad/demo.cad.json`:
 
 ```json
 [
@@ -319,136 +106,168 @@ NO_ENGINE=1 task run:cadpad
 ]
 ```
 
-Operations are stored as a replayable JSON log—every boolean, transform, and create is undoable and serializable.
+Escape cancels the current run, and switching models keeps the CAD world. The viewport copy is a text description of the world. See the [cadpad README](cmd/cadpad/README.md).
 
-### steering — Activation Steering
+### trippad
+
+```bash
+task run:trippad
+# no model
+./bin/ds4go-trippad --no-engine
+```
+
+See the [trippad README](cmd/trippad/README.md) for the controls, the shader gallery, and the browser playground.
+
+### steering
 
 ```bash
 task run:steering -- --dir-steering ./my-vectors --scale 0,1,-1
 ```
 
-Explore how steering vectors shift next-token probabilities. Branch timelines, adjust FFN scales on the fly, and compare outputs side-by-side.
+Shows how steering vectors shift next-token probabilities. You can branch timelines, change FFN scales while running, and compare outputs side by side.
+
+### Shared keys
+
+glyphpad, svgpad, and cadpad share these keys:
+
+| Key | Action |
+|-----|--------|
+| **F1** | Help |
+| **F2** | Run settings |
+| **Ctrl+R** | Cycle reasoning |
+| **Ctrl+O** | Choose a model |
+| **Ctrl+Y** | Copy the focused pane |
+| **Tab / Shift+Tab** | Move focus, including to the prompt |
+| **Ctrl+N** | Logs |
+
+Settings changed during inference apply to the next request, and settings are locked while a model loads. The engine loads lazily and keeps queued prompts while it loads. Copying uses OSC 52, so your terminal has to allow clipboard writes.
 
 ---
 
-## Common CLI Flags
+## Browser playground
 
-All four apps share a similar inference flag set:
+trippad can serve a WebGPU version of its shaders:
 
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--ctx` | 32768 (16384 for cadpad) | Token context window |
-| `--backend` | `metal` | `metal`, `cuda`, or `cpu` |
-| `--power` | 80 (cadpad) / 100 (others) | GPU duty-cycle throttle % (1–100) |
-| `-d, --debug` | `false` | Tee engine logs to `*.log` |
+```bash
+./bin/ds4go-trippad --web-only                  # http://127.0.0.1:8080/, no model or native GPU
+./bin/ds4go-trippad --no-engine --web           # alongside the terminal UI
+```
 
-cadpad-only:
-
-| Flag | Meaning |
-|------|---------|
-| `--no-engine` | Start without LLM (pure geometry / headless tool use) |
-
-cadpad and trippad:
-
-| Flag | Default | Meaning |
-|------|---------|---------|
-| `--kitty-transport` | `auto` | How Kitty frames reach the terminal: `png`, `rgba`, `shm`, or `auto` |
-
-`png` works everywhere Kitty graphics do, including over SSH. `rgba` skips the
-PNG encode but sends about 5.3 bytes per pixel through the terminal. `shm`
-passes raw pixels through shared memory, so only a short reference goes through
-the terminal. It needs a local terminal that supports Kitty's shared-memory
-medium (`t=s`), such as Kitty or Ghostty. `shm` trusts you: it uses shared memory
-once the terminal answers the startup `t=s` probe, falls back to PNG until then (and
-whenever an object cannot be created), and the pad logs the fallback once.
-
-`auto` makes the same request but says nothing when it lands on PNG, because that is
-the expected result over SSH or in a terminal without `t=s`. The widget only sends
-shared-memory frames after the terminal has answered the probe, and a terminal that
-cannot read the object never does. The cadpad header labels the transport (`shm`)
-once shared memory is in use. `auto` is the default. If the viewport stays blank,
-run with `--kitty-transport png`.
-cadpad names the transport in the viewport header and trippad logs the fallback.
-
-steering-only:
-
-| Flag | Meaning |
-|------|---------|
-| `--dir-steering` | Directory containing `vectors.json` registry |
-| `--scale` | Comma-separated FFN scales |
-| `--attn-scale` | Attention steering scale |
-| `--allow-attn-steering` | Enable attention steering |
-| `--top-k` | Top-K sampling filter |
-| `--max-tokens` | Generation cap per roll |
+A small Go `net/http` server serves embedded HTML, JavaScript, and CSS. The browser runs the same WGSL compute module that the terminal app builds, using plain JavaScript and the WebGPU API. There is no Go-to-WASM build and no JavaScript framework. The server only accepts loopback addresses and checks the Host header. Its pages load nothing from other origins. Details are in the [trippad README](cmd/trippad/README.md).
 
 ---
 
-## Project Layout
+## Common flags
+
+These apply to glyphpad, svgpad, cadpad, and trippad (a flag that does not apply to an app is noted below).
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `-m, --model` | `$DS4_DIR/models/ds4flash.gguf` | Installed model alias or GGUF path |
+| `--ctx` | 32768 (cadpad 16384, trippad 131072) | Context window in tokens |
+| `--backend` | auto | `metal`, `cuda`, or `cpu` |
+| `--power` | 100 (cadpad 80) | GPU duty-cycle throttle, 1 to 100 percent |
+| `--temp` | 0.7 | Sampling temperature. `0` is greedy. |
+| `--top-p` | 0.95 | Nucleus sampling cutoff |
+| `--seed` | 0 | Sampler seed. `0` uses a new seed for each request. |
+| `--tool-rounds` | svgpad 20, cadpad 36, trippad 20 | Tool-call rounds per request. The final answer gets one extra turn. |
+| `-d, --debug` | off | Log raw model traffic and libds4 diagnostics to a `*.log` file |
+| `--ssd-streaming` | off | Stream experts from SSD |
+| `--lib` | search path | Path to the libds4 shared library |
+
+`--tool-rounds` is not in glyphpad. `--no-engine` starts without a model and is in cadpad and trippad.
+
+steering takes `--model`, `--ctx`, `--backend`, `--seed`, `--temp`, `--top-p`, and `--lib`, with `--temp` and `--top-p` defaulting to 1. It adds `--dir-steering` (directory with the `vectors.json` registry), `--scale` (comma-separated FFN scales), `--attn-scale`, `--allow-attn-steering`, `--top-k`, and `--max-tokens`. Run any app with `--help` for its full list.
+
+### Kitty frame transport
+
+`--kitty-transport` (cadpad and trippad, default `auto`) sets how image frames reach the terminal:
+
+- **`png`**: PNG through the terminal stream. Works everywhere Kitty graphics work, including SSH.
+- **`rgba`**: raw pixels through the stream. No PNG encode, but about 5.3 bytes per pixel go over the wire.
+- **`shm`**: raw pixels through shared memory, so only a short reference goes through the terminal. It needs a local terminal that supports Kitty's shared-memory medium (`t=s`), such as Kitty or Ghostty. The app uses shared memory once the terminal answers a startup probe, sends PNG until then and whenever an object cannot be created, and logs that fallback once.
+- **`auto`**: makes the same request as `shm` but does not report a PNG result, since that is expected over SSH or in a terminal without `t=s`.
+
+cadpad's viewport header names the transport once it is not plain PNG. If the viewport stays blank, run with `--kitty-transport png`.
+
+---
+
+## Project layout
 
 ```
 .
 ├── cmd/
-│   ├── glyphpad/          # Unicode glyph TUI
-│   ├── svgpad/            # SVG drawing TUI
-│   ├── cadpad/            # CAD modeling TUI + headless harness
-│   └── steering/          # Activation-steering dashboard
+│   ├── glyphpad/         Unicode glyph app
+│   ├── svgpad/           SVG drawing app
+│   ├── cadpad/           CAD app and headless harness
+│   ├── trippad/          shader app and browser playground
+│   ├── trippad-memory/   command-line access to trippad's notes
+│   └── steering/         activation-steering dashboard
 ├── internal/
-│   ├── cadpad/            # CAD world state, SDF ops, rendering
-│   ├── cliopts/           # Shared CLI option parsing
-│   ├── ds4log/            # Engine logging helpers
-│   ├── editmode/          # Modal edit-box component (glyphpad & svgpad)
-│   ├── engineinit/        # Lazy ds4go engine lifecycle
-│   ├── headerbar/         # Shared headerbar component
-│   ├── steerinspect/      # Steering vector inspection logic
-│   └── steertui/          # Steering-specific TUI views
-├── examples/
-│   └── cadpad/            # Sample .cad.json session files
-├── bin/                   # Built binaries (gitignored)
-└── Taskfile.yml           # Build & run tasks
+│   ├── appinit/          shared app startup
+│   ├── bubble/           model tool-loop driver for Bubble Tea
+│   ├── cadpad/           CAD world, SDF operations, rendering, Lua
+│   ├── cliopts/          shared command-line flags
+│   ├── ds4log/           libds4 diagnostic capture
+│   ├── editmode/         shared edit box and key actions
+│   ├── engineinit/       engine and GPU readiness lifecycle
+│   ├── headerbar/        one-line header layout
+│   ├── modelpicker/      installed-model picker widget
+│   ├── padui/            dialogs, pager, and Kitty transport shared by the pads
+│   ├── runconfig/        run settings and budget guidance
+│   ├── steerinspect/     steering vector inspection and diffs
+│   ├── steertui/         steering dashboard views
+│   └── trippad/          shaders, parameters, tools, gallery, web server
+├── ntgpu/                GPU compute helpers on wgpu
+├── examples/cadpad/      sample .cad.json sessions
+├── scripts/              WGSL language server installer, svgpad benchmark
+├── .github/workflows/    CI and release
+├── Taskfile.yml          build and run tasks
+├── AGENTS.md             notes for coding agents working on the repo
+└── PAD-ROLLOUT.md        status of features shared across the pads
 ```
 
 ---
 
-## Tech Stack
+## Libraries
 
-- **[Bubble Tea v2](https://github.com/charmbracelet/bubbletea)** – TUI framework
-- **[Bubbles v2](https://github.com/charmbracelet/bubbles)** – Text inputs, key maps, etc.
-- **[Lipgloss v2](https://github.com/charmbracelet/lipgloss)** – Terminal styling & layout
-- **[Cobra](https://github.com/spf13/cobra)** – CLI framework (steering)
-- **[ds4go](https://github.com/NimbleMarkets/ds4go)** – Local DeepSeek inference (GGUF via libds4)
-- **[ntcharts](https://github.com/NimbleMarkets/ntcharts)** / **[ntcharts-svg](https://github.com/NimbleMarkets/ntcharts-svg)** – Terminal picture & SVG rendering
-- **[gsdf / simplesdf](https://github.com/soypat/gsdf)** – Signed-distance-field geometry engine (cadpad)
+| Area | Libraries | Used for |
+|------|-----------|----------|
+| Terminal UI | [Bubble Tea v2](https://github.com/charmbracelet/bubbletea), [Bubbles v2](https://github.com/charmbracelet/bubbles), [Lipgloss v2](https://github.com/charmbracelet/lipgloss), [ultraviolet](https://github.com/charmbracelet/ultraviolet), [x/ansi](https://github.com/charmbracelet/x), [stickers](https://github.com/76creates/stickers) | UI, input, styling, terminal events, ANSI handling, flexbox layout |
+| Terminal graphics | [ntcharts](https://github.com/NimbleMarkets/ntcharts), [ntcharts-svg](https://github.com/NimbleMarkets/ntcharts-svg), [oksvg](https://github.com/NimbleMarkets/oksvg), [ntdiff](https://github.com/NimbleMarkets/ntdiff) | Kitty picture widget, SVG rendering (oksvg is our fork of srwiley/oksvg), steering diffs |
+| Inference | [ds4go](https://github.com/NimbleMarkets/ds4go), [ds4](https://github.com/antirez/ds4), [purego](https://github.com/ebitengine/purego) | Local models; calling libds4 without cgo |
+| GPU | [gogpu/wgpu](https://github.com/gogpu/wgpu), gputypes, [naga](https://github.com/gogpu/naga) | WebGPU in pure Go (Metal, Vulkan). cadpad's raymarcher and trippad's shaders run on it. naga compiles and validates WGSL. |
+| CAD | [gsdf](https://github.com/soypat/gsdf) and geometry, [gopher-lua](https://github.com/yuin/gopher-lua), [go3mf](https://github.com/hpinc/go3mf), [math32](https://github.com/chewxy/math32) | Signed-distance-field geometry, Lua scripting by the model, 3MF export |
+| Other | [chroma](https://github.com/alecthomas/chroma), [cobra](https://github.com/spf13/cobra), [pflag](https://github.com/spf13/pflag) | Syntax highlighting; flags (cobra for steering, pflag for the rest) |
+| Browser | `net/http`, plain JavaScript, WebGPU | trippad's playground, no frameworks |
+
+Optional tools outside `go.mod`: [`lua-language-server`](https://github.com/LuaLS/lua-language-server) for cadpad's Lua editing support, and a [`wgsl-analyzer`](https://github.com/NimbleMarkets/wgsl-analyzer) build for trippad's WGSL checks (`scripts/install-trippad-wgsl-lsp.sh` installs a pinned macOS binary).
 
 ---
 
-## Development Tips
+## Development
 
-- **Watch logs** while a TUI is running:
-  ```bash
-  task log
-  ```
-- **Format check before pushing:**
-  ```bash
-  task pre-push
-  ```
-- **Run tests:**
-  ```bash
-  task test
-  ```
-- **Reduce VRAM pressure** if you hit OOM:
-  ```bash
-  task run:svgpad -- --ctx 8192 --power 50
-  ```
+```bash
+task test        # tests
+task pre-push    # format check before pushing
+task log         # follow logs while an app runs
+```
+
+If you run out of VRAM, lower the context or power: `task run:svgpad -- --ctx 8192 --power 50`.
+
+GPU tests need a real GPU and do not run under `-race`. CI runs the full suite on macOS and the pure-Go packages on Linux.
+
+---
 
 ## Acknowledgements
 
-Thanks to [@antirez](https://github.com/antirez) for his work on [`ds4`](https://github.com/antirez/ds4) and for his local-LLM advocacy.  Thanks to [DeepSeek](https://www.deepseek.com/) for their public contributions.
+Thanks to [@antirez](https://github.com/antirez) for [`ds4`](https://github.com/antirez/ds4) and for his local-LLM advocacy, and to [DeepSeek](https://www.deepseek.com/) for their public contributions.
 
 ## License
 
-Released under the [MIT License](https://en.wikipedia.org/wiki/MIT_License), see [LICENSE.txt](./LICENSE.txt).
+Released under the [MIT License](https://en.wikipedia.org/wiki/MIT_License). See [LICENSE.txt](./LICENSE.txt).
 
-Copyright (c) 2026 [Neomantra Corp](https://www.neomantra.com).   
+Copyright (c) 2026 [Neomantra Corp](https://www.neomantra.com).
 
 ----
 Made with :heart: and :fire: by the team behind [Nimble.Markets](https://nimble.markets).

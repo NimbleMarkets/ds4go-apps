@@ -1,18 +1,18 @@
-# cadpad — LLM-powered CAD scratchpad
+# cadpad: CAD scratchpad
 
-`ds4go-cadpad` is a terminal CAD modeling environment where you describe what you want in natural language and an LLM (via ds4go + DSML tool calling) mutates a live `simplesdf` world. Previews update instantly using CPU rasterization + `ntcharts/v2/picture`.
+`ds4go-cadpad` is a terminal CAD app. You describe what you want, and the model changes a live `simplesdf` world through ds4go tool calls (DSML). Previews are drawn on the CPU and shown with `ntcharts/v2/picture`.
 
-It is the geometry counterpart to `svgpad` and `glyphpad` in the ds4go-apps monorepo.
+It is the geometry counterpart to `svgpad` and `glyphpad`.
 
 ## Features
 
-- **High-level atomic tools** the LLM loves: `cad_create`, `cad_boolean`, `cad_transform`, `cad_group`, `cad_export_stl`, `cad_render_preview`, `cad_describe`, `cad_bbox`, `cad_save`/`cad_load`.
-- **Fast midplane previews** via `glrender.NewImageRendererSDF2` + projection adapters (XY/XZ/YZ). Typical <80 ms on laptop CPU.
-- **GPU 3D viewport** — the angled 3D view raymarches the SDF on the GPU (via `gogpu`/`wgpu`, Metal on macOS) when a hardware device is available, falling back to the CPU mesh preview otherwise. The `3D·GPU` / `3D·CPU` badge in the viewport header shows which path is active.
-- **Kitty + glyph** picture widget with graceful fallback. `--kitty-transport png|rgba|shm|auto` selects how Kitty frames are delivered (default `auto`: shared memory when the terminal confirms it, else PNG); the viewport header names the transport once it is not plain PNG, and names a PNG fallback from an explicit `rgba` or `shm` request.
-- **Replayable history** — save/load `.cad.json` files that are just arrays of the same operations the LLM used.
-- **Headless friendly** — `--no-engine` starts instantly for pure-Go geometry scripting or embedding via the `harness` package.
-- **Robust error handling** — uses `simplesdf.Err()` / `ClearErrors()`, graceful fallback if GPU preview/export is unavailable.
+- **Tools:** `cad_create`, `cad_boolean`, `cad_transform`, `cad_group`, `cad_export_stl`, `cad_render_preview`, `cad_describe`, `cad_bbox`, and `cad_save`/`cad_load`.
+- **Midplane previews:** drawn with `glrender.NewImageRendererSDF2` and projection adapters (XY, XZ, YZ). Typically under 80 ms on a laptop CPU.
+- **GPU 3D viewport:** the angled 3D view raymarches the SDF on the GPU (through `gogpu`/`wgpu`, Metal on macOS) when a hardware device is available. Otherwise it uses the CPU mesh preview. The `3D·GPU` or `3D·CPU` badge in the viewport header shows which one is active.
+- **Picture output:** images use Kitty graphics where the terminal supports them, and glyphs otherwise. `--kitty-transport png|rgba|shm|auto` sets how Kitty frames are sent. The default, `auto`, uses shared memory when the terminal confirms it and PNG otherwise. The viewport header names the transport once it is not plain PNG, and names a PNG fallback from an explicit `rgba` or `shm` request.
+- **Replayable history:** `.cad.json` files are arrays of the same operations the model used.
+- **Headless mode:** `--no-engine` starts immediately for Go geometry scripting, or embed the `harness` package.
+- **Errors:** uses `simplesdf.Err()` and `ClearErrors()`. If GPU preview or export is unavailable, cadpad falls back to the CPU path.
 
 ## Quick Start
 
