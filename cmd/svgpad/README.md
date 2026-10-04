@@ -9,6 +9,8 @@ task run:svgpad
   --visual-review on --visual-rounds 3 --tool-rounds 20
 ```
 
+<img src="../../screenshots/svgpad.png" width="600" alt="svgpad viewing a saved cyberpunk pelican-on-a-bicycle drawing, with its prompt, tags, SVG element counts, and the tool list">
+
 Describe an image, for example *"a blue circle inside a rounded rectangle"*. The engine loads lazily, so you can browse saved drawings and sketch before you load a model.
 
 The drafting tools reject appends after the outer `</svg>` has closed and tell the model to edit inside the existing root. Validation reports content outside the root at the line where the root closed, so a misplaced `</svg>` gets fixed in place instead of by adding or deleting closing tags at the end of the file.

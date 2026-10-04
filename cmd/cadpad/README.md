@@ -4,6 +4,8 @@
 
 It is the geometry counterpart to `svgpad` and `glyphpad`.
 
+<img src="../../screenshots/cadpad.png" width="760" alt="cadpad's GPU 3D viewport showing a sphere made of 80 smaller spheres, with the object list, bounding box, and the model's description">
+
 ## Features
 
 - **Tools:** `cad_create`, `cad_boolean`, `cad_transform`, `cad_group`, `cad_export_stl`, `cad_render_preview`, `cad_describe`, `cad_bbox`, and `cad_save`/`cad_load`.

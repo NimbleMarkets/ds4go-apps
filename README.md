@@ -24,7 +24,7 @@ Terminal apps that run DeepSeek models locally through [ds4go](https://github.co
 - [Demo videos](https://gist.github.com/neomantra/d49df05d6b137b9e6844186499715756): steering "hello world", the svgpad pelican, ds4 in Charm `crush`, and the `dankbot420` demo.
 - [ds4go CLI screenshots](https://gist.github.com/neomantra/40180ade13df93290250ce8c6d28c9f6): the underlying `ds4go` command's model list, model download, and validate output.
 
-The screenshots may not match the current UI.
+The screenshots were taken at different times and may not match the current UI.
 
 ---
 
@@ -79,6 +79,8 @@ task run:glyphpad
 
 Type a prompt to generate Unicode patterns, box-drawing diagrams, or pixel-art blocks. **Ctrl+E** opens the edit box to refine a selection. Copying the canvas copies the complete glyph grid.
 
+<img src="screenshots/glyphpad.png" width="560" alt="glyphpad showing a Pikachu drawn from the model's commands, with the canvas, the model's description, and the command list">
+
 ### svgpad
 
 ```bash
@@ -86,6 +88,8 @@ task run:svgpad
 ```
 
 Describe an image and the model writes SVG. See the [svgpad README](cmd/svgpad/README.md) for visual review, the model picker, headless mode (`--prompt`), and context handling.
+
+<img src="screenshots/svgpad.png" width="600" alt="svgpad viewing a saved cyberpunk pelican-on-a-bicycle drawing, with its prompt, tags, SVG element counts, and the tool list">
 
 ### cadpad
 
@@ -108,6 +112,8 @@ Operations are stored as a replayable JSON log, so every create, transform, and 
 
 Escape cancels the current run, and switching models keeps the CAD world. The viewport copy is a text description of the world. See the [cadpad README](cmd/cadpad/README.md).
 
+<img src="screenshots/cadpad.png" width="760" alt="cadpad's GPU 3D viewport showing a sphere made of 80 smaller spheres, with the object list, bounding box, and the model's description">
+
 ### trippad
 
 ```bash
@@ -125,6 +131,8 @@ task run:steering -- --dir-steering ./my-vectors --scale 0,1,-1
 ```
 
 Shows how steering vectors shift next-token probabilities. You can branch timelines, change FFN scales while running, and compare outputs side by side.
+
+<img src="screenshots/steering.png" width="760" alt="The steering inspector during a generation, showing the transcript, the ranked next-token alternatives with probabilities, and per-step metrics">
 
 ### Shared keys
 
