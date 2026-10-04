@@ -46,7 +46,7 @@ func run() (err error) {
 	preset := pflag.String("preset", "", "load a .trip.json preset at startup")
 	downscale := pflag.Int("downscale", 2, "viewport pixel downscale (1..8; adapts upward for slow frames)")
 	fps := pflag.Int("fps", 60, "target animation frames per second (1..60)")
-	kittyTransport := pflag.String("kitty-transport", string(padui.KittyTransportPNG), padui.KittyTransportUsage)
+	kittyTransport := pflag.String("kitty-transport", string(padui.KittyTransportAuto), padui.KittyTransportUsage)
 	webAddr := pflag.String("web", "", "serve a WebGPU comparison on a loopback address (default 127.0.0.1:8080)")
 	pflag.Lookup("web").NoOptDefVal = "127.0.0.1:8080"
 	webOnly := pflag.Bool("web-only", false, "serve only the browser demo, without terminal rendering or a model")
@@ -135,7 +135,7 @@ func run() (err error) {
 	m.downscale = *downscale
 	m.targetFPS = *fps
 	m.setKittyTransport(transport)
-	if transport != padui.KittyTransportPNG {
+	if !transport.Implicit() {
 		m.addLog("Kitty transport: " + string(transport) + " requested")
 	}
 	m.noEngine = *noEngine

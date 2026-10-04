@@ -28,7 +28,7 @@ func run() (err error) {
 	flags := appinit.RegisterFlags(pflag.CommandLine, "cadpad", appinit.Defaults{Ctx: 16384, Power: 80})
 	var noEngine bool
 	pflag.BoolVar(&noEngine, "no-engine", false, "start without LLM engine (pure geometry mode or harness embedding)")
-	kittyTransport := pflag.String("kitty-transport", string(padui.KittyTransportPNG), padui.KittyTransportUsage)
+	kittyTransport := pflag.String("kitty-transport", string(padui.KittyTransportAuto), padui.KittyTransportUsage)
 	options := runconfig.Register(pflag.CommandLine, 36)
 	pflag.Parse()
 	if err := options.Validate(); err != nil {
