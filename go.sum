@@ -8,8 +8,8 @@ github.com/76creates/stickers v1.5.0 h1:LJOlzeUbGOKBlsfi1UXShQiBh7IY7D9g5KTG7qlt
 github.com/76creates/stickers v1.5.0/go.mod h1:S0ii0IRGMJx5n5zGpesai8oX0DWY3X5PDI3OUErgF38=
 github.com/MakeNowJust/heredoc v1.0.0 h1:cXCdzVdstXyiTqTvfqk9SDHpKNjxuom+DOlyEeQ4pzQ=
 github.com/MakeNowJust/heredoc v1.0.0/go.mod h1:mG5amYoWBHf8vpLOuehzbGGw0EHxpZZ6lCpQ4fNJ8LE=
-github.com/NimbleMarkets/ds4go v0.8.1-0.20261005001301-20bfb39f66d8 h1:OprKNGhF3wBddhqYNwah4XJgY45qYPszy+OD0tmsSN0=
-github.com/NimbleMarkets/ds4go v0.8.1-0.20261005001301-20bfb39f66d8/go.mod h1:wzPzejhH46DxhpFLLpaeV85NFXG9KyYGt0genQfXQxc=
+github.com/NimbleMarkets/ds4go v0.9.0 h1:KXnlmLidTIWvNrcUKI2NUpzb/+pCdpxRmTMMtdDlp10=
+github.com/NimbleMarkets/ds4go v0.9.0/go.mod h1:ZdgmrwA71vkk4kd5fNwaVO3g6kx/fhNRQZVFecoJBHA=
 github.com/NimbleMarkets/ntcharts-svg v0.3.0 h1:Ze/WdOprbwBqJfQdZbOixPyVRnQpIVrDES0hwXqsM9E=
 github.com/NimbleMarkets/ntcharts-svg v0.3.0/go.mod h1:BeJEiD5rCp0ikAsNe+HKtJiadNgqTvEZGmAB1LLM5vY=
 github.com/NimbleMarkets/ntcharts/v2 v2.6.0 h1:t30voczOMic9NoxcS75sqbYSPFpOiPs+rUKN+3fpwOc=
@@ -63,8 +63,8 @@ github.com/davecgh/go-spew v1.1.0 h1:ZDRjVQ15GmhC3fiQ8ni8+OwkZQO4DARzQgrnXU1Liz8
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/disintegration/imaging v1.6.2 h1:w1LecBlG2Lnp8B3jk5zSuNqd7b4DXhcjwek1ei82L+c=
 github.com/disintegration/imaging v1.6.2/go.mod h1:44/5580QXChDfwIclfc/PCwrr44amcmDAg8hxG0Ewe4=
-github.com/dlclark/regexp2/v2 v2.8.2 h1:uTTe+cxADL4be+dv4DZwsBIEPCQ6RHPlnVuKrtLqSx0=
-github.com/dlclark/regexp2/v2 v2.8.2/go.mod h1:avUrQvPaLz2DrFNHJF0taWAFFX2C1GMSSoeiqFjcBmU=
+github.com/dlclark/regexp2/v2 v2.8.3 h1:4iBHVtmyAsQOOthVo+0v0RxktjLPDOTKx9Nuhf+PpD0=
+github.com/dlclark/regexp2/v2 v2.8.3/go.mod h1:avUrQvPaLz2DrFNHJF0taWAFFX2C1GMSSoeiqFjcBmU=
 github.com/ebitengine/purego v0.11.1 h1:2zpWRSQNVKN4eKsKO9eM1ILDgWfYMY9GwqRmK6XeQ/0=
 github.com/ebitengine/purego v0.11.1/go.mod h1:DCHPP08djqhNSoTfImcnHYQRZmd0qhakvrozqaEYhGQ=
 github.com/go-gl/gl v0.0.0-20260331235117-4566fea9a276 h1:IO5P06Pcj9K04d+l4nrf3c2U56+dAotIFG6u4P1wAHI=

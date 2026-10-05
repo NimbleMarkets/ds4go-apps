@@ -36,7 +36,7 @@ The screenshots were taken at different times and may not match the current UI.
 - **A terminal with Kitty graphics** (Kitty, Ghostty, WezTerm) to see images. Other terminals fall back to character rendering.
 - **A browser with WebGPU**, only for the trippad browser playground.
 
-These apps use ds4go v0.8.0 plus its unreleased ROCm backend support (pinned to a `rocm-backend-flavor` commit), which needs libds4 v0.5.20260910 or newer. Some features need a newer libds4:
+These apps use ds4go v0.9.0 (including its distinct ROCm backend), which matches libds4 v0.9.20261005; older libraries keep working, with the minimum for ROCm at libds4 v0.5.20260910. Some features need a newer libds4:
 
 | Feature | libds4 |
 |---------|--------|

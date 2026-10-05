@@ -7,7 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.10
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/76creates/stickers v1.5.0
-	github.com/NimbleMarkets/ds4go v0.8.1-0.20261005001301-20bfb39f66d8
+	github.com/NimbleMarkets/ds4go v0.9.0
 	github.com/NimbleMarkets/ntcharts-svg v0.3.0
 	github.com/NimbleMarkets/ntcharts/v2 v2.6.0
 	github.com/NimbleMarkets/ntdiff v0.0.1
@@ -43,7 +43,7 @@ require (
 	github.com/clipperhouse/displaywidth v0.11.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/disintegration/imaging v1.6.2 // indirect
-	github.com/dlclark/regexp2/v2 v2.8.2 // indirect
+	github.com/dlclark/regexp2/v2 v2.8.3 // indirect
 	github.com/go-gl/gl v0.0.0-20260331235117-4566fea9a276 // indirect
 	github.com/go-gl/glfw v0.0.0-20260823155953-d41da22a9587 // indirect
 	github.com/go-gl/glfw/v3.3/glfw v0.0.0-20260823155953-d41da22a9587 // indirect

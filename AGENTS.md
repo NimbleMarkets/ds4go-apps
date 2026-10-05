@@ -34,8 +34,7 @@ checkpoints. Keep the active user request intact; do not silently discard its
 constraints. Checkpoints must distinguish completed operations, failed attempts,
 and remaining work so resuming cannot blindly repeat side effects.
 
-ds4go is pinned to a pushed `rocm-backend-flavor` commit (v0.8.0 plus ROCm as a
-distinct Go backend; move to the next tag once released) and ntcharts v2.6.0 is
+ds4go is pinned to the released v0.9.0 tag and ntcharts v2.6.0 is
 published; the module builds and tests without a workspace. Check with `GOWORK=off` when a local ignored
 `go.work` is present, since CI has none.
 Validate maintained packages with `go test ./cmd/... ./internal/... ./ntgpu` and
