@@ -64,8 +64,19 @@ tasks:
       - '.task/build/{{.APP}}.config'
     vars:
       APP: glyphpad
+      # `go list -m` reports an empty Dir until the module is in the cache,
+      # which would turn the sources globs into `/**/*.go` and walk the whole
+      # filesystem. Download first and fail loudly if it is still empty.
       DS4GO_SOURCE_DIR: &ds4go-source-dir
-        sh: go list -m -f '{{"{{.Dir}}"}}' github.com/NimbleMarkets/ds4go
+        sh: |
+          set -eu
+          dir=$(go list -m -f '{{"{{.Dir}}"}}' github.com/NimbleMarkets/ds4go)
+          if [ -z "$dir" ]; then
+            go mod download github.com/NimbleMarkets/ds4go >&2
+            dir=$(go list -m -f '{{"{{.Dir}}"}}' github.com/NimbleMarkets/ds4go)
+          fi
+          if [ -z "$dir" ]; then echo "cannot resolve ds4go module dir" >&2; exit 1; fi
+          printf '%s\n' "$dir"
       BUILD_CONFIG: &build-config
         sh: |
           set -eu
