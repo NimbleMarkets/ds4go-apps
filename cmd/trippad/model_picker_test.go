@@ -273,3 +273,20 @@ func TestCompanionsAndStaleCatalogValidation(t *testing.T) {
 		t.Fatal("accepted encoder as chat model")
 	}
 }
+
+func TestSecondCtrlCForcesQuitDuringLoad(t *testing.T) {
+	models := pickerModels(t)
+	m := pickerModel(t, models["q2-imatrix"])
+	m.switchModel(models["q2-imatrix"])
+	defer m.loader.StopAndWait()
+	if _, quit := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl}); quit != nil || m.forceQuit {
+		t.Fatal("first ctrl+c did not wait for the loader")
+	}
+	_, quit := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if quit == nil || !m.forceQuit {
+		t.Fatal("second ctrl+c did not force quit")
+	}
+	if _, ok := quit().(tea.QuitMsg); !ok {
+		t.Fatal("not a quit")
+	}
+}

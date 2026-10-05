@@ -264,3 +264,28 @@ func (a *App) Close(runErr error) {
 		_ = a.logf.Close()
 	}
 }
+
+// ForceQuitExitCode is the status ForceExit uses: the conventional 128+SIGINT
+// a shell reports for an interrupted process.
+const ForceQuitExitCode = 130
+
+// ForceExit terminates the process without waiting for an in-flight engine
+// load. ds4_engine_open has no cancellation point, so a model load can run
+// for minutes; the pads honor a second Ctrl+C by quitting the TUI and calling
+// this. It deliberately skips Close's stderr-capture drain and every engine or
+// library teardown, since the loader goroutine may still be inside libds4;
+// the kernel reclaims the mappings and device memory. Call it only after the
+// tea.Program has returned so the terminal is already restored.
+func (a *App) ForceExit() {
+	if a != nil && a.Logger != nil {
+		a.Logger.Printf("=== %s end (forced quit during model load) ===", a.Name)
+	}
+	if a != nil && a.logf != nil {
+		_ = a.logf.Sync()
+	}
+	os.Exit(ForceQuitExitCode)
+}
+
+// QuitWaitStatus is the status line a pad shows when the first Ctrl+C has to
+// wait for an engine load, naming the second press that forces the exit.
+const QuitWaitStatus = "Waiting for model loading to finish before quitting… Ctrl+C again to force quit"

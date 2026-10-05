@@ -144,6 +144,9 @@ func run() (err error) {
 	defer func() {
 		beginLogShutdown()
 		m.close()
+		if m.forceQuit {
+			app.ForceExit()
+		}
 	}()
 	_, err = tea.NewProgram(m).Run()
 	return err

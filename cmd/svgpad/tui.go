@@ -221,6 +221,7 @@ const (
 type model struct {
 	modelPicker                                      modelpicker.Model
 	switchingModel, releasingEngine, quitAfterSwitch bool
+	forceQuit                                        bool // second Ctrl+C during a load; see appinit.ForceExit
 	resumeDraft, mtpEnabled                          bool
 	switchStarted                                    time.Time
 

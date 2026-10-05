@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
+	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
@@ -15,9 +17,16 @@ import (
 func (m *model) dialogKey(msg tea.KeyPressMsg) (bool, tea.Cmd) {
 	k := msg.String()
 	if k == "ctrl+c" || k == "ctrl+q" {
-		if m.switchingModel {
+		// Any engine open (model switch, resume, or the lazy open on first
+		// submit) owns the result until engineReadyMsg returns it.
+		if m.switchingModel || m.lifecycle.status == engineinit.StatusOpening {
+			if m.quitAfterSwitch {
+				// libds4 cannot cancel the load; main exits without it.
+				m.forceQuit = true
+				return true, tea.Quit
+			}
 			m.quitAfterSwitch = true
-			m.statusText = "Waiting for model loading to finish before quitting…"
+			m.statusText = appinit.QuitWaitStatus
 			return true, nil
 		}
 		return true, tea.Quit

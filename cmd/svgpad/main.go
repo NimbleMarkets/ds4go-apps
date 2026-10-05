@@ -77,6 +77,9 @@ func run() (err error) {
 	// The metadata-enrichment goroutines must finish before the session
 	// closes underneath them.
 	if fm, ok := final.(model); ok {
+		if fm.forceQuit {
+			app.ForceExit()
+		}
 		if fm.metadataCancel != nil {
 			fm.metadataCancel()
 		}

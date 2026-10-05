@@ -91,6 +91,7 @@ type model struct {
 	gen           *bubble.Generation // in-flight generation; nil when idle
 	generating    bool
 	quitRequested bool
+	forceQuit     bool // second Ctrl+C during engine load; see appinit.ForceExit
 	statusText    string
 	errText       string
 	lastErr       error
@@ -200,10 +201,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" || msg.String() == "ctrl+q" {
+			again := m.quitRequested
 			m.quitRequested = true
 			m.gen.Cancel()
 			if m.engineStatus == engineinit.StatusInit || m.engineStatus == engineinit.StatusOpening {
-				m.statusText = "Waiting for engine loading before quitting…"
+				if again {
+					// libds4 cannot cancel the load; main exits without it.
+					m.forceQuit = true
+					return m, tea.Quit
+				}
+				m.statusText = appinit.QuitWaitStatus
 				return m, nil
 			}
 			return m, tea.Quit

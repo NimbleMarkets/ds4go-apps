@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -235,5 +236,37 @@ func TestScrollingBackFromTailAndDialogBottom(t *testing.T) {
 	m = update(t, m, tea.KeyPressMsg{Code: tea.KeyUp})
 	if bottom == 0 || m.helpScroll != bottom-1 {
 		t.Fatal("help scrolling overshot its content")
+	}
+}
+
+func TestSecondCtrlCForcesQuitDuringLoading(t *testing.T) {
+	m := navigationModel()
+	m.switchingModel = true
+	m = update(t, m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if !m.quitAfterSwitch || m.forceQuit {
+		t.Fatal("first ctrl+c did not wait for loading")
+	}
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if m = next.(model); cmd == nil || !m.forceQuit {
+		t.Fatal("second ctrl+c did not force quit")
+	}
+}
+
+func TestQuitWaitsForLazyOpenThenForces(t *testing.T) {
+	m := navigationModel()
+	m.lifecycle = engineLifecycle{status: engineinit.StatusOpening}
+	m = update(t, m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if !m.quitAfterSwitch || m.forceQuit {
+		t.Fatal("first ctrl+c did not wait for the lazy open")
+	}
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if m = next.(model); cmd == nil || !m.forceQuit {
+		t.Fatal("second ctrl+c did not force quit")
+	}
+	m = navigationModel()
+	m.lifecycle = engineLifecycle{status: engineinit.StatusOpening}
+	m = update(t, m, tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if _, cmd := m.Update(engineReadyMsg{Err: context.Canceled}); cmd == nil {
+		t.Fatal("deferred quit lost after the lazy open finished")
 	}
 }

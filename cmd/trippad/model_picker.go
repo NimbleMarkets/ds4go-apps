@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
 	"os"
 	"path/filepath"
 	"strings"
@@ -171,8 +172,13 @@ func (m *model) openEngine(opts ds4.EngineOptions) tea.Cmd {
 
 func (m *model) requestQuit() tea.Cmd {
 	if m.loader != nil {
+		if m.quitPending {
+			// Second press: libds4 cannot cancel the load, so leave without it.
+			m.forceQuit = true
+			return tea.Quit
+		}
 		m.quitPending = true
-		m.status = "Waiting for model loading to finish before quitting…"
+		m.status = appinit.QuitWaitStatus
 		return nil
 	}
 	return tea.Quit

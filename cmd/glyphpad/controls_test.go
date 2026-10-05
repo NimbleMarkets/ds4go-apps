@@ -99,3 +99,16 @@ func TestInfoDialogPreservesFocus(t *testing.T) {
 		t.Fatal("dialog did not close")
 	}
 }
+
+func TestSecondCtrlCForcesQuitDuringOpening(t *testing.T) {
+	m := controlsModel()
+	m.engineStatus = engineinit.StatusOpening
+	next, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if m = next.(model); cmd != nil || m.forceQuit {
+		t.Fatal("first ctrl+c did not wait for opening")
+	}
+	next, cmd = m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if m = next.(model); cmd == nil || !m.forceQuit {
+		t.Fatal("second ctrl+c did not force quit")
+	}
+}

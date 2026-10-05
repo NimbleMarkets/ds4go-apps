@@ -41,6 +41,9 @@ func run() (err error) {
 	// The model owns the engine/session once Init's goroutine fires; on
 	// exit we recover them from the final model state and close in order.
 	if fm, ok := final.(model); ok {
+		if fm.forceQuit {
+			app.ForceExit()
+		}
 		fm.gen.StopAndWait()
 		if fm.session != nil {
 			fm.session.Close()

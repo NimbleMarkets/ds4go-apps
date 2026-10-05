@@ -54,6 +54,9 @@ func run() (err error) {
 
 	// Recover what the model owns from its final state.
 	if fm, ok := final.(model); ok {
+		if fm.forceQuit {
+			app.ForceExit()
+		}
 		fm.shutdown()
 	}
 	return runErr

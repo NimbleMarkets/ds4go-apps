@@ -176,6 +176,7 @@ type model struct {
 	inferencing   bool
 	gen           *bubble.Generation
 	quitRequested bool
+	forceQuit     bool // second Ctrl+C during engine load; see appinit.ForceExit
 	opening       bool
 	spinnerFrame  int
 

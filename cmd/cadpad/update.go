@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"github.com/NimbleMarkets/ds4go-apps/internal/appinit"
 	"image"
 	"math"
 	"path/filepath"
@@ -289,10 +290,16 @@ func (m model) handleKeyMsg(msg tea.KeyMsg) (model, tea.Cmd) {
 	}
 	k := msg.String()
 	if k == "ctrl+c" || k == "ctrl+q" || (k == "q" && !m.input.Focused() && !m.showHelp && !m.showLog && m.controls.Kind == "" && !m.picker.IsOpen()) {
+		again := m.quitRequested
 		m.quitRequested = true
 		m.gen.Cancel()
 		if m.opening {
-			m.status = "Waiting for engine loading before quitting…"
+			if again {
+				// libds4 cannot cancel the load; main exits without it.
+				m.forceQuit = true
+				return m, tea.Quit
+			}
+			m.status = appinit.QuitWaitStatus
 			return m, nil
 		}
 		return m, tea.Quit

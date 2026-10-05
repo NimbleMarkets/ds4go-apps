@@ -75,6 +75,7 @@ type model struct {
 	modelInfo                                   *ds4.ModelInfo
 	engOpts                                     ds4.EngineOptions
 	quitPending                                 bool
+	forceQuit                                   bool
 	showLog                                     bool
 	logTop                                      int
 	loadLogMarker                               string
@@ -132,14 +133,19 @@ func (m *model) close() {
 	// Unlink shared-memory frames the terminal has not consumed; they would
 	// otherwise persist after exit.
 	m.pic.SetImage(nil)
+	if m.forceQuit {
+		// The loader is still inside libds4 and cannot be cancelled; keep the
+		// shader and leave the engine to process exit (see appinit.ForceExit).
+		m.language.Close()
+		m.checkpoint()
+		return
+	}
 	m.gen.StopAndWait()
 	m.action.StopAndWait()
 	m.loader.StopAndWait()
 	m.gallery.preview.StopAndWait()
 	m.language.Close()
-	if err := m.state.Checkpoint(); err != nil {
-		m.addLog("Could not save current shader: " + err.Error())
-	}
+	m.checkpoint()
 	if m.loaded != nil {
 		if m.loaded.Session != nil {
 			m.loaded.Session.Close()
@@ -147,6 +153,11 @@ func (m *model) close() {
 		if m.loaded.Engine != nil {
 			m.loaded.Engine.Close()
 		}
+	}
+}
+func (m *model) checkpoint() {
+	if err := m.state.Checkpoint(); err != nil {
+		m.addLog("Could not save current shader: " + err.Error())
 	}
 }
 func (m *model) renderCmd() tea.Cmd {

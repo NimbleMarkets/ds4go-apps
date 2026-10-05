@@ -89,3 +89,16 @@ func TestModalIgnoresMouseAndPanelKeysDoNotSelectObjects(t *testing.T) {
 		t.Fatal("k did not scroll focused activity")
 	}
 }
+
+func TestSecondCtrlCForcesQuitDuringLoading(t *testing.T) {
+	m := controlsModel()
+	m.opening = true
+	m, cmd := m.handleKeyMsg(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd != nil || m.forceQuit {
+		t.Fatal("first ctrl+c did not wait for loading")
+	}
+	m, cmd = m.handleKeyMsg(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if cmd == nil || !m.forceQuit {
+		t.Fatal("second ctrl+c did not force quit")
+	}
+}
