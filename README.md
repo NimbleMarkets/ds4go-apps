@@ -36,7 +36,7 @@ The screenshots were taken at different times and may not match the current UI.
 - **A terminal with Kitty graphics** (Kitty, Ghostty, WezTerm) to see images. Other terminals fall back to character rendering.
 - **A browser with WebGPU**, only for the trippad browser playground.
 
-These apps use ds4go v0.8.0, which needs libds4 v0.5.20260910 or newer. Some features need a newer libds4:
+These apps use ds4go v0.8.0 plus its unreleased ROCm backend support (pinned to a `rocm-backend-flavor` commit), which needs libds4 v0.5.20260910 or newer. Some features need a newer libds4:
 
 | Feature | libds4 |
 |---------|--------|
@@ -48,7 +48,7 @@ These apps use ds4go v0.8.0, which needs libds4 v0.5.20260910 or newer. Some fea
 
 ## Build
 
-The module builds against the published ds4go and ntcharts releases. No workspace or local checkouts are needed.
+The module builds against the pinned ds4go commit and the published ntcharts release, both fetched through the Go module proxy. No workspace or local checkouts are needed.
 
 ```bash
 task build              # all apps
@@ -63,7 +63,7 @@ On Linux the Taskfile builds with `CGO_ENABLED=0` and `-tags=nofakecgo`, which s
 CGO_ENABLED=0 go build -tags=nofakecgo -o bin/ds4go-cadpad ./cmd/cadpad
 ```
 
-`task run:<app>` picks the inference backend automatically. Set `BACKEND=cuda`, `BACKEND=metal`, or `BACKEND=cpu` to override it.
+`task run:<app>` picks the inference backend automatically. Set `BACKEND=cuda`, `BACKEND=rocm`, `BACKEND=metal`, or `BACKEND=cpu` to override it.
 
 ---
 
@@ -173,7 +173,7 @@ These apply to glyphpad, svgpad, cadpad, and trippad (a flag that does not apply
 |------|---------|---------|
 | `-m, --model` | `$DS4_DIR/models/ds4flash.gguf` | Installed model alias or GGUF path |
 | `--ctx` | 32768 (cadpad 16384, trippad 131072) | Context window in tokens |
-| `--backend` | auto | `metal`, `cuda`, or `cpu` |
+| `--backend` | auto | `metal`, `cuda`, `rocm`, or `cpu`; auto follows the loaded libds4 build |
 | `--power` | 100 (cadpad 80) | GPU duty-cycle throttle, 1 to 100 percent |
 | `--temp` | 0.7 | Sampling temperature. `0` is greedy. |
 | `--top-p` | 0.95 | Nucleus sampling cutoff |

@@ -14,6 +14,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	ds4 "github.com/NimbleMarkets/ds4go"
 	"github.com/NimbleMarkets/ds4go-apps/internal/ds4log"
@@ -54,7 +55,7 @@ func RegisterFlags(fs *pflag.FlagSet, app string, d Defaults) *Flags {
 	fs.StringVarP(&f.Model, "model", "m", "", "installed model alias or GGUF file path (default: $DS4_DIR/models/ds4flash.gguf)")
 	fs.StringVar(&f.Lib, "lib", "", "path to libds4 shared library (optional, uses default search)")
 	fs.IntVar(&f.Ctx, "ctx", d.Ctx, "context window size in tokens; lower to 16384 or 8192 if VRAM is tight")
-	fs.StringVar(&f.Backend, "backend", "", "inference backend: metal, cuda, cpu (default: auto)")
+	fs.StringVar(&f.Backend, "backend", "", "inference backend: metal, cuda, rocm, cpu (default: auto)")
 	fs.StringVar(&f.MTP, "mtp", "none", "path to MTP companion GGUF model (default: none, empty or non-existent falls back to auto)")
 	fs.BoolVarP(&f.Debug, "debug", "d", false, fmt.Sprintf("log raw LLM traffic and tee libds4 diagnostics to %s.log", app))
 	fs.IntVar(&f.Power, "power", d.Power, "GPU power duty-cycle throttle percentage (1..100)")
@@ -62,34 +63,32 @@ func RegisterFlags(fs *pflag.FlagSet, app string, d Defaults) *Flags {
 	return f
 }
 
-// selectBackend resolves the --backend string, defaulting to the detected
-// backend for the library at libPath.
-func selectBackend(name, libPath string) ds4.Backend {
-	switch name {
+// parseBackend validates the --backend string. auto is true for "" and
+// "auto", which defer to the loaded library (ds4.DetectLibraryBackend) or,
+// without one, to ds4.DetectDefaultBackend.
+func parseBackend(name string) (b ds4.Backend, auto bool, err error) {
+	switch strings.ToLower(name) {
+	case "", "auto":
+		return 0, true, nil
 	case "cuda":
-		return ds4.BackendCUDA
+		return ds4.BackendCUDA, false, nil
+	case "rocm":
+		return ds4.BackendROCm, false, nil
 	case "cpu":
-		return ds4.BackendCPU
+		return ds4.BackendCPU, false, nil
 	case "metal":
-		return ds4.BackendMetal
-	default:
-		return ds4.DetectDefaultBackend(libPath)
+		return ds4.BackendMetal, false, nil
 	}
+	return 0, false, fmt.Errorf("unknown --backend %q (want metal, cuda, rocm, cpu, or auto)", name)
 }
 
-// backendName renders a ds4.Backend for log lines (ds4.Backend has no
-// Stringer; ds4.BackendName needs a loaded library).
-func backendName(b ds4.Backend) string {
-	switch b {
-	case ds4.BackendMetal:
-		return "metal"
-	case ds4.BackendCUDA:
-		return "cuda"
-	case ds4.BackendCPU:
-		return "cpu"
-	default:
-		return fmt.Sprintf("backend(%d)", int(b))
+// backendLabel names the backend that will actually run, for display.
+// BackendCUDA on a ROCm library still runs ROCm (ds4go's transition rule).
+func backendLabel(b ds4.Backend, lib *ds4.Library) string {
+	if b == ds4.BackendCUDA && lib.GPUFlavor() == ds4.GPUFlavorROCm {
+		return ds4.BackendROCm.String()
 	}
+	return b.String()
 }
 
 // resolveMTP maps the --mtp flag to an MTP model path: "none" disables MTP,
@@ -145,9 +144,12 @@ type App struct {
 	Flags      *Flags
 	Lib        *ds4.Library      // nil in no-engine mode
 	EngineOpts ds4.EngineOptions // MTP resolved, ApplyMTPDefaults applied
-	ModelInfo  *ds4.ModelInfo    // catalog identity behind ModelPath; nil when not catalog-managed
-	Logger     *log.Logger       // writes to <app>.log
-	LogBuf     *ds4log.Buffer    // libds4 diagnostics ring; teed to the log file with --debug
+	// BackendName is the backend libds4 will run, as the loaded library names
+	// it ("rocm" for a ROCm build's shared CUDA slot), for display.
+	BackendName string
+	ModelInfo   *ds4.ModelInfo // catalog identity behind ModelPath; nil when not catalog-managed
+	Logger      *log.Logger    // writes to <app>.log
+	LogBuf      *ds4log.Buffer // libds4 diagnostics ring; teed to the log file with --debug
 
 	logf   *os.File
 	logCap io.Closer
@@ -171,9 +173,12 @@ func Bootstrap(f *Flags, opts ...Option) (*App, error) {
 	if modelPath == "" {
 		modelPath = ds4.DefaultModelPath()
 	}
+	backend, autoBackend, err := parseBackend(f.Backend)
+	if err != nil {
+		return nil, err
+	}
 	needEngine := !cfg.noEngine
 	if needEngine {
-		var err error
 		modelPath, err = resolveStartupModel(f.Model, cfg.allowModelSelection)
 		if err != nil {
 			return nil, err
@@ -200,6 +205,15 @@ func Bootstrap(f *Flags, opts ...Option) (*App, error) {
 		}
 		ds4.SetDefaultLibrary(lib)
 	}
+	if autoBackend {
+		// The library's own flavor tells ROCm from CUDA; the host guess
+		// is only for no-engine mode.
+		if lib != nil {
+			backend = ds4.DetectLibraryBackend(lib)
+		} else {
+			backend = ds4.DetectDefaultBackend(f.Lib)
+		}
+	}
 
 	// Capture libds4's diagnostic stream into the in-memory ring BEFORE any
 	// engine work happens — the GPU startup banner lands in the apps' log
@@ -209,23 +223,42 @@ func Bootstrap(f *Flags, opts ...Option) (*App, error) {
 		logBuf.SetTee(logf)
 	}
 	app := &App{
-		Name:   f.app,
-		Flags:  f,
-		Lib:    lib,
-		Logger: logger,
-		LogBuf: logBuf,
-		logf:   logf,
+		Name:        f.app,
+		Flags:       f,
+		Lib:         lib,
+		BackendName: backendLabel(backend, lib),
+		Logger:      logger,
+		LogBuf:      logBuf,
+		logf:        logf,
 	}
 	if logCap, err := ds4.CaptureStderr(logBuf); err != nil {
 		logger.Printf("warn: ds4.CaptureStderr: %v", err)
 	} else {
 		app.logCap = logCap
 	}
+	// ds4go reports the CUDA-on-ROCm deprecation once per library through
+	// the standard logger; route it to the log file and overlay instead of
+	// the terminal the TUI is about to take over. Load already ran the
+	// ROCm GPU-architecture check.
+	if lib != nil {
+		var w io.Writer = logBuf // --debug already tees logBuf to logf
+		if !f.Debug {
+			w = io.MultiWriter(logf, logBuf)
+		}
+		prev := log.Writer()
+		log.SetOutput(w)
+		err := lib.CheckBackend(backend)
+		log.SetOutput(prev)
+		if err != nil {
+			app.Close(err)
+			return nil, err
+		}
+	}
 
 	app.EngineOpts = ds4.EngineOptions{
 		ModelPath:    modelPath,
 		MTPPath:      resolveMTP(f.MTP),
-		Backend:      selectBackend(f.Backend, f.Lib),
+		Backend:      backend,
 		WarmWeights:  true,
 		PowerPercent: f.Power,
 		SSDStreaming: f.SSDStreaming,
@@ -243,7 +276,7 @@ func Bootstrap(f *Flags, opts ...Option) (*App, error) {
 	}
 
 	logger.Printf("=== %s start  model=%s backend=%s ctx=%d debug=%v ssd-streaming=%v ===",
-		f.app, modelLabel, backendName(app.EngineOpts.Backend), f.Ctx, f.Debug, f.SSDStreaming)
+		f.app, modelLabel, app.BackendName, f.Ctx, f.Debug, f.SSDStreaming)
 	return app, nil
 }
 

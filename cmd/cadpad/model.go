@@ -250,7 +250,7 @@ func newModel(app *appinit.App) model {
 	engOpts := app.EngineOpts
 	ctxSize := app.Flags.Ctx
 	modelPath := app.EngineOpts.ModelPath
-	backend := app.Flags.Backend
+	backend := app.BackendName
 	logger := app.Logger
 	logBuf := app.LogBuf
 	debug := app.Flags.Debug

@@ -37,6 +37,7 @@ type CLIConfig struct {
 	Ctx             int
 	Metal           bool
 	CUDA            bool
+	ROCm            bool
 	CPU             bool
 	Backend         string
 	Threads         int
@@ -90,8 +91,9 @@ func RegisterCLI(fs *pflag.FlagSet) *CLIConfig {
 	fs.IntVarP(&c.Ctx, "ctx", "c", 32768, "context size allocated for the session")
 	fs.BoolVar(&c.Metal, "metal", false, "use the Metal graph backend")
 	fs.BoolVar(&c.CUDA, "cuda", false, "use the CUDA graph backend")
+	fs.BoolVar(&c.ROCm, "rocm", false, "use the ROCm graph backend (a ROCm build of libds4)")
 	fs.BoolVar(&c.CPU, "cpu", false, "use the CPU reference/debug backend")
-	fs.StringVar(&c.Backend, "backend", "", "select backend explicitly: metal, cuda, or cpu")
+	fs.StringVar(&c.Backend, "backend", "", "select backend explicitly: metal, cuda, rocm, or cpu")
 	fs.IntVarP(&c.Threads, "threads", "t", 0, "CPU helper threads for host-side or reference work")
 	fs.BoolVar(&c.Quality, "quality", false, "prefer exact kernels where faster approximate paths exist")
 	fs.StringVar(&c.DirSteeringFile, "dir-steering-file", "", "load one f32 direction vector per layer for directional steering")
@@ -133,7 +135,7 @@ func RegisterCLI(fs *pflag.FlagSet) *CLIConfig {
 // SelectBackend resolves the backend from --metal/--cuda/--cpu/--backend,
 // defaulting to the dynamically detected backend of the library.
 func (c *CLIConfig) SelectBackend() ds4.Backend {
-	return selectBackend(c.Metal, c.CUDA, c.CPU, c.Backend, c.Lib)
+	return selectBackend(c.Metal, c.CUDA, c.ROCm, c.CPU, c.Backend, c.Lib)
 }
 
 // ThinkMode resolves the thinking mode from --think/--think-max/--nothink.
@@ -232,6 +234,7 @@ type ServerConfig struct {
 	WarmWeights     bool
 	Metal           bool
 	CUDA            bool
+	ROCm            bool
 	CPU             bool
 	Backend         string
 
@@ -276,8 +279,9 @@ func RegisterServer(fs *pflag.FlagSet) *ServerConfig {
 	fs.BoolVar(&c.WarmWeights, "warm-weights", false, "touch mapped tensor pages before serving")
 	fs.BoolVar(&c.Metal, "metal", false, "use the Metal graph backend")
 	fs.BoolVar(&c.CUDA, "cuda", false, "use the CUDA graph backend")
+	fs.BoolVar(&c.ROCm, "rocm", false, "use the ROCm graph backend (a ROCm build of libds4)")
 	fs.BoolVar(&c.CPU, "cpu", false, "use the CPU reference/debug backend")
-	fs.StringVar(&c.Backend, "backend", "", "select backend explicitly: metal, cuda, or cpu")
+	fs.StringVar(&c.Backend, "backend", "", "select backend explicitly: metal, cuda, rocm, or cpu")
 
 	// HTTP API.
 	fs.StringVar(&c.Host, "host", "127.0.0.1", "bind address")
@@ -303,7 +307,7 @@ func RegisterServer(fs *pflag.FlagSet) *ServerConfig {
 // SelectBackend resolves the backend from --metal/--cuda/--cpu/--backend,
 // defaulting to the dynamically detected backend of the library.
 func (c *ServerConfig) SelectBackend() ds4.Backend {
-	return selectBackend(c.Metal, c.CUDA, c.CPU, c.Backend, c.Lib)
+	return selectBackend(c.Metal, c.CUDA, c.ROCm, c.CPU, c.Backend, c.Lib)
 }
 
 // EngineOptions builds ds4.EngineOptions from the parsed flags.
@@ -337,12 +341,14 @@ func (c *ServerConfig) EngineOptions() ds4.EngineOptions {
 // Addr returns the host:port listen address.
 func (c *ServerConfig) Addr() string { return fmt.Sprintf("%s:%d", c.Host, c.Port) }
 
-func selectBackend(metal, cuda, cpu bool, name string, libPath string) ds4.Backend {
+func selectBackend(metal, cuda, rocm, cpu bool, name string, libPath string) ds4.Backend {
 	switch {
 	case cpu:
 		return ds4.BackendCPU
 	case cuda:
 		return ds4.BackendCUDA
+	case rocm:
+		return ds4.BackendROCm
 	case metal:
 		return ds4.BackendMetal
 	}
@@ -351,6 +357,8 @@ func selectBackend(metal, cuda, cpu bool, name string, libPath string) ds4.Backe
 		return ds4.BackendCPU
 	case "cuda":
 		return ds4.BackendCUDA
+	case "rocm":
+		return ds4.BackendROCm
 	case "metal":
 		return ds4.BackendMetal
 	default:

@@ -7,7 +7,7 @@ require (
 	charm.land/bubbletea/v2 v2.0.10
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/76creates/stickers v1.5.0
-	github.com/NimbleMarkets/ds4go v0.8.0
+	github.com/NimbleMarkets/ds4go v0.8.1-0.20261005001301-20bfb39f66d8
 	github.com/NimbleMarkets/ntcharts-svg v0.3.0
 	github.com/NimbleMarkets/ntcharts/v2 v2.6.0
 	github.com/NimbleMarkets/ntdiff v0.0.1

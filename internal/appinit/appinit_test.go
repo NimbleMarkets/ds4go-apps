@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	ds4 "github.com/NimbleMarkets/ds4go"
+	"github.com/NimbleMarkets/ds4go/ds4api"
 	"github.com/spf13/pflag"
 )
 
@@ -58,19 +59,48 @@ func TestRegisterFlagsParse(t *testing.T) {
 	}
 }
 
-func TestSelectBackendExplicit(t *testing.T) {
+func TestParseBackend(t *testing.T) {
 	cases := map[string]ds4.Backend{
 		"cpu":   ds4.BackendCPU,
 		"cuda":  ds4.BackendCUDA,
+		"ROCm":  ds4.BackendROCm,
 		"metal": ds4.BackendMetal,
 	}
 	for name, want := range cases {
-		if got := selectBackend(name, ""); got != want {
-			t.Errorf("selectBackend(%q) = %v, want %v", name, got, want)
+		if got, auto, err := parseBackend(name); err != nil || auto || got != want {
+			t.Errorf("parseBackend(%q) = %v, %v, %v; want %v", name, got, auto, err, want)
 		}
 	}
-	// Empty/unknown names take the ds4.DetectDefaultBackend path; not
-	// exercised here to avoid requiring a local libds4.
+	for _, name := range []string{"", "auto"} {
+		if _, auto, err := parseBackend(name); err != nil || !auto {
+			t.Errorf("parseBackend(%q) should defer to detection", name)
+		}
+	}
+	// A typo must not silently fall back to auto-detection.
+	if _, _, err := parseBackend("hip"); err == nil {
+		t.Error(`parseBackend("hip") accepted an unknown backend`)
+	}
+}
+
+func TestBackendLabel(t *testing.T) {
+	for b, want := range map[ds4.Backend]string{ds4.BackendROCm: "rocm", ds4.BackendCUDA: "cuda", ds4.BackendCPU: "cpu"} {
+		if got := backendLabel(b, nil); got != want {
+			t.Errorf("backendLabel(%v, nil) = %q, want %q", b, got, want)
+		}
+	}
+	// Explicit cuda on a ROCm build still runs ROCm; show what runs.
+	lib, ctl := ds4api.NewMockLibraryWithControls()
+	ctl.SetGPUFlavor(ds4.GPUFlavorROCm)
+	if got := backendLabel(ds4.BackendCUDA, lib); got != "rocm" {
+		t.Errorf("backendLabel(cuda, rocm lib) = %q, want rocm", got)
+	}
+}
+
+func TestBootstrapRejectsUnknownBackend(t *testing.T) {
+	_, err := Bootstrap(&Flags{app: "testapp", Power: 100, Backend: "hip"}, WithoutEngine(true))
+	if err == nil || !strings.Contains(err.Error(), "unknown --backend") {
+		t.Fatalf("Bootstrap accepted --backend hip: %v", err)
+	}
 }
 
 func TestResolveMTP(t *testing.T) {
