@@ -46,9 +46,34 @@ These apps use ds4go v0.9.0 (including its distinct ROCm backend), which matches
 
 ---
 
+## Install without cloning
+
+With Go 1.26.8 or newer, run an app straight from the module proxy:
+
+```bash
+go run github.com/NimbleMarkets/ds4go-apps/cmd/glyphpad@latest --backend metal
+```
+
+or install it to `$(go env GOPATH)/bin`:
+
+```bash
+go install github.com/NimbleMarkets/ds4go-apps/cmd/glyphpad@latest
+glyphpad --backend metal
+```
+
+The other apps are `svgpad`, `cadpad`, `trippad` and `steering`. `go install` names each binary after its directory (`glyphpad`), not `ds4go-glyphpad` as `task build` does. On Linux, set `CGO_ENABLED=0` and add `-tags=nofakecgo`, which the Taskfile otherwise does for you:
+
+```bash
+CGO_ENABLED=0 go install -tags=nofakecgo github.com/NimbleMarkets/ds4go-apps/cmd/cadpad@latest
+```
+
+You still need libds4 and a model; see [Requirements](#requirements). Use `@main` instead of `@latest` for unreleased changes.
+
+---
+
 ## Build
 
-The module builds against the pinned ds4go commit and the published ntcharts release, both fetched through the Go module proxy. No workspace or local checkouts are needed.
+The module builds against the released ds4go and ntcharts versions, both fetched through the Go module proxy. No workspace or local checkouts are needed.
 
 ```bash
 task build              # all apps
