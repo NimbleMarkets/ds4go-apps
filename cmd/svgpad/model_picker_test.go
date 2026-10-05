@@ -12,6 +12,7 @@ import (
 	ds4 "github.com/NimbleMarkets/ds4go"
 	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
 	"github.com/NimbleMarkets/ds4go-apps/internal/modelpicker"
+	"github.com/NimbleMarkets/ds4go-apps/internal/padui"
 	"github.com/NimbleMarkets/ds4go/ds4api"
 )
 
@@ -121,7 +122,7 @@ func TestSwitchEngineLifecyclePreservesDraftOnSuccessAndFailure(t *testing.T) {
 		}
 		batch := cmd().(tea.BatchMsg)
 		m = update(t, m, batch[1]())
-		if m.spinnerFrame != 1 || m.switchStarted.IsZero() {
+		if !m.loading.Active || m.loading.Frame != 1 {
 			t.Fatal("switch animation did not start")
 		}
 		ready := batch[0]().(engineReadyMsg)
@@ -132,8 +133,8 @@ func TestSwitchEngineLifecyclePreservesDraftOnSuccessAndFailure(t *testing.T) {
 			t.Fatal("old session still open")
 		}
 		m = update(t, m, ready)
-		m = update(t, m, switchSpinnerTickMsg{started: m.switchStarted})
-		if m.spinnerFrame != 1 {
+		m = update(t, m, padui.LoadingTick{Epoch: m.loading.Epoch})
+		if m.loading.Active || m.loading.Frame != 1 {
 			t.Fatal("switch animation continued after engine finished")
 		}
 		if m.switchingModel || m.generating || m.modelInfo.Alias != "glm53-q2" {

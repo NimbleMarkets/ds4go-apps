@@ -28,6 +28,7 @@ import (
 	"github.com/NimbleMarkets/ds4go-apps/internal/engineinit"
 	"github.com/NimbleMarkets/ds4go-apps/internal/headerbar"
 	"github.com/NimbleMarkets/ds4go-apps/internal/modelpicker"
+	"github.com/NimbleMarkets/ds4go-apps/internal/padui"
 	svg "github.com/NimbleMarkets/ntcharts-svg/svg"
 	"github.com/NimbleMarkets/ntcharts/v2/picture"
 	"github.com/charmbracelet/x/ansi"
@@ -223,7 +224,7 @@ type model struct {
 	switchingModel, releasingEngine, quitAfterSwitch bool
 	forceQuit                                        bool // second Ctrl+C during a load; see appinit.ForceExit
 	resumeDraft, mtpEnabled                          bool
-	switchStarted                                    time.Time
+	loading                                          padui.Loading // any engine open: switch, resume, or lazy first submit
 
 	width, height int
 
@@ -775,7 +776,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// engineReadyMsg handler will start generation when ready.
 				// Leave m.input alone so the user can still edit/abandon.
 				m.statusText = "opening engine…"
-				cmds = append(cmds, openEngineCmd(m.lib, m.engOpts, m.ctxSize))
+				cmds = append(cmds, openEngineCmd(m.lib, m.engOpts, m.ctxSize), m.loading.Start())
 			case actionNone:
 				// Already Opening — submit is queued.
 				m.statusText = "opening engine… (will submit when ready)"
@@ -936,11 +937,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.resumeDraft && m.engine == nil {
 				m.switchingModel = true
-				m.switchStarted = time.Now()
-				m.spinnerFrame = 0
 				m.lifecycle = engineLifecycle{status: engineinit.StatusOpening}
 				m.statusText = "Opening engine to resume draft…"
-				return m, tea.Batch(openEngineCmd(m.lib, m.engOpts, m.ctxSize), switchSpinnerTick(m.switchStarted))
+				return m, tea.Batch(openEngineCmd(m.lib, m.engOpts, m.ctxSize), m.loading.Start())
 			}
 			m.captureRequestReasoning()
 			isTruncated := m.resumeDraft
@@ -1225,6 +1224,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case engineReadyMsg:
 		m.switchingModel = false
+		m.loading.Active = false
 		if msg.Err != nil {
 			m.lifecycle, _ = m.lifecycle.onEngineOpened(false)
 			m.engineErr = msg.Err
@@ -1304,7 +1304,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, func() tea.Msg { return submitMsg{m.oneShot.Prompt} }
 		case actionOpen:
 			m.statusText = "opening engine…"
-			return m, openEngineCmd(m.lib, m.engOpts, m.ctxSize)
+			return m, tea.Batch(openEngineCmd(m.lib, m.engOpts, m.ctxSize), m.loading.Start())
 		}
 		return m, nil
 
@@ -1371,11 +1371,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tokenCount++
 		cmds = append(cmds, m.gen.Wait())
 
-	case switchSpinnerTickMsg:
-		if m.switchingModel && msg.started.Equal(m.switchStarted) {
-			m.spinnerFrame++
-			cmds = append(cmds, switchSpinnerTick(m.switchStarted))
-		}
+	case padui.LoadingTick:
+		cmds = append(cmds, m.loading.Update(msg))
 
 	case bubble.SpinnerTickMsg:
 		if m.generating {
@@ -2360,11 +2357,8 @@ func (m model) render() string {
 	}
 	status := m.statusText
 	metrics := m.headerMetrics()
-	if m.switchingModel {
-		status = m.bicycleSpinner() + " " + m.statusText
-		if !m.switchStarted.IsZero() {
-			status += " " + fmtDuration(time.Since(m.switchStarted))
-		}
+	if m.loading.Active {
+		status = m.loading.View()
 		metrics = ""
 	} else if m.errText != "" {
 		cleanErr := strings.ReplaceAll(m.errText, "\n", " | ")
@@ -2631,13 +2625,10 @@ func (m model) bicycleSpinner() string {
 	left := strings.Repeat(" ", p)
 	right := strings.Repeat(" ", track-p)
 	spinner := "[" + left + bike + right + "]"
-	// Bright background so the emojis pop on dark terminals.
-	background := "220" // yellow while generating
-	if m.switchingModel {
-		background = "75"
-	} // blue while loading a model
+	// Bright background so the emojis pop on dark terminals; yellow while
+	// generating (padui.Loading uses blue while loading a model).
 	return lipgloss.NewStyle().
-		Background(lipgloss.Color(background)).
+		Background(lipgloss.Color("220")).
 		Foreground(lipgloss.Color("0")).
 		Bold(true).
 		Render(spinner)

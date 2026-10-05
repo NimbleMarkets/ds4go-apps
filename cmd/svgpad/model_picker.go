@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
 	ds4 "github.com/NimbleMarkets/ds4go"
@@ -12,12 +11,6 @@ import (
 )
 
 type startupModelSelectionMsg struct{}
-
-type switchSpinnerTickMsg struct{ started time.Time }
-
-func switchSpinnerTick(started time.Time) tea.Cmd {
-	return tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg { return switchSpinnerTickMsg{started: started} })
-}
 
 func (m model) needsVisionModelSelection() bool {
 	return m.visual.Mode == "on" && (m.modelPath == "" || m.engOpts.VisionPath == "" ||
@@ -92,12 +85,10 @@ func (m model) switchModel(info ds4.ModelInfo) (tea.Model, tea.Cmd) {
 	m.roundCallStart = len(m.toolCalls)
 	m.yoloMode = false
 	m.switchingModel = true
-	m.switchStarted = time.Now()
-	m.spinnerFrame = 0
 	m.lifecycle = engineLifecycle{status: engineinit.StatusOpening}
 	m.statusText = "Switching to " + info.Alias + "…"
 	m.logger.Printf("[MODEL] switching to=%s vision=%s ssd-streaming=%v", info.Alias, opts.VisionPath, opts.SSDStreaming)
-	return m, tea.Batch(switchEngineCmd(eng, sess, m.lib, opts, m.ctxSize), switchSpinnerTick(m.switchStarted))
+	return m, tea.Batch(switchEngineCmd(eng, sess, m.lib, opts, m.ctxSize), m.loading.Start())
 }
 
 // One command owns the entire transition: close session, close engine, then

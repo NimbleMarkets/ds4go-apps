@@ -270,3 +270,21 @@ func TestQuitWaitsForLazyOpenThenForces(t *testing.T) {
 		t.Fatal("deferred quit lost after the lazy open finished")
 	}
 }
+
+func TestLazyOpenShowsLoadingTimer(t *testing.T) {
+	m := navigationModel()
+	m.height = 40
+	m.lifecycle = engineLifecycle{status: engineinit.StatusDormant}
+	m.input.SetValue("draw a pelican")
+	m = update(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.lifecycle.status != engineinit.StatusOpening || !m.loading.Active {
+		t.Fatal("lazy open did not start the loading timer")
+	}
+	if !strings.Contains(m.View().Content, "loading 0s") {
+		t.Fatal("header does not show the loading timer")
+	}
+	m = update(t, m, engineReadyMsg{Err: context.Canceled})
+	if m.loading.Active {
+		t.Fatal("loading timer still running after the open finished")
+	}
+}
